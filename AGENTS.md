@@ -184,6 +184,7 @@ python tests/peer_gate.py       # 多插件收尾礼让
 python tests/smoke_asar.py      # 合成 asar 夹具，绝不碰真实安装目录
 python tests/install_remove.py  # 卸载异常边界
 node tests/observe_smoke.mjs    # 渲染端 observer 冒烟
+python tests/report_session_diag.py  # 报告会话桶/补页明细的边界（旧样本、回退、关闭、坏行）
 node tests/update_check.mjs     # 主进程检查更新：白名单/重定向/版本比较/体积上限（不联网）
 node tests/log_budget.mjs       # 主进程日志预算：超限删最旧/保留活动文件/14 天清理（假 fs，不写盘）
 ```
