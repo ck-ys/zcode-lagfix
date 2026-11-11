@@ -280,16 +280,16 @@
       <div class="meta">
         <span class="chip">证据 <b>observe-20261111.jsonl</b></span>
         <span class="chip">样本 <b>30 个采集周期</b></span>
-        <span class="chip">状态 <b>待拍板</b></span>
+        <span class="chip">状态 <b style="color:#7ee787">已拍板 2026-11-11</b></span>
         <span class="chip">目标 <b>滚动时 P95 &lt; 80ms</b></span>
       </div>
     </div>
     <aside class="hero-side">
-      <div class="verdict-box">
-        <div class="big">先把“滚动补页”与“长轮挂载”拆开量，再决定要不要降载。</div>
-        <p>不建议直接上“滚动时隐藏工具卡”这类会改变阅读内容的方案；优先做可回退的补页节流与观测，再用同一套滚动脚本复测。</p>
+      <div class="verdict-box" style="background:rgba(63,185,80,.07);border-color:rgba(63,185,80,.25)">
+        <div class="big">已拍板：路线 A（O1 + O2）、A8 角标常驻、A9 面板重排、O1b 输入延迟。</div>
+        <p>功能项均默认开启、可单独关闭；O3/O4/O5 另开分支实验，不进 v0.3.1。详见第 05、08、09、10、11、12 节。</p>
       </div>
-      <div class="version-line">当前发布：v0.3.0 · 2026-11-11<br>文档：docs/decisions/v0.3.1-scroll-lag.html</div>
+      <div class="version-line">当前发布：v0.3.0 · 拍板 2026-11-11<br>文档：docs/decisions/v0.3.1-scroll-lag.html</div>
     </aside>
   </header>
 
@@ -472,7 +472,7 @@
       <label class="option recommend" data-key="obs">
         <input type="checkbox" checked />
         <div>
-          <div class="head"><h4>O1 · 滚动窗口观测</h4><span class="tag green">推荐 · v0.3.1</span></div>
+          <div class="head"><h4>O1 · 滚动窗口观测</h4><span class="tag green">已拍板 · v0.3.1 · 默认开</span></div>
           <p>新增滚动场景指标：<code>scrollP95</code>（只统计最近 200ms 内有滚动的帧，避免被空闲帧稀释）、滚动事件/秒、<code>loadOlder</code> 调用次数与耗时、DOM 突变次数、当前挂载 turn 数与单轮节点数、最长任务归因。只读，不改任何行为。</p>
           <ul>
             <li>注入点：监听滚动容器与 store <code>loadOlder</code> 包装；只计数，不拦截。</li>
@@ -485,7 +485,7 @@
       <label class="option recommend" data-key="mask">
         <input type="checkbox" checked />
         <div>
-          <div class="head"><h4>O2 · 滚动期关闭消息层遮罩</h4><span class="tag green">推荐 · 先 A/B</span></div>
+          <div class="head"><h4>O2 · 滚动期关闭消息层遮罩</h4><span class="tag green">已拍板 · v0.3.1 · 默认开</span></div>
           <p>宿主每个 scroll 事件都会同步重写消息层的 6 个 mask 样式（<code>maskImage</code> / <code>maskPosition</code> / <code>maskSize</code> 各两套），而 mask 作用在包含全部消息的整层上。滚动期用 CSS 临时置 <code>none</code>，停止 180ms 后恢复；只影响绘制，不改布局、DOM、数据。</p>
           <ul>
             <li>注入点：<code>[data-v4-timeline-scroll]</code> 加类 + CSS 命中 <code>[data-v4-timeline-message-layer]</code>；不改 React 树。</li>
@@ -569,7 +569,7 @@
   <section>
     <div class="sec-head">
       <h2>05 · 路线拍板</h2>
-      <p>三选一；推荐 A。选定后按对应范围进入实现与验收。</p>
+      <p>三选一；已选定 A（2026-11-11 拍板）。</p>
     </div>
     <div class="route" id="routes">
       <label class="checked" data-route="A">
@@ -645,10 +645,243 @@
     </div>
   </section>
 
+  <section>
+    <div class="sec-head">
+      <h2>08 · 追加拍板（2026-11-11）</h2>
+      <p>实现开始前的补充决定，与上面已拍板的 O1/O2 一起构成 v0.3.1 的完整范围。</p>
+    </div>
+    <div class="grid-2">
+      <label class="option recommend checked">
+        <input type="checkbox" checked disabled />
+        <div>
+          <div class="head"><h4>A8 · 角标常驻显示（去掉「显示角标」开关）</h4><span class="tag green">已拍板 · v0.3.1</span></div>
+          <p>v0.3.0 面板「状态条」页的「显示角标」开关允许把角标完全隐藏。虽然保留了 Ctrl+Alt+L 与控制台 <code>__lagfixSettings()</code> 两个备用入口，但普通用户不知道它们存在——隐藏之后等于把自己锁在设置外面。v0.3.1 起去掉该开关：<b>角标常驻显示</b>（设置页、被浮层遮挡、无可用输入框时的自动隐藏是布局让位，不属于用户开关）。</p>
+          <ul>
+            <li>已保存 <code>badgeVisible:false</code> 的用户升级后角标自动回来（旧值直接忽略，无迁移）。</li>
+            <li>Ctrl+Alt+L（Mac：Cmd+Alt+L）与 <code>__lagfixSettings()</code> 保留为兜底入口（角标被设置页盖住时仍能进）。</li>
+            <li>「角标文字」「角标内容」两行不受影响，仍可把角标缩成一个小圆点。</li>
+          </ul>
+          <div class="kv"><span><b>理由</b> 隐藏后找不到设置入口</span><span><b>风险</b> 低</span><span><b>回退</b> 恢复该行代码</span></div>
+        </div>
+      </label>
+      <label class="option recommend checked">
+        <input type="checkbox" checked disabled />
+        <div>
+          <div class="head"><h4>O1 / O2 默认值与验收口径</h4><span class="tag green">已拍板 · 随 Route A</span></div>
+          <p>两项新增设置均<b>默认开启、可单独关闭</b>，关闭后行为逐字回到 v0.3.0：</p>
+          <ul>
+            <li><code>scrollDiagOn</code>（观测页「滚动诊断」）：只读采集，不改滚动行为；关闭时 collect 的 <code>scroll</code> 字段为 <code>null</code>，不做额外 DOM 扫描。</li>
+            <li><code>maskOffOnScroll</code>（修复页「滚动期关闭消息层遮罩」）：滚动时给 <code>documentElement</code> 加 <code>data-lagfix-scroll="1"</code>，停止 180ms 后移除；CSS 只覆盖消息层的 <code>mask-image</code>。</li>
+            <li>验收沿用第 06 节门槛：滚动 P95 ≤80ms（目标 ≤60ms）、3s 长任务 ≤6、单次最长 ≤150ms（底线 250ms）、DOM 峰值 &lt;6000、顶部空白 &lt;300ms、锚点漂移 ≤48px。</li>
+          </ul>
+          <div class="kv"><span><b>明确不做</b> O3/O4/O5/O6/O7</span><span><b>不改</b> 消息/会话/工具卡内容</span></div>
+        </div>
+      </label>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>09 · 设置面板信息架构重排（A9）</h2>
+      <p>现有四个分类里「修复」是动词、「变黄/变红阈值」用颜色命名，都不够专业；本节给出 before → after 对照，逐条可否决。</p>
+    </div>
+
+    <div class="callout" style="border-color:rgba(210,153,34,.3);background:rgba(210,153,34,.055)">
+      <div class="icon" style="background:rgba(210,153,34,.14);color:#e3b341">!</div>
+      <p><b>为什么要改：</b>「修复」暗示插件坏了在打补丁，实际是主动的性能优化；「变黄阈值 / 变红阈值」把颜色写进名字，用户换主题或调色后语义就错位；「自适应窗口 / 切会话冷静期 / 后台降频」三个名字各自用了不同的比喻，凑在一起读不出是一组。重排后<b>分类全是名词、每项名字说清"做什么"、颜色只出现在副标题里</b>。功能与默认值一律不变。</p>
+    </div>
+
+    <div class="grid-2" style="margin-top:14px">
+      <article class="card">
+        <h3>分类（左侧导航）</h3>
+        <table>
+          <thead><tr><th>现在</th><th>改为</th><th>理由</th></tr></thead>
+          <tbody>
+            <tr><td>状态条</td><td><b>状态条</b></td><td>保持不变，与 README 用词一致</td></tr>
+            <tr><td>观测</td><td><b>观测</b></td><td>保持不变</td></tr>
+            <tr><td><span class="tag red">修复</span></td><td><b>性能</b></td><td>「修复」是动词且暗示缺陷；这些项是主动优化，不是修 bug</td></tr>
+            <tr><td>维护</td><td><b>维护</b></td><td>保持不变</td></tr>
+          </tbody>
+        </table>
+      </article>
+      <article class="card">
+        <h3>状态条页</h3>
+        <table>
+          <thead><tr><th>现在</th><th>改为</th><th>备注</th></tr></thead>
+          <tbody>
+            <tr><td><span class="tag red">显示角标</span></td><td><b>整行删除</b></td><td>A8：角标常驻，不再给"把自己锁在外面"的开关</td></tr>
+            <tr><td>角标文字</td><td><b>显示文字</b></td><td>去掉重复的"角标"前缀（分类已经叫状态条）</td></tr>
+            <tr><td>角标内容</td><td><b>信息量</b></td><td>取值仍是 简洁 / 详细，但名字直接说"显示多少"</td></tr>
+            <tr><td><span class="tag red">变黄阈值</span></td><td><b>警告阈值</b></td><td>颜色移到副标题「超过它标黄」；换主题不影响语义</td></tr>
+            <tr><td><span class="tag red">变红阈值</span></td><td><b>严重阈值</b></td><td>同上，副标题写「超过它标红」</td></tr>
+          </tbody>
+        </table>
+      </article>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h3>性能页（原「修复」页）</h3>
+      <p class="small muted" style="margin:0 0 12px">按「渲染 → 历史 → 滚动」三组排列；每组一行小标题，组内按影响面从大到小。四个依赖节流的开关仍然在节流关闭时整行变灰。</p>
+      <table>
+        <thead><tr><th>分组</th><th>现在</th><th>改为</th><th>副标题（用户看到的说明）</th></tr></thead>
+        <tbody>
+          <tr><td rowspan="5"><b>渲染</b></td><td>订阅通知节流</td><td><b>渲染节流</b></td><td>合并宿主的高频通知，同一窗口内只重绘一次</td></tr>
+          <tr><td>节流窗口</td><td><b>最短刷新间隔</b></td><td>两次重绘至少间隔多久；越大越省 CPU，画面越迟</td></tr>
+          <tr><td>自适应窗口</td><td><b>卡顿时自动放宽</b></td><td>帧变差时把间隔临时加到 200–300ms，恢复后回落</td></tr>
+          <tr><td>切会话冷静期</td><td><b>切换会话保护</b></td><td>切换后 10 秒内放宽刷新，避让首屏挂载</td></tr>
+          <tr><td>后台降频</td><td><b>后台限制刷新</b></td><td>窗口不可见时最多每秒重绘一次，回前台立即追上</td></tr>
+          <tr><td><b>历史</b></td><td>大会话保护</td><td><b>大历史会话保护</b></td><td>超过 800 行的会话不再一次性补拉全部历史</td></tr>
+          <tr><td><b>滚动</b></td><td><span class="tag green">新增</span></td><td><b>滚动期隐藏遮罩</b></td><td>滚动时去掉消息层上下渐隐，停止 180ms 后恢复（O2）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="grid-2" style="margin-top:14px">
+      <article class="card">
+        <h3>观测页</h3>
+        <table>
+          <thead><tr><th>现在</th><th>改为</th><th>备注</th></tr></thead>
+          <tbody>
+            <tr><td>开启观测</td><td><b>开启观测</b></td><td>保持不变</td></tr>
+            <tr><td>采集间隔</td><td><b>采集间隔</b></td><td>保持不变</td></tr>
+            <tr><td><span class="tag green">新增</span></td><td><b>滚动诊断</b></td><td>滚动帧 P95、补页次数/耗时、挂载轮数、DOM 峰值（O1）</td></tr>
+            <tr><td><span class="tag green">新增</span></td><td><b>输入延迟</b></td><td>按键到下一帧的间隔；只统计输入框内的按键（O1b）</td></tr>
+          </tbody>
+        </table>
+      </article>
+      <article class="card">
+        <h3>新面板骨架（示意）</h3>
+        <pre class="mono small" style="margin:0;padding:12px;border-radius:8px;background:rgba(0,0,0,.28);color:#9fb0c6;line-height:1.75;overflow:auto">┌ zcode-lagfix 设置        v0.3.1 ×┐
+│ 状态条 │ 显示文字      [开关]      │
+│ 观测   │ 信息量     [简洁|详细]    │
+│ 性能 ◀ │ 警告阈值      [ 50 ] ms   │
+│ 维护   │ 严重阈值     [ 100 ] ms   │
+│        │                           │
+│        │ ── 渲染 ──                │
+│        │ 渲染节流      [开关]       │
+│        │ 最短刷新间隔  [ 120 ] ms   │
+│        │ 卡顿时自动放宽 [开关]      │
+│        │ 切换会话保护  [开关]       │
+│        │ 后台限制刷新  [开关]       │
+│        │ ── 历史 ──                │
+│        │ 大历史会话保护 [开关]      │
+│        │ ── 滚动 ──                │
+│        │ 滚动期隐藏遮罩 [开关]      │
+└───────────────────────────────────┘</pre>
+      </article>
+    </div>
+
+    <div class="card" style="margin-top:14px;padding:6px 18px">
+      <table class="accept-table">
+        <thead><tr><th>改动</th><th>是否影响行为</th><th>验收方式</th></tr></thead>
+        <tbody>
+          <tr><td data-label="改动"><b>分类与行名重排</b></td><td data-label="是否影响行为">不影响。只改文案与分组顺序</td><td data-label="验收方式">冒烟测试断言新名字出现、旧名字消失；开关读写同一批 <code>settings</code> 字段</td></tr>
+          <tr><td data-label="改动"><b>删除「显示角标」</b></td><td data-label="是否影响行为">行为变化：角标无法再被用户隐藏</td><td data-label="验收方式">旧 localStorage 里 <code>badgeVisible:false</code> 时角标仍显示；面板找不到该行</td></tr>
+          <tr><td data-label="改动"><b>「!」影响说明</b></td><td data-label="是否影响行为">保留全部原有说明，措辞跟着新名字走</td><td data-label="验收方式">每行仍有「影响 / 不影响」两段</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>10 · 实现细节确认（6 个坑）</h2>
+      <p>实现前逐个定好，避免上线后才发现观测器自己制造长任务、或选择器失效却看不见。</p>
+    </div>
+    <div class="card" style="padding:6px 18px">
+      <table class="accept-table">
+        <thead><tr><th>#</th><th>坑</th><th>处理</th></tr></thead>
+        <tbody>
+          <tr><td data-label="#"><b>1</b></td><td data-label="坑">宿主写的是<b>内联</b> <code>style.maskImage</code>（无 <code>!important</code>）</td><td data-label="处理">作者的 <code>!important</code> 样式表规则能盖住普通内联声明，所以 O2 现在有效。<b>但宿主一旦改成带 important 的内联，O2 会静默失效</b>——在 spec 与代码注释里写明这个前提，不加兜底分支。</td></tr>
+          <tr><td data-label="#"><b>2</b></td><td data-label="坑">每个 scroll 事件都 <code>clearTimeout</code> + <code>setTimeout</code></td><td data-label="处理">60Hz 滚动等于每秒重建 60 次定时器。改成记录 deadline、只保留一个定时器，回调里发现未到期就按剩余时间重排。</td></tr>
+          <tr><td data-label="#"><b>3</b></td><td data-label="坑">DOM 全量计数 + <code>mountedTurns</code> 每 5s 两次全树遍历</td><td data-label="处理">包一层耗时测量；单次 &gt;5ms 时 <code>domPeak</code> 退回 60s 采样。观测器不能成为新的长任务源。</td></tr>
+          <tr><td data-label="#"><b>4</b></td><td data-label="坑">选择器失配时，「没人滚动」和「选择器错了」数字完全一样</td><td data-label="处理">额外统计 <code>scrollAny</code>：本周期普通 scroll 有、时间线 scroll 为 0 → payload 标 <code>mismatch: true</code>，一眼看出是宿主改版。</td></tr>
+          <tr><td data-label="#"><b>5</b></td><td data-label="坑"><code>const { loadOlder } = store</code> 解构调用会丢 <code>this</code></td><td data-label="处理">wrapper 用 <code>orig.apply(this, arguments)</code> 原样透传；无 <code>this</code> 时行为与原实现一致（同样会丢），测试覆盖不崩。</td></tr>
+          <tr><td data-label="#"><b>6</b></td><td data-label="坑"><code>scrollRing</code> 只有几帧时 P95 噪声极大</td><td data-label="处理">payload 带 <code>frames</code> 让分析者自己判断；spec 注明 &lt;20 帧仅供参考，不做假平滑、不填默认值。</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>11 · 输入延迟观测（O1b）</h2>
+      <p>回应用户实测：卡顿时打 <code>/</code> 选技能，上下键不动或延迟跳转。只测量，不改变任何输入行为。</p>
+    </div>
+    <div class="grid-2">
+      <article class="card">
+        <h3>为什么不是节流的问题</h3>
+        <p>v0.2 的节流包装的是宿主会话 store 的 <code>subscribe</code>，只影响投影通知；技能菜单的高亮索引是 composer 自己的 React state，不经过这条链路。所以关掉节流也不会让上下键变快，调窗口也不会。</p>
+        <p class="small dim" style="margin-top:8px">能解释"按键不动"的只有一种：主线程被长任务占住——keydown 事件排队、setState 后的渲染也排队。这与滚动期实测的 503ms 最长任务同源。</p>
+      </article>
+      <article class="card">
+        <h3>怎么量</h3>
+        <ul class="research-list">
+          <li>在 <code>document</code> 上装一个 capture 阶段的 <code>keydown</code>：目标在 <code>.chat-composer-input-surface</code> 子树内才记时间（一次 <code>closest</code>）。</li>
+          <li>同一个 key 只记第一次待处理时间，避免连按时把样本稀释。</li>
+          <li>复用<b>现有 rAF 循环</b>：下一帧到来时算 <code>帧时间戳 − 按键时间</code>，推进 30s 环形窗口。不新增第二个 rAF 循环。</li>
+          <li>输出 <code>input: { p95, max, samples }</code>；开关关闭、观测暂停、observer 自禁用时一律 <code>null</code>。</li>
+        </ul>
+      </article>
+    </div>
+    <div class="callout" style="border-color:rgba(248,81,73,.28);background:rgba(248,81,73,.05)">
+      <div class="icon" style="background:rgba(248,81,73,.14);color:#ff7b72">!</div>
+      <p><b>诚实声明：</b>这一项只能证明"按键是不是在等主线程"，<b>不能修好卡顿</b>。如果 <code>input.p95</code> 长期 &gt;100ms，说明排队确实存在，解法在减少挂载（O3/O4）或宿主改造（O6），都排在 v0.3.1 之后。装上它不等于问题解决。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>12 · 后续版本开发计划</h2>
+      <p>v0.3.1 只负责"把问题量清楚 + 一个低风险缓解"；后面每个版本都由上一版的数据决定做不做，不预设。</p>
+    </div>
+    <div class="card" style="padding:6px 18px">
+      <table class="schedule-table">
+        <thead><tr><th>版本</th><th>主题 / 方案</th><th>做什么</th><th>进入门槛（用 v0.3.1 的日志判断）</th></tr></thead>
+        <tbody>
+          <tr>
+            <td data-label="版本"><b>v0.3.1</b><br><span class="tag green">进行中</span></td>
+            <td data-label="主题">滚动归因 + 低风险缓解</td>
+            <td data-label="做什么">O1 滚动观测、O1b 输入延迟、O2 滚动期隐藏遮罩、A8 角标常驻、A9 面板重排</td>
+            <td data-label="进入门槛">—（已完成拍板）</td>
+          </tr>
+          <tr>
+            <td data-label="版本"><b>v0.3.2</b><br><span class="tag yellow">待数据</span></td>
+            <td data-label="主题">补页成本（O3）</td>
+            <td data-label="做什么">方案甲：首次补页直通，距顶 &gt;1 视口且 150ms 内有滚动时合并后续调用；方案乙：每页 60 行降到 30 行。二选一，默认关、A/B 后再定默认值。</td>
+            <td data-label="进入门槛">滚动窗口 <code>loadOlderP95</code> ≥100ms，或 <code>loadOlderCalls</code> 与长任务同周期尖峰。若 <code>loadOlderP95</code> 很低，说明补页不是主因，<b>不做</b>。</td>
+          </tr>
+          <tr>
+            <td data-label="版本"><b>v0.3.3</b><br><span class="tag yellow">待数据</span></td>
+            <td data-label="主题">轮内 CSS 降载（O4）</td>
+            <td data-label="做什么">只对超过 2 屏的高 turn 内部行级块加 <code>content-visibility:auto</code> + <code>contain-intrinsic-size:auto</code>；<b>不加在 turn wrapper</b>，避免虚拟列表测高抖动。</td>
+            <td data-label="进入门槛"><code>mountedTurns</code> 少但 <code>domPeak</code> 高（说明单个 turn 极重）。若 mountedTurns 本身就很大，先解决虚拟化粒度。</td>
+          </tr>
+          <tr>
+            <td data-label="版本"><b>v0.3.4</b><br><span class="tag blue">规划</span></td>
+            <td data-label="主题">切换与多会话（O7）</td>
+            <td data-label="做什么">先补"切走/切回"分段观测，再做跨 store 共享预算或按可见性分级；不在本版。</td>
+            <td data-label="进入门槛">需要新增切换分段字段；等 v0.3.2/0.3.3 之后再排。</td>
+          </tr>
+          <tr>
+            <td data-label="版本"><b>v0.4</b><br><span class="tag purple">需宿主</span></td>
+            <td data-label="主题">结构性改造（O5/O6）</td>
+            <td data-label="做什么">长 turn 内部再虚拟化、投影增量复用，必须改宿主 React 树；O5 轻量模式会折叠用户内容，<b>仅在 O2/O3/O4 全部实测无效且用户明确同意后</b>才评估。</td>
+            <td data-label="进入门槛">插件侧手段已用尽；需要宿主配合与全量回归。</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout">
+      <div class="icon">→</div>
+      <p><b>本版交付后的第一步：</b>用户在同一超大会话里跑一轮「连续滚动 30–60s + 打 <code>/</code> 用上下键选技能」，把 <code>observe-*.jsonl</code> 给回。用四个数决定下一版：<code>scroll.p95</code>、<code>scroll.loadOlderP95</code>、<code>scroll.domPeak</code>、<code>input.p95</code>。四个数都正常但体感仍卡，说明观测口径还缺项，先补观测而不是盲改。</p>
+    </div>
+  </section>
+
   <div class="summary" id="summary">
     <div>
-      <div class="line">当前拍板：<b id="routeLabel">A · 稳妥两件</b> · 已选 <b id="pickCount">2</b> 项</div>
-      <div class="picks" id="pickList">O1 滚动窗口观测、O2 滚动期关闭消息层遮罩</div>
+      <div class="line">已拍板（2026-11-11）：<b>路线 A</b> + <b>角标常驻</b> + <b>面板重排</b> + <b>输入延迟观测</b>，共 5 项</div>
+      <div class="picks" id="pickList">O1 滚动窗口观测、O2 滚动期关闭消息层遮罩、A8 角标常驻显示、A9 设置面板信息架构重排、O1b 输入延迟观测</div>
     </div>
     <div class="actions">
       <button type="button" id="copyBtn">复制拍板摘要</button>
@@ -706,11 +939,14 @@
       el.classList.toggle("checked", radio.checked);
     });
     var picked = selected();
-    document.getElementById("routeLabel").textContent = routeLabels[currentRoute()] || currentRoute();
-    document.getElementById("pickCount").textContent = String(picked.length);
-    document.getElementById("pickList").textContent = picked.length
-      ? picked.map(function (k) { return names[k] || k; }).join("、")
-      : "尚未选择任何方案";
+    var pickList = document.getElementById("pickList");
+    if (pickList) {
+      // 已拍板摘要固定为 O1/O2/A8/A9；下方 options 的勾选只作记录，不再改写结论。
+      pickList.textContent = (picked.length
+        ? picked.map(function (k) { return names[k] || k; }).join("、")
+        : "O1 滚动窗口观测、O2 滚动期关闭消息层遮罩")
+        + "、A8 角标常驻显示、A9 设置面板信息架构重排、O1b 输入延迟观测";
+    }
   }
 
   function save() {
@@ -743,9 +979,9 @@
   function summaryText() {
     var picked = selected();
     return [
-      "zcode-lagfix 下一版本拍板",
+      "zcode-lagfix 下一版本拍板（已定 2026-11-11）",
       "路线：" + (routeLabels[currentRoute()] || currentRoute()),
-      "方案：" + (picked.length ? picked.map(function (k) { return names[k] || k; }).join("、") : "未选择"),
+      "方案：" + (picked.length ? picked.map(function (k) { return names[k] || k; }).join("、") : "未选择") + "、A8 角标常驻显示、A9 设置面板信息架构重排、O1b 输入延迟观测",
       "验收：滚动 30s 帧 P95 ≤80ms（目标 ≤60ms）；长任务 ≤6/3s；最长任务 ≤150ms（底线 ≤250ms）；DOM 峰值 <6000；顶部空白 <300ms；锚点漂移不超过现有 E2E 的 48px 阈值。",
       "数据：observe-20261111.jsonl，滚动窗口 P95 中位数 166.5ms / DOM 9230 / seq 提交 0.77 次每秒（不含 loadOlder）。"
     ].join("\n");
