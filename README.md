@@ -1,13 +1,32 @@
-# zcode-lagfix
+<p align="center">
+  <img src="docs/assets/icon.png" width="84" height="84" alt="zcode-lagfix 图标">
+</p>
 
-[![version](https://img.shields.io/badge/version-0.3.3-blue.svg)](https://github.com/ck-ys/zcode-lagfix/tree/plugin-releases)
-[![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey.svg)](#兼容性)
-[![python](https://img.shields.io/badge/python-3.8%2B-3776ab.svg)](https://www.python.org/)
+<h1 align="center">zcode-lagfix</h1>
 
-ZCode 桌面版**超长会话卡顿**的观测与缓解插件。
+<p align="center">
+  <strong>ZCode 超长会话的卡顿观测与缓解插件</strong><br>
+  把“卡不卡”变成可读的数字，在不改会话数据的前提下减少卡顿。
+</p>
 
-它做两件事：
+<p align="center">
+  <a href="https://github.com/ck-ys/zcode-lagfix/tree/plugin-releases"><img src="https://img.shields.io/badge/version-0.3.3-blue.svg" alt="version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license"></a>
+  <a href="#兼容性"><img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey.svg" alt="platform"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.8%2B-3776ab.svg" alt="python"></a>
+</p>
+
+<p align="center">
+  <sub>不读写 db.sqlite · 不读会话正文 · 不开 CDP · 不联网上报 · 一键还原</sub>
+</p>
+
+下面是在演示页面运行真实 observer 的截图：数据来自模拟卡顿，不含任何真实会话内容。
+
+<p align="center">
+  <img src="docs/assets/preview-status.png" width="360" alt="状态条与统计浮层">
+</p>
+
+ZCode 桌面版**超长会话卡顿**的观测与缓解插件。它做两件事：
 
 1. 把"卡不卡"变成可读的数字——帧间隔、投影提交速率、主线程长任务；
 2. 在不修改会话数据的前提下，合并高频渲染通知，并拦住进入大历史会话时的一次性全量补拉。
@@ -15,14 +34,6 @@ ZCode 桌面版**超长会话卡顿**的观测与缓解插件。
 所有缓解项都可以**单独关闭**；全部关闭后，三处宿主包装（`subscribe` / `loadAllOlder` / `loadOlder` 观测）会还原为原始实现，观测仍按"观测"开关运行，角标常驻（布局受限时自动隐藏）。插件不读写 `db.sqlite`、不改消息与会话内容、不开 CDP 端口、不联网上报（唯一网络请求是用户手动点击「检查更新」）。
 
 > 社区项目，非 ZCode 官方功能。通过修改 `app.asar` 加载，依赖客户端内部 DOM 与接口；ZCode 大版本改版可能需要适配。MIT License，按「现状」提供。
-
-## 界面
-
-![状态条与统计浮层](docs/assets/preview-status.png)
-
-![设置面板：侧栏与回前台保护](docs/assets/preview-settings.png)
-
-> 界面示意：在演示页面运行真实 observer，数据来自演示环境的模拟卡顿，不含任何真实会话内容。
 
 ## 已解决的问题
 
@@ -110,6 +121,12 @@ ZCode 桌面版**超长会话卡顿**的观测与缓解插件。
 | 维护 | 日志路径与上限、当前日志量、重启 ZCode、检查更新、恢复默认 |
 
 性能页每一项标题后都有圆圈「!」，点开用「会做什么 / 不会做什么 / 代价」三段说明，不写内部字段名。
+
+设置面板的「性能」页：
+
+<p align="center">
+  <img src="docs/assets/preview-settings.png" width="720" alt="设置面板：侧栏与回前台保护">
+</p>
 
 **角标常驻显示**（v0.3.1 起删除了隐藏开关）：在设置页/弹窗内、被浮层遮挡、没有可用输入框时仍会自动隐藏，这是布局避让，不是用户开关。设置入口始终可用：
 

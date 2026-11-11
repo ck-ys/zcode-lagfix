@@ -248,3 +248,12 @@ node tests/log_budget.mjs       # 主进程日志预算：超限删最旧/保留
 - 注入行必须与 zusage 的 `inject-main.cjs` / `[zusage] load failed` 错开；loader 名 `lagfix-main.cjs` 不要改。
 - Windows 下 `.cmd` 文件编码敏感（GBK/UTF-8 与 `chcp` 的顺序会影响中文显示）；改启动器时保留现有注释里的编码约定。
 - 任何新增的全局监听器/属性都要在 `__lagfixOff()`、关闭开关、observer 自禁用三条路径清理。
+
+## 13. 对外介绍页与视觉
+
+- README 首屏只做四件事：图标 → 一句话定位 → 三条硬边界 → 一张真实界面截图；不堆版本号、功能清单和内部字段名。
+- 界面截图放 `docs/assets/`，必须来自真实 observer；演示环境截图要在图前写明“模拟数据、不含真实会话内容”，不得使用真实会话截图。
+- 设置面板与对外文案用用户语言：不写 P95、DOM、loadOlder、mask、pane、store、turn 等内部词；每项说明按「会做什么 / 不会做什么 / 代价」组织。
+- 截图只放在对应章节，一屏一个重点；不给图片加说明性 caption，事实、边界和代价用正文写清。
+- 新增或替换截图后同步 `marketplace.json` 的 `icon` / `heroImage`（只接受 HTTPS，用 jsdelivr `@main`），并检查 GitHub 渲染与窄屏不横向溢出。
+- 视觉优化参考 taste skill；美化不得改事实、删边界或隐藏代价。
