@@ -78,6 +78,8 @@ def load_lines(path: Path) -> list[dict]:
             row = json.loads(ln)
         except json.JSONDecodeError:
             continue
+        if not isinstance(row, dict):
+            continue   # 日志被截断/写坏时可能是 null、数组或字符串
         d = row.get("d")
         if isinstance(d, dict):
             rows.append({"win": row.get("win"), "t": row.get("t"), **d})
@@ -224,6 +226,113 @@ def print_scroll_diag(rows: list[dict]) -> None:
               f"  样本={fmt(input_row.get('samples'))}")
 
 
+def _fmt_ts(ms) -> str:
+    # 0/缺失是「没有时间戳」，不能显示成 1970 年的 08:00:00。
+    if not num(ms) or ms <= 0:
+        return "-"
+    try:
+        return time.strftime("%H:%M:%S", time.localtime(ms / 1000))
+    except Exception:
+        return "-"
+
+
+def _settings_of(row: dict) -> dict:
+    st = row.get("settings")
+    return st if isinstance(st, dict) else {}
+
+
+def print_session_diag(rows: list[dict]) -> None:
+    """v0.3.2 多会话归因 + loadOlder 明细。
+
+    - sessions 取最近一条数组；暂停/dead 的 null 样本向前回退到最近一次有效数据。
+    - loadOlderDetail 只在变化时携带完整数组，未变化样本是 []；向前找最近一次非空。
+    - 开关关闭时不把旧数据当当前数据，明确打印“已关闭”。
+    - 旧样本没有字段时给提示，不把「没采到」说成「没有会话」。
+    """
+    srow = None
+    s_older = False
+    s_disabled = False
+    for idx, r in enumerate(reversed(rows)):
+        val = r.get("sessions")
+        if isinstance(val, list):
+            srow = val
+            s_older = idx > 0
+            break
+        if val is None and _settings_of(r).get("sessionDiagOn") is False:
+            s_disabled = True
+            break
+
+    if srow is not None:
+        entries = [x for x in srow if isinstance(x, dict)]
+        suffix = "（最近一次有效样本）" if s_older else ""
+        print(f"  多会话归因：{len(entries)} 个会话桶{suffix}"
+              + ("（已达上限 5 个，更久未活跃的会被淘汰）" if len(entries) >= 5 else ""))
+        for s in entries[:5]:
+            sid = str(s.get("sid") or "")[:8] or "(空)"
+            vis = "可见" if s.get("visible") else "隐藏"
+            print(f"    {sid:8s} {vis}  提交 {fmt(s.get('frames'))} 次"
+                  f" / {fmt(s.get('commitRate'), ' 次/s')}"
+                  f"  DOM {fmt(s.get('dom'))}"
+                  f"  挂载 turn {fmt(s.get('mountedTurns'))}"
+                  f"  滚动 P95 {fmt(s.get('scrollP95'), 'ms')}"
+                  f"  最近活跃 {_fmt_ts(s.get('lastActive'))}")
+    elif s_disabled:
+        print(f"  {INFO} 多会话归因已关闭")
+    else:
+        print(f"  {INFO} 无多会话归因数据（旧样本，或多会话归因已关闭）")
+
+    drow = None
+    d_older = False
+    d_seen = False
+    d_disabled = False
+    for idx, r in enumerate(reversed(rows)):
+        val = r.get("loadOlderDetail")
+        if isinstance(val, list):
+            d_seen = True
+            if val:
+                drow = val
+                d_older = idx > 0
+                break
+        elif val is None and _settings_of(r).get("scrollDiagOn") is False:
+            d_disabled = True
+            break
+
+    if drow is not None:
+        details = [d for d in drow if isinstance(d, dict)][-10:]
+        suffix = "（最近一次有效样本）" if d_older else ""
+        if details:
+            print(f"  补页明细：最近 {len(details)} 次{suffix}")
+            for d in details:
+                ok = bool(d.get("ok"))
+                rb, ra = d.get("rowsBefore"), d.get("rowsAfter")
+                same = num(rb) and num(ra) and rb == ra
+                print(f"    {_fmt_ts(d.get('t'))}  {fmt(d.get('ms'), 'ms'):>8s}"
+                      f"  {'正常' if ok else '异常'}"
+                      f"  行 {fmt(rb)}→{fmt(ra)}"
+                      f"  触发 {str(d.get('trigger') or '-')}"
+                      + ("  （无变化）" if same else ""))
+            slow = max(details, key=lambda x: x.get("ms") if num(x.get("ms")) else -1)
+            print(f"    Top 慢补页：{fmt(slow.get('ms'), 'ms')}"
+                  f"（{slow.get('trigger') or '-'}，"
+                  f"行 {fmt(slow.get('rowsBefore'))}→{fmt(slow.get('rowsAfter'))}）")
+            counts = {"scroll": 0, "initial": 0, "unknown": 0}
+            for d in details:
+                k = str(d.get("trigger") or "unknown")
+                counts[k if k in counts else "unknown"] += 1
+            parts = [f"{k} {counts[k]}" for k in ("scroll", "initial", "unknown") if counts[k]]
+            print("    触发来源：" + " / ".join(parts))
+            print("    注：正常仅表示 promise 结算无异常；宿主内部失败可能被吞掉，"
+                  "行数无变化也可能是 no-op。")
+        else:
+            print(f"  {INFO} 补页明细为空（尚未调用 loadOlder）")
+    elif d_seen:
+        print(f"  {INFO} 补页明细为空（尚未调用 loadOlder）")
+    elif d_disabled:
+        print(f"  {INFO} 滚动诊断已关闭，无补页明细")
+    else:
+        print(f"  {INFO} 无补页明细（旧样本，或滚动诊断已关闭）")
+
+
 def main() -> int:
     # 必须在任何 print 之前：中文 Windows 默认 GBK，符号会抛 UnicodeEncodeError
     try:
@@ -326,6 +435,8 @@ def main() -> int:
     # v0.3.1 滚动/输入诊断放在 active 判断之外：纯滚动不产生投影提交
     # （frames 恒为 0），放进去会被整体吞掉，正好错过滚动 A/B 的核心场景。
     print_scroll_diag(rows)
+    # v0.3.2：多会话归因与 loadOlder 明细也独立于 active 判断。
+    print_session_diag(rows)
 
     if rows:
         print(f"  静止占比：{len(idle) * 100 // len(rows)}%")
@@ -407,7 +518,7 @@ def main() -> int:
     print("  · 真实帧间隔 P95 > 50ms 或 单帧最长 > 200ms  → 用户能感知到卡")
     print("  · 长任务次数 > 0 → 主线程被单次阻塞，与卡顿直接相关")
     print("  · 投影提交率高但帧间隔正常 → 宿主在勤快重渲染，暂未卡死")
-    print("[lagfix] v0.3.1：观测页新增滚动诊断/输入延迟（只读），性能页新增滚动期隐藏遮罩；大历史会话保护与渲染四项增强均可逐项关闭，关了节流后依赖项自动变灰；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置；维护页可手动检查更新（只查 GitHub Releases，不自动安装）。")
+    print("[lagfix] v0.3.2：观测页新增多会话归因（按 sid 记录提交/帧、DOM、挂载轮数、滚动 P95，只读、最多 5 个桶）；滚动诊断新增 loadOlder 最近 10 次明细（耗时/行数/触发来源）；报告新增对应两段。大历史会话保护与渲染四项增强均可逐项关闭；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置；维护页可手动检查更新（只查 GitHub Releases，不自动安装）。")
     print()
     print_logs()
     return 0
