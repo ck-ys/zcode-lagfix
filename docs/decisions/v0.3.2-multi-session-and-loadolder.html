@@ -283,13 +283,13 @@
         <span class="chip">证据 <b>observe-20261111.jsonl</b></span>
         <span class="chip">样本 <b>107 个采集周期</b></span>
         <span class="chip">当前发布 <b>v0.3.1</b></span>
-        <span class="chip">状态 <b style="color:#e3b341">待拍板</b></span>
+        <span class="chip">状态 <b style="color:#3fb950">已拍板 · 路线 A</b></span>
       </div>
     </div>
     <aside class="hero-side">
       <div class="verdict-box" style="background:rgba(88,166,255,.07);border-color:rgba(88,166,255,.25)">
         <div class="big">推荐先做“归因观测版”：按 sid 分桶 + loadOlder 调用明细，不改默认行为。</div>
-        <p>没有分段证据就上 O3/O4，可能改错地方。v0.3.2 只补观测，v0.3.3 再按数据选一个缓解项。</p>
+        <p>2026-11-11 已拍板：按推荐 A 实施（只读多会话归因 + loadOlder 明细，不改宿主行为）。没有分段证据就上 O3/O4，可能改错地方。v0.3.2 只补观测，v0.3.3 再按数据选一个缓解项。</p>
       </div>
       <div class="version-line">上一版：v0.3.1（2026-11-11 已发布）<br>文档：docs/decisions/v0.3.2-multi-session-and-loadolder.html</div>
     </aside>
@@ -521,7 +521,7 @@
         <tr><td data-label="#">3</td><td data-label="场景">滚动到顶部触发补页</td><td data-label="期望">记录 <code>trigger=scroll</code>；不改变原 promise 与返回值</td></tr>
         <tr><td data-label="#">4</td><td data-label="场景">关闭 <code>sessionDiagOn</code></td><td data-label="期望"><code>sessions</code> 为 <code>null</code>，不再遍历 pane，开销回到 v0.3.1</td></tr>
         <tr><td data-label="#">5</td><td data-label="场景"><code>__lagfixOff()</code></td><td data-label="期望">桶与监听全部清空；重新开启后只挂一份</td></tr>
-        <tr><td data-label="#">6</td><td data-label="场景">大会话 9k DOM 下采集</td><td data-label="期望">单次采集不新增 &gt;5ms 长任务；DOM 计数仍走降频</td></tr>
+        <tr><td data-label="#">6</td><td data-label="场景">大会话 9k DOM 下采集</td><td data-label="期望">单次采集不新增 &gt;50ms 长任务；每会话 DOM 计数固定 60s 一次（新桶首采可能一次 &gt;5ms）</td></tr>
       </tbody>
     </table>
   </section>

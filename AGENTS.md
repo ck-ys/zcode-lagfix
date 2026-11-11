@@ -76,7 +76,7 @@ ZCode app.asar 入口尾部
             └─ 三处宿主包装：
                  ├─ store.subscribe(listener)  → 合并通知（不改数据）
                  ├─ store.loadAllOlder()      → 大会话拦截一次性全量补拉
-                 └─ store.loadOlder()         → 只观测耗时/失败（v0.3.1，不改返回值）
+                 └─ store.loadOlder()         → 只观测耗时/失败/行数（v0.3.2，不改返回值）
 ```
 
 状态所有者：
@@ -86,6 +86,8 @@ ZCode app.asar 入口尾部
 - **节流窗口**：按 store 实例（WeakMap）计时，不按订阅计时。React 19 每次 commit 会重新订阅，按订阅计时会让窗口归零。
 - **大会话拦截**：只改 `loadAllOlder` 的返回值，不伪造数据；`not-enough-queries` 是宿主认可的终态。
 - **滚动/输入观测**：`scrollRing`/`loadOlderRing`/`inputRing` 是 observer 内存里的 30s 环形窗口；`scrollEvents`/`anyScrollEvents`/`lafCount` 每采集周期清零；`data-lagfix-scroll` 是 `documentElement` 属性，停滚 180ms 或关开关时移除。
+- **多会话归因**：`sessionBuckets`（最多 5 个）按 `data-session-id` 分桶，`sessionMO` 是一个观察多个 pane 的 MutationObserver（目标集合不变时不重挂）；发现阶段满 5 个后额外 pane 只观察不建桶，有真实提交/滚动才淘汰最久未活跃的桶；`frames/commitRate` 只在采集周期结算，`mountedTurns/dom` 固定每 60s 采一次（新桶立即采）；暂停不改写 `lastActive`；不写 store。
+- **补页明细**：`loadOlderDetail` 是 observer 内存里的 10 条环形窗口，只记 `t/ms/ok/rowsBefore/rowsAfter/trigger`；`rows*` 只读 `rows.window.length`。只包装主 store **实例**，不碰共享原型；暂停期间不累计；明细未变化时样本发 `[]`，报告端向前找最近一次非空。
 - **检查更新**：渲染端只置内存标记 `updateCheckRequested`，随一个样本回传；主进程请求 GitHub Releases 后注入 `window.__lagfixUpdate`，不落盘、不带 token。
 - **角标位置**：每秒按 composer 的 `getBoundingClientRect()` 同步，不写进 React 树；宿主重渲染不会清掉。
 
@@ -119,6 +121,7 @@ ZCode app.asar 入口尾部
 - `handleScroll` 每次滚动都会调用 `syncMessageLayerMask`，同步写 6 个 mask 样式并读几何；mask 作用于整个消息层。
 - `ConversationTimeline` 的 `loadOlder` 触发阈值约为 2 个视口；prepend 锚点在触发时捕获。
 - 宿主已有 `content-visibility:auto` 先例（分享只读时间线），但只能加在 turn 内部行级块，不能加在被 virtualizer 测高的 turn wrapper 上。
+- 多会话场景下，隐藏 pane 可能仍挂载或已被卸载；`[data-session-id]` 是唯一可靠的分桶键；宿主未分配会话 id 时写 `"draft"`（`sessionId ?? "draft"`），过渡态也可能是空字符串，两者都按占位 sid 处理。`data-projection-seq` 在隐藏 pane 上不一定继续变化，`frames=0` 只代表“没观察到提交”，不代表“不耗资源”。
 
 ZCode 大版本改版后，先跑 `/lagfix report` 判断是注入丢失还是选择器不匹配；不要靠猜。
 
@@ -137,6 +140,13 @@ v0.3.1 已拍板范围（Route A）：
 - O2 滚动期临时关闭消息层 mask：滚动时给 `documentElement` 加 `data-lagfix-scroll="1"`，180ms 无滚动后移除；CSS 只覆盖 `[data-v4-timeline-message-layer="true"]` 的 `mask-image`。
 - O3（补页合并）、O4（turn 内部 `content-visibility`）只做默认关闭的实验开关或后续分支，不进入 v0.3.1 默认路径；O5/O6/O7 不在本版。
 - 验收目标见 `docs/decisions/v0.3.1-scroll-lag.html`：滚动 P95 ≤80ms（目标 ≤60ms）、3s 长任务 ≤6、单次最长 ≤150ms（底线 250ms）、DOM 峰值 <6000、顶部空白 <300ms、锚点漂移 ≤现有 E2E 的 48px。
+
+v0.3.2 已拍板范围（Route A，只读归因）：
+
+- S1 多会话归因：按 `[data-session-id]` 分桶（最多 5 个），记录 `sid/visible/lastActive/frames/commitRate/mountedTurns/dom/scrollP95`；`sessionDiagOn` 默认开，关闭后 `sessions=null` 且不遍历 pane；`frames` 只统计 seq 值真的变化。
+- S2 `loadOlder` 明细：最近 10 次 `t/ms/ok/rowsBefore/rowsAfter/trigger`；随 `scrollDiagOn`，不改变原 promise、返回值与 `this`。
+- 验收目标见 `docs/decisions/v0.3.2-multi-session-and-loadolder.html` 第 06 节；本版不改宿主行为，不把“观测到尖峰”当成“已改善”。
+- O3 补页合并、O4 turn 内 `content-visibility` 留到 v0.3.3，按 v0.3.2 数据二选一；O7 多会话策略留到 v0.3.4。
 
 ## 7. 版本与发布
 
@@ -189,8 +199,8 @@ node tests/log_budget.mjs       # 主进程日志预算：超限删最旧/保留
 ## 9. 日志与隐私
 
 - 运行时目录：`~/.zcode/zcode-lagfix/`。
-- 观测/运行日志共享总预算（默认 50MB，可在面板调整），单个 `observe-*.jsonl` 5MB 轮转，14 天保留。
-- 只记录指标、窗口 id、设置快照；不记录提示词、回复、文件内容、工具参数。
+- 观测/运行日志共享总预算（默认 50MB，可在面板调整），单个 `observe-*.jsonl` 5MB 轮转，14 天保留。清理只允许删 `~/.zcode/zcode-lagfix/` 直接子项里命中白名单的普通文件；删前 `lstat` 复核非符号链接、非目录、路径未越界；活动 `observe-*.jsonl`、未轮转日志与 `settings.json` 永不删除，任何异常一律跳过。
+- 只记录指标、窗口 id、设置快照、会话 sid 与计数、`loadOlder` 元数据；不记录提示词、回复、文件内容、分页内容、消息 id、工具参数。
 - UI 日志用 `packages/ui/src/logger.ts` 的等价约束不适用于本仓库；本仓库渲染端不引入宿主 logger，调试输出走观测器内部 `err()`/日志，不往控制台刷敏感信息。
 - 不把日志文件提交进 git。
 
