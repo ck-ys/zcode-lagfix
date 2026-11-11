@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>zcode-lagfix 下一版本拍板 · v0.3.6 补页批量</title>
+<style>
+  :root {
+    --bg: #0b1017;
+    --bg-2: #101824;
+    --card: #141d2b;
+    --card-2: #182334;
+    --line: #263449;
+    --text: #e6edf7;
+    --muted: #93a4bb;
+    --dim: #6e8098;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --radius: 14px;
+    --shadow: 0 18px 50px rgba(0, 0, 0, .28);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    color: var(--text);
+    background:
+      radial-gradient(900px 500px at 18% -8%, rgba(88, 166, 255, .14), transparent 60%),
+      radial-gradient(800px 420px at 92% 4%, rgba(188, 140, 255, .10), transparent 60%),
+      var(--bg);
+    font: 15px/1.72 "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+  code { overflow-wrap: anywhere; word-break: break-word; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 44px 22px 120px; }
+
+  /* ── header ── */
+  .hero {
+    display: grid;
+    grid-template-columns: 1.35fr .65fr;
+    gap: 24px;
+    align-items: stretch;
+    margin-bottom: 30px;
+  }
+  .hero-main, .hero-side {
+    background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,0));
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .hero-main { padding: 30px 30px 26px; }
+  .hero-side { padding: 22px; display: flex; flex-direction: column; justify-content: space-between; gap: 16px; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--blue); font-size: 12.5px; font-weight: 700;
+    letter-spacing: .12em; text-transform: uppercase;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); box-shadow: 0 0 0 5px rgba(248,81,73,.12); }
+  h1 { margin: 12px 0 10px; font-size: clamp(28px, 4vw, 42px); line-height: 1.18; letter-spacing: -.02em; }
+  h1 span { color: var(--muted); font-weight: 500; }
+  .lede { margin: 0; color: var(--muted); max-width: 760px; font-size: 16px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border-radius: 999px;
+    border: 1px solid var(--line); background: rgba(255,255,255,.025);
+    color: var(--muted); font-size: 12.5px;
+  }
+  .chip b { color: var(--text); font-weight: 650; }
+  .verdict-box { padding: 16px; border-radius: 12px; background: rgba(88,166,255,.07); border: 1px solid rgba(88,166,255,.25); }
+  .verdict-box .big { font-size: 20px; font-weight: 750; line-height: 1.35; }
+  .verdict-box p { margin: 8px 0 0; color: var(--muted); font-size: 13.5px; }
+  .version-line { color: var(--dim); font-size: 12.5px; }
+
+  /* ── sections ── */
+  section { margin-top: 38px; }
+  .sec-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+  h2 { margin: 0; font-size: 21px; letter-spacing: -.01em; }
+  .sec-head p { margin: 0; color: var(--dim); font-size: 13px; max-width: 580px; text-align: right; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .grid-2 > *, .grid-3 > * { min-width: 0; }
+  .card {
+    min-width: 0;
+    background: linear-gradient(180deg, rgba(255,255,255,.028), rgba(255,255,255,.008));
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 18px;
+  }
+  pre { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+  .card h3 { margin: 0 0 8px; font-size: 15.5px; }
+  .card p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12.5px; }
+  .dim { color: var(--dim); }
+  .tag {
+    display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 650; border: 1px solid var(--line); color: var(--muted);
+    background: rgba(255,255,255,.03); white-space: nowrap;
+  }
+  .tag.green { color: #7ee787; border-color: rgba(63,185,80,.35); background: rgba(63,185,80,.08); }
+  .tag.yellow { color: #e3b341; border-color: rgba(210,153,34,.35); background: rgba(210,153,34,.08); }
+  .tag.red { color: #ff7b72; border-color: rgba(248,81,73,.35); background: rgba(248,81,73,.08); }
+  .tag.blue { color: #79c0ff; border-color: rgba(88,166,255,.35); background: rgba(88,166,255,.08); }
+  .tag.purple { color: #d2a8ff; border-color: rgba(188,140,255,.35); background: rgba(188,140,255,.08); }
+
+  /* ── evidence ── */
+  .metric { display: flex; flex-direction: column; gap: 10px; }
+  .metric .label { display: flex; justify-content: space-between; color: var(--muted); font-size: 12.5px; }
+  .metric .label b { color: var(--text); font-size: 13px; }
+  .bar { height: 8px; border-radius: 999px; background: #1b2638; overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 999px; background: var(--green); }
+  .bar.yellow > i { background: var(--yellow); }
+  .bar.red > i { background: var(--red); }
+  .bar.blue > i { background: var(--blue); }
+  .phase { position: relative; }
+  .phase .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .phase .name { font-weight: 700; }
+  .phase .when { color: var(--dim); font-size: 12px; }
+  .phase .rows { display: flex; flex-direction: column; gap: 11px; }
+  .phase .foot { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--dim); font-size: 12px; }
+  .hot-card { border-color: rgba(248,81,73,.35); background: linear-gradient(180deg, rgba(248,81,73,.055), rgba(248,81,73,.015)); }
+
+  .callout {
+    display: grid; grid-template-columns: 36px 1fr; gap: 12px;
+    border: 1px solid rgba(88,166,255,.28); background: rgba(88,166,255,.055);
+    border-radius: var(--radius); padding: 16px 18px; margin-top: 14px;
+  }
+  .callout .icon {
+    width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+    background: rgba(88,166,255,.14); color: var(--blue); font-weight: 800;
+  }
+  .callout p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .callout b { color: var(--text); }
+
+  /* ── options ── */
+  .option {
+    position: relative; display: grid; grid-template-columns: 22px 1fr; gap: 12px;
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 16px;
+    background: linear-gradient(180deg, rgba(255,255,255,.024), rgba(255,255,255,.006));
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .option:hover { border-color: #3a4d68; }
+  .option.checked { border-color: rgba(88,166,255,.6); background: rgba(88,166,255,.06); }
+  .option input[type="checkbox"] { appearance: none; width: 19px; height: 19px; margin-top: 2px; border: 1.5px solid #40536e; border-radius: 6px; background: transparent; cursor: pointer; }
+  .option input[type="checkbox"]:checked { background: var(--blue); border-color: var(--blue); box-shadow: inset 0 0 0 3px var(--bg-2); }
+  .option .head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 6px; }
+  .option h4 { margin: 0; font-size: 14.5px; }
+  .option p { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+  .option ul { margin: 6px 0 0; padding-left: 18px; color: var(--dim); font-size: 12.5px; }
+  .option li { margin: 3px 0; }
+  .option .kv { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font-size: 12px; color: var(--dim); }
+  .option .kv b { color: var(--muted); font-weight: 650; }
+  .recommend { box-shadow: 0 0 0 1px rgba(63,185,80,.18) inset; }
+
+  /* ── acceptance table ── */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 12px; letter-spacing: .03em; text-transform: uppercase; }
+  td { color: var(--muted); }
+  td b { color: var(--text); font-weight: 650; }
+  .check { color: var(--green); font-weight: 800; }
+
+  /* ── summary ── */
+  .summary {
+    position: static; z-index: 20; margin-top: 34px;
+    display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: center;
+    padding: 14px 16px; border-radius: 14px; border: 1px solid rgba(88,166,255,.34);
+    background: rgba(16, 24, 36, .94); backdrop-filter: blur(12px);
+    box-shadow: 0 16px 40px rgba(0,0,0,.45);
+  }
+  .summary .line { color: var(--muted); font-size: 13px; }
+  .summary .line b { color: var(--text); }
+  .summary .picks { margin-top: 4px; color: var(--dim); font-size: 12px; }
+  .summary .actions { display: flex; gap: 8px; }
+  button {
+    border: 1px solid #365072; background: rgba(88,166,255,.13); color: #cfe6ff;
+    padding: 9px 13px; border-radius: 9px; font: inherit; font-size: 13px; font-weight: 650; cursor: pointer;
+  }
+  button:hover { background: rgba(88,166,255,.2); }
+  .toast { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%) translateY(10px); opacity: 0; pointer-events: none; background: #1b293b; border: 1px solid var(--line); color: var(--text); padding: 9px 14px; border-radius: 9px; font-size: 13px; transition: .18s ease; z-index: 50; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .footnote { margin-top: 32px; color: var(--dim); font-size: 12px; line-height: 1.8; }
+  .footnote code { color: var(--muted); background: rgba(255,255,255,.04); padding: 1px 5px; border-radius: 4px; }
+
+  .research-list { margin: 8px 0 0; padding-left: 17px; color: var(--muted); font-size: 12.5px; }
+  .research-list li { margin: 4px 0; }
+
+  @media (max-width: 900px) {
+    .hero { grid-template-columns: 1fr; }
+    .grid-3 { grid-template-columns: 1fr; }
+    .grid-2 { grid-template-columns: 1fr; }
+    .sec-head { display: block; }
+    .sec-head p { text-align: left; margin-top: 6px; }
+    .summary { grid-template-columns: 1fr; position: static; }
+    .summary .actions { justify-content: flex-start; }
+  }
+
+  @media (max-width: 720px) {
+    .accept-table thead { display: none; }
+    .accept-table, .accept-table tbody, .accept-table tr, .accept-table td { display: block; width: 100%; }
+    .accept-table tr { border-bottom: 1px solid var(--line); padding: 10px 0; }
+    .accept-table tr:last-child { border-bottom: 0; }
+    .accept-table td { border: 0; padding: 3px 0 3px 84px; position: relative; }
+    .accept-table td::before {
+      content: attr(data-label); position: absolute; left: 0; top: 3px; width: 76px;
+      color: var(--dim); font-size: 11.5px; font-weight: 600;
+    }
+  }
+
+  @media print {
+    body { background: #fff; color: #111; }
+    .wrap { padding: 0; max-width: none; }
+    .card, .hero-main, .hero-side, .option, .summary { box-shadow: none; background: #fff; border-color: #ddd; }
+    .summary { position: static; }
+    .toast, .actions { display: none; }
+  }
+  .option.no-check { grid-template-columns: 1fr; }
+</style>
+</head>
+<body>
+<style>
+  .flow { display: flex; flex-direction: column; gap: 0; margin: 18px 0 6px; }
+  .flow-step {
+    border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px;
+    background: var(--card); color: var(--text); font-size: 14px; line-height: 1.55;
+  }
+  .flow-step b { color: #fff; }
+  .flow-step small { display: block; margin-top: 4px; color: var(--muted); font-size: 12.5px; }
+  .flow-step.warn { border-color: rgba(248,81,73,.45); background: rgba(248,81,73,.07); }
+  .flow-step.ok { border-color: rgba(63,185,80,.45); background: rgba(63,185,80,.07); }
+  .flow-step.measure { border-color: rgba(88,166,255,.45); background: rgba(88,166,255,.07); }
+  .flow-arrow { text-align: center; color: var(--dim); font-size: 18px; line-height: 1.2; padding: 4px 0; }
+  .flow-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .flow-note { color: var(--dim); font-size: 12.5px; margin: 6px 0 0; }
+
+  .rec {
+    border: 1px solid rgba(63,185,80,.5); border-radius: 16px; padding: 22px 24px;
+    background: linear-gradient(180deg, rgba(63,185,80,.10), rgba(63,185,80,.03));
+    box-shadow: 0 18px 50px rgba(0,0,0,.28);
+  }
+  .rec-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .rec-badge {
+    display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px;
+    background: rgba(63,185,80,.16); border: 1px solid rgba(63,185,80,.45);
+    color: #7ee787; font-size: 12.5px; font-weight: 750; letter-spacing: .04em;
+  }
+  .rec h3 { margin: 10px 0 6px; font-size: 22px; }
+  .rec p { margin: 0; color: var(--muted); }
+  .rec-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 16px; }
+  .rec-cell { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; background: rgba(255,255,255,.02); }
+  .rec-cell b { display: block; font-size: 13px; color: #fff; margin-bottom: 4px; }
+  .rec-cell span { font-size: 13px; color: var(--muted); }
+
+  .bars { display: flex; flex-direction: column; gap: 10px; margin: 14px 0 4px; }
+  .bar-row { display: grid; grid-template-columns: 150px 1fr 64px; gap: 12px; align-items: center; font-size: 13px; }
+  .bar-track { height: 12px; border-radius: 999px; background: rgba(255,255,255,.06); overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #3fb950, #d29922); }
+  .bar-fill.bad { background: linear-gradient(90deg, #d29922, #f85149); }
+  .bar-val { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+  .bar-label { color: var(--muted); }
+
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+  .pill.good { background: rgba(63,185,80,.14); color: #7ee787; border: 1px solid rgba(63,185,80,.35); }
+  .pill.mid { background: rgba(210,153,34,.14); color: #e3b341; border: 1px solid rgba(210,153,34,.35); }
+  .pill.bad { background: rgba(248,81,73,.14); color: #ff7b72; border: 1px solid rgba(248,81,73,.35); }
+
+  .choose { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .choose .option {
+    border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; background: var(--card);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .choose .option.primary {
+    border-color: rgba(63,185,80,.55);
+    background: linear-gradient(180deg, rgba(63,185,80,.10), rgba(63,185,80,.02));
+    box-shadow: 0 0 0 1px rgba(63,185,80,.15) inset;
+  }
+  .choose h3 { margin: 0; font-size: 15px; }
+  .choose p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .choose small { color: var(--dim); font-size: 12.5px; }
+  @media (max-width: 720px) {
+    .flow-split, .choose, .rec-grid { grid-template-columns: 1fr; }
+    .bar-row { grid-template-columns: 110px 1fr 52px; }
+  }
+</style>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="hero-main">
+      <div class="eyebrow"><span class="dot" style="background:var(--green);box-shadow:0 0 0 5px rgba(63,185,80,.14)"></span>NEXT RELEASE · v0.3.6 · 路线拍板</div>
+      <h1>补页批量：<span>60 行 → 200 行，先砍调用次数</span></h1>
+      <p class="lede">v0.3.5 已经在本机跑起来，但 O3 的限流只覆盖了 360 次真实补页里的 4 次；单次补页 P95 最高 1311ms、最长 1517ms。下一版建议只做一个默认关闭的实验：让宿主每页多取 140 行，把补页次数压到约 1/3，并先把 A/B 做出来。</p>
+      <div class="meta">
+        <span class="chip">当前 <b>v0.3.5</b></span>
+        <span class="chip">日志 <b>1,379 样本</b></span>
+        <span class="chip">补页 <b>最多 1,027 次/会话</b></span>
+        <span class="chip">单次最长 <b>1,517ms</b></span>
+        <span class="chip">推荐 <b>1 项实验</b></span>
+      </div>
+    </div>
+    <aside class="hero-side">
+      <div class="verdict-box">
+        <div class="big">推荐 A · O8 补页批量</div>
+        <p>默认关闭，只改 <code>loadOlder</code> 的 <code>limit</code> 参数：60 → 200。不删消息、不跳过内容、不改返回值；A/B 过 20% 门槛再考虑默认开。</p>
+      </div>
+      <div class="version-line">依据：2026-11-12 本机 <code>observe-*.jsonl</code> 与 ZCode 源码 v3.17.2。安装版是 3.18.1，实现前必须复核 <code>loadOlder</code> 参数与协议上限仍然存在。</div>
+    </aside>
+  </header>
+
+  <section>
+    <div class="sec-head">
+      <h2>01 · 现在确认了什么</h2>
+      <p>只写日志与源码能证明的事实；单机样本不是性能结论。</p>
+    </div>
+    <div class="grid-3">
+      <div class="card">
+        <h3>v0.3.5 已真正加载</h3>
+        <p><code>main.log</code> 在 00:02 出现 v0.3.5 加载器；当天样本 <b>256 条</b> 带 <code>ver=0.3.5</code>，已有 <code>paneOpen</code> / <code>panelQuiet</code> 字段。P0 目前记录 10 条 ≥100ms 长帧，其中 6 条完成分类：<b>flush 3 / other 3</b>。</p>
+      </div>
+      <div class="card hot-card">
+        <h3>O3 的限流只覆盖 4/360</h3>
+        <p>O3 在 22:11 开启后，日志里又出现 <b>360 次</b> <code>loadOlder</code>；包装器只对 <b>4 次</b> 进入限流判定，<code>skipped=0</code>。其余调用没有落进「document capture 置位、微任务清掉」的滚动派发窗口，O3 的 600ms 间隔对它们不生效。</p>
+      </div>
+      <div class="card">
+        <h3>补页仍是最大单次成本</h3>
+        <p>历史样本里单会话累计补页最多 <b>1,027 次</b>；单次 P95 最高 <b>1,311ms</b>、最长 <b>1,517ms</b>。同一批数据里 3 秒长任务最多 <b>62 次</b>，DOM 峰值 <b>9,944</b>。补页既慢又多，是当前最明确的优化对象。</p>
+      </div>
+    </div>
+    <div class="callout">
+      <div class="icon">!</div>
+      <div>
+        <p><b>旧结论需要更正：</b>v0.3.4 拍板页写过「页大小 60 行是协议定的，插件改不了」。源码并不是这样：<code>ConversationProjectionStore.loadOlder(limit = 60)</code> 有显式参数，协议上限是 <code>rowsRangeMaxLimit = 200</code>，宿主自己的 <code>loadAllOlder</code> 就一直用 200 行分页。插件包装器可以在「调用方没有传参」时把 60 换成 200，不改任何数据结构。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>02 · 候选重新排序</h2>
+      <p>不是「能做就做」；每项都要有数据门槛、可还原开关和明确代价。</p>
+    </div>
+    <table>
+      <thead>
+        <tr><th>候选</th><th>证据</th><th>风险</th><th>本版</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td data-label="候选"><b>O8 补页批量</b><br><span class="small dim">60 → 200 行/页</span></td>
+          <td data-label="证据">源码确认参数存在且上限 200；<code>loadAllOlder</code> 已在用 200；当前 360 次调用、最长 1517ms</td>
+          <td data-label="风险">中：单页更大，前插锚点与首次渲染可能变化；用户停滚时会多取一些历史</td>
+          <td data-label="本版"><span class="tag green">做 · 实验关</span></td>
+        </tr>
+        <tr>
+          <td data-label="候选"><b>O3 触发降频</b><br><span class="small dim">现状：600ms 限流</span></td>
+          <td data-label="证据">360 次调用仅 4 次进入判定、0 次跳过；覆盖面约 1.1%，对总成本几乎无影响</td>
+          <td data-label="风险">中：修好覆盖面仍只是少触发，单页成本不变</td>
+          <td data-label="本版"><span class="tag yellow">保留但退役推荐</span></td>
+        </tr>
+        <tr>
+          <td data-label="候选"><b>O3b 可信滚动限流</b><br><span class="small dim">用 isTrusted 窗口替代 capture 标志</span></td>
+          <td data-label="证据">可以修 O3 的识别问题，但 360 次里有多少是自动补拉仍未分清；自动补拉不能跳</td>
+          <td data-label="风险">中高：误伤首 turn 自动补拉会让 header 缺失</td>
+          <td data-label="本版"><span class="tag">后置</span></td>
+        </tr>
+        <tr>
+          <td data-label="候选"><b>输入期保护</b><br><span class="small dim">按键期间抬高通知下限</span></td>
+          <td data-label="证据">用户报告过按键卡；但现有 <code>input.p95</code> 最高只有 <b>6ms</b>，没有捕获到症状</td>
+          <td data-label="风险">低：只改插件定时器；但可能没有实际收益</td>
+          <td data-label="本版"><span class="tag">先补归因</span></td>
+        </tr>
+        <tr>
+          <td data-label="候选"><b>O4 默认开</b><br><span class="small dim">turn 内 content-visibility</span></td>
+          <td data-label="证据">DOM 峰值 9,944、3 秒长任务 62；本机已开 2,211 个样本，但没有开/关 A/B</td>
+          <td data-label="风险">低：纯 CSS，已有回滚开关</td>
+          <td data-label="本版"><span class="tag blue">并行 A/B</span></td>
+        </tr>
+        <tr>
+          <td data-label="候选"><b>O6 / O7 隐藏 pane</b></td>
+          <td data-label="证据">v0.3.4 实测隐藏会话 <code>dom/frames/commitRate</code> 全为 0；当前日志里隐藏桶也没有持续 DOM</td>
+          <td data-label="风险">高：需要卸载/暂停宿主内容，属于隐藏内容</td>
+          <td data-label="本版"><span class="tag red">不做</span></td>
+        </tr>
+        <tr>
+          <td data-label="候选"><b>预览 webview 绘制</b></td>
+          <td data-label="证据">U1 已确认是 Electron <code>&lt;webview&gt;</code> guest，合成落在宿主 renderer；插件无安全接管点</td>
+          <td data-label="风险">—（只能上游）</td>
+          <td data-label="本版"><span class="tag">不做</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>03 · 推荐方案：只改一个参数</h2>
+      <p>一次只改一个变量；默认关闭；失败可一键回滚。</p>
+    </div>
+
+    <div class="rec">
+      <div class="rec-top">
+        <span class="rec-badge">✓ 推荐 A</span>
+        <span class="tag green">默认关 · 实验</span>
+        <span class="tag blue">只读数据 · 不改消息</span>
+      </div>
+      <h3>O8 补页批量：让每次 <code>loadOlder()</code> 取 200 行</h3>
+      <p>现有 O3 想靠「少触发」省钱，但真实调用大多不在它的判定窗口里。O8 换一个更直接的杠杆：同一段历史需要的前插次数从约 N 次降到 N/3，而后端每次 <code>rowsRange</code> 都要过滤整个会话投影——调用次数下降，才是真正减少全量过滤次数。</p>
+      <div class="rec-grid">
+        <div class="rec-cell"><b>改什么</b><span>包装 <code>loadOlder</code>：仅当开关开、调用方没有传 limit 时，把默认 60 换成 200。</span></div>
+        <div class="rec-cell"><b>不改什么</b><span>不改消息、顺序、返回值、<code>this</code>、异常与 <code>loadingOlder</code> 状态；不跳过任何调用。</span></div>
+        <div class="rec-cell"><b>过线门槛</b><span>补页总阻塞或滚动 P95 / 长任务下降 ≥20%，且顶部空白与锚点不退化。</span></div>
+      </div>
+    </div>
+
+    <div class="flow">
+      <div class="flow-step"><b>① 宿主触发补页</b><small>滚动预取（约 2 个视口）或首 turn 缺 header 的自动补拉，调用 <code>store.loadOlder()</code>，通常不传参数。</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step measure"><b>② 插件包装器判定</b><small>开关关闭、调用带显式 limit、或已暂停/自禁用 → 原样 <code>orig.apply(this, arguments)</code>。只有「开关开 + 无参数」才替换为 200。</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step"><b>③ 宿主请求一页 200 行</b><small><code>rowsRange</code> 协议上限就是 200；<code>mergeOlderRows</code>、epoch 校验、游标校验全部走原路径。</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step ok"><b>④ 同一段历史少约 2/3 次调用</b><small>每次调用仍要全量过滤，但过滤次数减少；单页拷贝/渲染变大，总行数不变。净收益必须用 A/B 证实。</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step measure"><b>⑤ 报告与 A/B 结算</b><small>记录 <code>calls / rowsAdded / ms</code>；对比 O8 关/开两段的总阻塞时间，而不是只看单次 P95。</small></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>04 · 边界与代价</h2>
+      <p>把「会做什么 / 不会做什么 / 代价」写清楚，避免把实验说成已解决。</p>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <h3>会做什么</h3>
+        <p>开关开启时，把无参 <code>loadOlder()</code> 的默认页大小从 60 提到 200；保持原方法的返回值、<code>this</code>、异常与在途状态不变；在报告里单独标注本页行数与调用次数。</p>
+      </div>
+      <div class="card">
+        <h3>不会做什么</h3>
+        <p>不跳过调用、不合并请求、不改游标、不改消息/会话/工具结果、不写 store、不新增 DOM 属性或监听器；不碰自动补拉的触发条件；不删除任何历史。</p>
+      </div>
+      <div class="card">
+        <h3>代价</h3>
+        <p>单次前插 200 行，首帧拷贝与渲染更大；用户停在触发区时可能多取约 140 行未读历史。若宿主对页大小另有隐式假设，可能出现锚点漂移或空白时间变长。</p>
+      </div>
+      <div class="card">
+        <h3>回滚</h3>
+        <p>关闭开关即恢复 60 行默认路径；<code>__lagfixOff()</code>、暂停、自禁用三条路径都必须恢复原方法；A/B 未过线则永久默认关闭并在 README/发布说明标注。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>05 · A/B 怎么测</h2>
+      <p>同一会话、同一段历史、同一滚动路径；至少 3 轮，记录设置快照。</p>
+    </div>
+    <table>
+      <thead>
+        <tr><th>指标</th><th>看什么</th><th>过线</th></tr>
+      </thead>
+      <tbody>
+        <tr><td data-label="指标"><b>补页次数</b></td><td data-label="看什么">同一段历史上翻到顶，<code>loadOlderCalls</code> 的增量</td><td data-label="过线">下降 ≥50%，目标约 -66%</td></tr>
+        <tr><td data-label="指标"><b>补页总阻塞</b></td><td data-label="看什么">所有 <code>loadOlder</code> 耗时之和，不只看 P95</td><td data-label="过线">下降 ≥20%</td></tr>
+        <tr><td data-label="指标"><b>滚动与长任务</b></td><td data-label="看什么"><code>scroll.p95</code>、3 秒长任务数、<code>laf.count</code></td><td data-label="过线">滚动 P95 或长任务下降 ≥20%（长任务 ≥30% 更稳）</td></tr>
+        <tr><td data-label="指标"><b>顶部空白</b></td><td data-label="看什么">上翻停下后到历史出现的时间</td><td data-label="过线">≤300ms，且不劣于基线</td></tr>
+        <tr><td data-label="指标"><b>锚点与 DOM</b></td><td data-label="看什么">锚点漂移、<code>mountedTurns</code>、DOM 峰值</td><td data-label="过线">漂移 ≤48px；DOM 峰值不增加 &gt;20%</td></tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <div class="icon">i</div>
+      <div><p><b>不要用一轮数据下结论。</b>至少做「O8 关 → O8 开 → O8 关」三段，O4 保持固定（建议先固定为开或关，不要同时改两个变量）。日志里没有设置快照的样本不能拿来做 A/B。</p></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>06 · 四条路线，选一条</h2>
+      <p>选 A 之外都不建议现在写代码；O8 未过线就保持默认关闭。</p>
+    </div>
+    <div class="choose">
+      <div class="option primary">
+        <span class="tag green">推荐</span>
+        <h3>A · O8 补页批量</h3>
+        <p>只加一个默认关闭的实验：60 → 200 行/页，同时补 A/B 对照报告。针对最大的单次成本，改动面最小。</p>
+        <small>代价：单页更大；需要 3 轮 A/B。适合：想真正减少补页总阻塞。</small>
+      </div>
+      <div class="option">
+        <span class="tag yellow">备选</span>
+        <h3>B · O3 修正（可信滚动窗口）</h3>
+        <p>保留 600ms 限流，但用 <code>isTrusted</code> 滚动时间窗替代 capture 标志，覆盖真实滚动触发；自动补拉仍直通。</p>
+        <small>代价：仍不降低单页成本；误伤自动补拉的风险更高。适合：只想修 O3、不接受页大小变化。</small>
+      </div>
+      <div class="option">
+        <span class="tag blue">后置</span>
+        <h3>C · 输入期保护</h3>
+        <p>按键/输入法期间把通知下限抬到 250ms、暂停角标定位；先补 <code>sinceKey</code> 归因，证明按键等待确实与插件补发相关。</p>
+        <small>代价：现有输入 P95 最高 6ms，证据不足；可能做出来也没有收益。</small>
+      </div>
+      <div class="option">
+        <span class="tag">保守</span>
+        <h3>D · 只做 A/B 报告</h3>
+        <p>不改任何宿主行为，只把日志按设置快照切段，输出 O3/O4/O5 的开/关对照；用一轮真实数据再决定下一版。</p>
+        <small>代价：这一版没有新缓解；但不会多一个未验证开关。</small>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>07 · 不推荐现在做的</h2>
+      <p>这些不是永远不做，而是证据不够或风险超出本版边界。</p>
+    </div>
+    <div class="grid-3">
+      <div class="card">
+        <h3>O6 / O7 多会话</h3>
+        <p>v0.3.4 连续两轮实测隐藏会话 <code>dom/frames/commitRate=0</code>；当前 17 条「隐藏但活跃」样本的 <code>dom</code> 也大多是 0，更像切换瞬间的残留桶。先证明隐藏 pane 真的在持续渲染，再谈卸载或暂停。</p>
+      </div>
+      <div class="card">
+        <h3>输入期保护直接上</h3>
+        <p>日志里 <code>input.p95</code> 中位数 5ms、最高 6ms，没有捕获到用户说的「上下键不动」。先加按键后长帧归因，确认是插件补发、宿主渲染还是输入法排队，再决定是否加保护。</p>
+      </div>
+      <div class="card">
+        <h3>预览 HTML 优化</h3>
+        <p>右侧预览是 Electron <code>&lt;webview&gt;</code> guest，像素合成落在宿主 renderer；插件没有安全的暂停/降帧接口。U1 文档已经把这部分证据交给上游，不在插件里做隐藏或暂停。</p>
+      </div>
+    </div>
+  </section>
+
+  <div class="summary">
+    <div>
+      <div class="line"><b>建议拍板：A · O8 补页批量（默认关，实验）+ A/B 报告。</b></div>
+      <div class="picks">只改 <code>loadOlder</code> 的默认页大小；不删内容、不跳过调用、不改默认值。未过线永久默认关闭。</div>
+    </div>
+    <div class="actions">
+      <span class="tag green">等待你选择 A / B / C / D</span>
+    </div>
+  </div>
+
+  <p class="small dim" style="margin-top:18px">本页是拍板材料，不是性能结论。O8 的「约 1/3 调用次数」是按 60→200 行计算的几何上限；真实收益取决于后端全量过滤在单次耗时中的占比，必须用同一会话的 A/B 结算。未拍板前不写实现代码；选 A 后先补 <code>docs/specs/v0.3.6-*.md</code> 与测试，再改 observer。</p>
+</div>
+
+</body>
+</html>
