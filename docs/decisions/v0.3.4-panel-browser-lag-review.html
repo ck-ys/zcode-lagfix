@@ -424,6 +424,41 @@
     </div>
   </section>
 
+  <section>
+    <div class="sec-head">
+      <h2>07 · 你的实测回填（19:11–19:18）</h2>
+      <p>第二轮实测把结论往前推了一大步：最重的帧出现在面板<b>关闭</b>时，根因在聊天区自身的补页与挂载 DOM。</p>
+    </div>
+    <div class="callout" style="border-color:rgba(248,81,73,.30);background:rgba(248,81,73,.05)">
+      <div class="icon" style="background:rgba(248,81,73,.14);color:var(--red)">!</div>
+      <p><b>结论修正：</b>18:57 那次峰值与面板登录页强相关；但 19:13:45–19:14:12 在面板<b>关闭</b>状态下就出现了帧 P95 588ms、单帧 1000ms、DOM 8436。面板是放大器，不是根因。根因链：上翻补页在大会话窗口下单次 0.8–2.3 秒 → 挂载 DOM 冲到 8.4k → 持续长任务。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>时间</th><th>阶段（面板）</th><th>帧 P95</th><th>长任务/窗</th><th>DOM</th><th>补页</th><th>关键读数</th></tr></thead>
+      <tbody>
+        <tr><td data-label="时间">19:11:53–19:12:53</td><td data-label="阶段">关闭 · 切会话后上翻</td><td data-label="帧">6→164ms</td><td data-label="长任务">0→30 次</td><td data-label="DOM">2347→6427</td><td data-label="补页">334→359 次</td><td data-label="读法">单次补页 <b>1293ms</b>（窗口约 6.6k 行时）。</td></tr>
+        <tr><td data-label="时间">19:12:56–19:13:41</td><td data-label="阶段">关闭 · 持续上翻</td><td data-label="帧">49→218ms</td><td data-label="长任务">4→29 次</td><td data-label="DOM">4.0k–5.1k</td><td data-label="补页"><b>+104 次 / 45 秒</b></td><td data-label="读法">补页单次 353→619ms，随窗口变大持续恶化。</td></tr>
+        <tr style="background:rgba(248,81,73,.04)"><td data-label="时间">19:13:45–19:14:12</td><td data-label="阶段"><b>关闭 · 峰值</b></td><td data-label="帧"><b>267→588ms</b></td><td data-label="长任务">12→20 次</td><td data-label="DOM">5065→<b>8436</b></td><td data-label="补页">P95 <b>1789ms</b> / 最长 <b>2262ms</b></td><td data-label="读法">单帧 1000ms 与 2.2 秒补页同窗出现；行数 8164→8404。</td></tr>
+        <tr><td data-label="时间">19:14:15–19:17:36</td><td data-label="阶段"><b>打开 · 持续</b></td><td data-label="帧">61–585ms</td><td data-label="长任务">15–32 次/3 秒</td><td data-label="DOM">8.4k–8.7k</td><td data-label="补页">持平（487）</td><td data-label="读法">打开瞬间 <code>switchP95=576ms</code>；随后每 3 秒 15–32 次长任务，P2 无法压住。</td></tr>
+        <tr><td data-label="时间">19:17:38–19:18:17</td><td data-label="阶段">关闭 · DOM 回落</td><td data-label="帧">73→6–79ms</td><td data-label="长任务">0–19 次</td><td data-label="DOM">→3.3k–3.5k</td><td data-label="补页">9–25ms（约 1.1k 行）</td><td data-label="读法">挂载 DOM 6220→783 后立即恢复；补页成本随窗口缩小回到两位数毫秒。</td></tr>
+      </tbody>
+    </table>
+    <div class="grid-2">
+      <div class="card hot-card">
+        <h3>补页成本随窗口规模放大 ~100 倍</h3>
+        <p>约 1100 行时单次补页 9–25ms；窗口到 8000+ 行时同样一页（+60 行）要 822–2262ms。O3 的门槛（P95 &gt;200ms）被超了 9 倍。</p>
+      </div>
+      <div class="card hot-card">
+        <h3>挂载 DOM 是长任务燃料</h3>
+        <p>DOM 8.4–8.7k 时每 3 秒 15–32 次长任务；面板关闭时帧 P95 也到 588ms。O4 门槛（DOM &gt;4000 或长任务 &gt;6）两项都超。</p>
+      </div>
+    </div>
+    <div class="callout">
+      <div class="icon">✓</div>
+      <p><b>对 v0.3.4 的意义：</b>O3（补页合并）与 O4（turn 内 content-visibility）现在都有实机数据支持，且互不冲突——O3 砍单次补页成本，O4 砍挂载 DOM。O7 依旧不支持（全程隐藏会话 dom/frames/commitRate=0）。如果这几段对应的操作和你的实际顺序不一致，把时间段告诉我，我重新对齐。</p>
+    </div>
+  </section>
+
   <div class="footnote">
     数据范围：<code>observe-20261111.jsonl</code> 与轮转文件，2026-11-11 18:32–19:00 的可见窗口样本；只读取指标、设置快照、pane/refocus/scroll/sessions 字段，不读取会话正文、提示词或工具参数。时间线中的 DOM / 帧 P95 / 长任务均来自插件自身采样，<code>maxLongTask</code> 为全局最大值，不能单独用来定位某一秒。主因判断来自时间相关性（面板打开、登录页挂载、关闭的先后顺序），不是 DevTools 调用栈归因；插件不开 CDP，无法看到面板内部执行细节。相关页面：<code>docs/decisions/v0.3.4-route.html</code>、<code>docs/decisions/v0.3.3-pane-lag.html</code>。
   </div>

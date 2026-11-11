@@ -232,7 +232,7 @@
       <h1>下一版本拍板 <span>先收数据，再选 1–2 项</span></h1>
       <p class="lede">v0.3.3 已经上线，侧栏开合、面板常开、回前台三段保护都在跑。这一版不再凭猜测堆优化，而是用你正在做的长会话 / 多切换实机数据，决定 O3 补页合并、O4 turn 内 <code>content-visibility</code>、O7 多会话策略和预览 HTML 绘制成本里，哪 1–2 项真正值得做。</p>
       <div class="meta">
-        <span class="chip">状态 <b>数据回收中</b></span>
+        <span class="chip">状态 <b>实测已回填 · 可拍板</b></span>
         <span class="chip">候选 <b>4 项</b></span>
         <span class="chip">本版目标 <b>选 1–2 项</b></span>
         <span class="chip">边界 <b>不改会话数据</b></span>
@@ -240,8 +240,8 @@
     </div>
     <aside class="hero-side">
       <div class="verdict-box">
-        <div class="big">暂不锁定单一方案</div>
-        <p>先把多会话切换、面板常开、长历史上翻、回前台四类数据收齐。未达到数据门槛的项，这一版不做。</p>
+        <div class="big">O3 + O4 进入 v0.3.4</div>
+        <p>19:11–19:18 的实测已回填：O3（补页单次最高 2262ms）与 O4（DOM 峰值 8691、长任务 32 次/3 秒）双双过线；O7 连续两轮 unsupported。</p>
       </div>
       <div class="version-line">基于 v0.3.3 已发布版本 · 2026-11-11</div>
     </aside>
@@ -411,15 +411,15 @@
   <section>
     <div class="sec-head">
       <h2>06 · 数据回填</h2>
-      <p>这一区先留空；你测完把数字贴回来，我再把结论写进同一页，不另开新页。</p>
+      <p>已按 19:11–19:18 实测回填；18:57 面板登录段的完整时间线见审查页。</p>
     </div>
     <table class="accept-table">
       <thead><tr><th>场景</th><th>轮次</th><th>开关 P95</th><th>frameP95</th><th>longTasks</th><th>DOM 峰值</th><th>结论</th></tr></thead>
       <tbody>
-        <tr><td data-label="场景">A 多会话切换</td><td data-label="轮次">待测</td><td data-label="开关">待测</td><td data-label="帧">待测</td><td data-label="长任务">待测</td><td data-label="DOM">待测</td><td data-label="结论">待定</td></tr>
-        <tr><td data-label="场景">B 面板常开</td><td data-label="轮次">待测</td><td data-label="开关">待测</td><td data-label="帧">待测</td><td data-label="长任务">待测</td><td data-label="DOM">待测</td><td data-label="结论">待定</td></tr>
-        <tr><td data-label="场景">C 长历史上翻</td><td data-label="轮次">待测</td><td data-label="开关">待测</td><td data-label="帧">待测</td><td data-label="长任务">待测</td><td data-label="DOM">待测</td><td data-label="结论">待定</td></tr>
-        <tr><td data-label="场景">D 回前台</td><td data-label="轮次">待测</td><td data-label="开关">待测</td><td data-label="帧">待测</td><td data-label="长任务">待测</td><td data-label="DOM">待测</td><td data-label="结论">待定</td></tr>
+        <tr><td data-label="场景">A 多会话切换</td><td data-label="轮次">2 轮（18:57 / 19:11）</td><td data-label="开关">switchP95 24→576ms</td><td data-label="帧">P95 最高 588ms（面板关）</td><td data-label="长任务">15–32 次/3 秒</td><td data-label="DOM">峰值 8691</td><td data-label="结论"><b>O7 不支持</b>：隐藏会话全程 dom/frames/commitRate=0</td></tr>
+        <tr><td data-label="场景">B 面板常开</td><td data-label="轮次">2 轮</td><td data-label="开关">打开瞬间 576ms</td><td data-label="帧">61–585ms 波动</td><td data-label="长任务">15–32 次/3 秒持续</td><td data-label="DOM">8.4k–8.7k</td><td data-label="结论"><b>放大器，不是根因</b>；峰值帧出现在面板关闭时</td></tr>
+        <tr><td data-label="场景">C 长历史上翻</td><td data-label="轮次">19:12–19:14</td><td data-label="开关">补页 P95 <b>1789ms</b> / 最长 <b>2262ms</b></td><td data-label="帧">P95 588ms、单帧 1000ms</td><td data-label="长任务">+104 次补页 / 45 秒</td><td data-label="DOM">8436（窗口 8k+ 行）</td><td data-label="结论"><b>O3 + O4 双过线</b>，为 v0.3.4 主攻</td></tr>
+        <tr><td data-label="场景">D 回前台</td><td data-label="轮次">2 轮</td><td data-label="开关">hiddenMs 1293ms</td><td data-label="帧">p95 36ms / max 67ms</td><td data-label="长任务">无聚集</td><td data-label="DOM">无跳变</td><td data-label="结论"><b>P3 足够</b>，不是当前瓶颈</td></tr>
       </tbody>
     </table>
     <div class="callout">
