@@ -1,5 +1,5 @@
 {
-  "description": "zcode-lagfix: 会话启动时同步运行时文件并幂等安装观测注入(修改 app.asar,成功后需完全退出并重开 ZCode 生效;v0.3.1 含滚动/输入诊断、滚动期遮罩抑制、渲染通知节流与大历史会话保护,全部可逐项关闭,只改通知时机/补页返回值不改数据;卸载执行 patch_install.py uninstall,成功后才写豁免标记)",
+  "description": "zcode-lagfix: 会话启动时同步运行时文件并幂等安装观测注入(修改 app.asar,成功后需完全退出并重开 ZCode 生效;v0.3.2 含多会话归因、loadOlder 明细、滚动/输入诊断、滚动期遮罩抑制、渲染通知节流与大历史会话保护,全部可逐项关闭,只改通知时机/补页返回值不改数据;卸载执行 patch_install.py uninstall,成功后才写豁免标记)",
   "hooks": {
     "SessionStart": [
       {

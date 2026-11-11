@@ -1,6 +1,6 @@
 {
   "name": "lagfix-marketplace",
-  "description": "zcode-lagfix 插件市场：ZCode 超长会话卡顿观测与缓解（v0.3.1 滚动/输入诊断 + 滚动期遮罩抑制 + 渲染节流 + 大历史会话保护 + 日志 50MB 预算，面板内可重启 ZCode 与手动检查更新；修改 app.asar，成功后需完全退出并重开）。",
+  "description": "zcode-lagfix 插件市场：ZCode 超长会话卡顿观测与缓解（v0.3.2 多会话归因 + loadOlder 明细 + 滚动/输入诊断 + 滚动期遮罩抑制 + 渲染节流 + 大历史会话保护 + 日志 50MB 预算，面板内可重启 ZCode 与手动检查更新；修改 app.asar，成功后需完全退出并重开）。",
   "owner": {
     "name": "ck-ys",
     "url": "https://github.com/ck-ys"
@@ -9,8 +9,8 @@
     {
       "name": "zcode-lagfix",
       "source": "./plugins/zcode-lagfix",
-      "description": "ZCode 超长会话卡顿观测与缓解插件（v0.3.1：帧 P95 + 滚动窗口/loadOlder/输入延迟诊断；渲染=通知节流 + 自适应窗口/切会话冷静期/后台降频，历史=大历史会话保护，滚动=滚动期隐藏遮罩，全部可逐项关闭；角标常驻，面板分 状态条/观测/性能/维护；维护页可看日志上限、重启 ZCode、手动检查更新）。安装会修改 app.asar，成功后需完全退出并重开 ZCode。",
-      "version": "0.3.1",
+      "description": "ZCode 超长会话卡顿观测与缓解插件（v0.3.2：帧 P95 + 滚动窗口/loadOlder/输入延迟诊断 + 按会话归因（提交/帧、DOM、挂载 turn、滚动 P95）与 loadOlder 最近 10 次明细；渲染=通知节流 + 自适应窗口/切会话冷静期/后台降频，历史=大历史会话保护，滚动=滚动期隐藏遮罩，全部可逐项关闭；角标常驻，面板分 状态条/观测/性能/维护；维护页可看日志上限、重启 ZCode、手动检查更新）。安装会修改 app.asar，成功后需完全退出并重开 ZCode。",
+      "version": "0.3.2",
       "category": "monitoring",
       "keywords": [
         "lagfix",
