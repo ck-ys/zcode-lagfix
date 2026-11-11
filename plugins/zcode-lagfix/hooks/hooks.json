@@ -1,0 +1,19 @@
+{
+  "description": "zcode-lagfix: 会话启动时同步运行时文件并幂等安装观测注入(修改 app.asar,成功后需完全退出并重开 ZCode 生效;v0.2 起可在面板开关投影订阅通知节流,只合并渲染通知不改数据;不想安装用 /lagfix off 说明里的卸载步骤写豁免标记)",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": true,
+            "command": "python3 \"${ZCODE_PLUGIN_ROOT}/hooks/session-start.py\" || python \"${ZCODE_PLUGIN_ROOT}/hooks/session-start.py\" || py -3 \"${ZCODE_PLUGIN_ROOT}/hooks/session-start.py\"",
+            "timeoutMs": 180000,
+            "statusMessage": "zcode-lagfix: 检查观测注入…"
+          }
+        ]
+      }
+    ]
+  }
+}

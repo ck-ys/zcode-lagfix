@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.lagfix-stage-*.tmp
+*.log
+*.tmp
+*.tmp.*
+.venv/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,17 @@
+{
+  "name": "zcode-lagfix",
+  "version": "0.3.0",
+  "description": "ZCode 超长会话卡顿观测与修复插件（v0.3.0：输入框上方状态条只在主页面显示，悬停/点击看档位统计，齿轮打开居中分类设置；修复=投影订阅通知节流 + 自适应窗口/切会话冷静期/后台降频/大会话保护四项增强，全部可逐项关闭；维护页显示日志路径并可设 50MB 上限自动删旧；__lagfixOff 一键还原，面板含重启 ZCode，检查更新暂置灰。另有零安装外部探针 tools/lagfix-probe.py）。安装会修改 app.asar，成功后需完全退出并重开 ZCode。",
+  "author": {
+    "name": "ck-ys",
+    "url": "https://github.com/ck-ys"
+  },
+  "commands": "commands",
+  "hooks": "hooks/hooks.json",
+  "keywords": [
+    "lagfix",
+    "performance",
+    "observe",
+    "throttle"
+  ]
+}
