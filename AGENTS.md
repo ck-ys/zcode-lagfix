@@ -203,7 +203,7 @@ node tests/observe_smoke.mjs    # 渲染端 observer 冒烟
 - 一个提交只做一件事：spec/拍板、实现、测试、版本文档尽量分开。
 - 提交信息用 `feat:` / `fix:` / `docs:` / `test:` / `chore:` 前缀，中文描述可以。
 - 不在未确认时 `push`、`tag`、`release`、`force push` 或改写远端历史。
-- 当前本地仓库可能是 shallow（只含远端 tip）；网络/SSH 可用后先 `git fetch --unshallow` 再推送，避免把不完整历史推上去。
+- 本地仓库已与远端同步；若在新环境重新初始化为 shallow，推送前先 `git fetch --unshallow`，避免把不完整历史推上去。
 
 ## 12. 常见坑
 
