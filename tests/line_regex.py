@@ -13,9 +13,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "zcode-lagfix"))
 import patch_install as pi  # noqa: E402
 
-# zusage 真实注入行样例（本机 asar 实读，2026-11-09 审计取证）
+# zusage 注入行样例（按本机 asar 实读格式脱敏，仅保留路径形状与标记）
 ZUSAGE_LINE = (
-    b';import("file:///C:/Users/86182/.zcode/zcode-token-usage-statusbar/inject-main.cjs")'
+    b';import("file:///C:/Users/example/.zcode/zcode-token-usage-statusbar/inject-main.cjs")'
     b'.then(() => null, (e) => console.error("[zusage] load failed", e));'
 )
 # zusage 的 ZUSAGE_LINE_RE 等价特征（文件名 + 报错标记，任意目录）
@@ -24,7 +24,7 @@ ZUSAGE_LINE_RE = re.compile(
     rb'\.then\(\(\) => null, \(e\) => console\.error\("\[zusage\] load failed", e\)\);'
 )
 
-OUR_LINE = pi.inject_line(Path("C:/Users/86182/.zcode/zcode-lagfix"))
+OUR_LINE = pi.inject_line(Path("C:/Users/example/.zcode/zcode-lagfix"))
 OUR_LINE_OLD_DIR = pi.inject_line(Path("D:/somewhere/old-runtime"))
 
 

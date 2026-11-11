@@ -202,7 +202,7 @@
   var rafRunning = false;
   // v0.2 节流状态（这里声明：attach() 可能在首轮轮询就用到）
   var fixState = { applied: false, target: null, orig: null, reason: "", retryTimer: null, tries: 0,
-    loadTarget: null, loadOrig: null };
+    loadTarget: null, loadOrig: null, blockedStore: null, resumeTimer: null };
 
   function err() {
     if (++state.errCount >= ERR_LIMIT) disable("too-many-errors");
@@ -384,6 +384,11 @@
             state.lastSeq = state.el.getAttribute(ATTR);
             state.lastT = performance.now();
             resetWindow();
+            // 切会话可能重建 projection store；立即尝试重装一次，别等 5s 看门狗
+            // （冷静期只有 10s，前 5s 的首屏水合最需要保护）。
+            if (settings.throttleOn || settings.bigSessionOn) {
+              try { applyThrottle(); } catch (e2) {}
+            }
             return;
           }
           var cur = state.el.getAttribute(ATTR);
@@ -559,22 +564,34 @@
     return m || null;
   }
 
+  // 所有配色都走这里：面板里的黄/红阈值是唯一口径。
+  // 档位/状态只决定文案（"卡死""刚卡过"），不再各自硬编码红黄——
+  // 否则用户把阈值调高后，角标仍会被 300/500ms 的硬编码分支强制染红，
+  // 看起来又像"设置是死的"（三审 P1）。
+  function thresholdColor(ms) {
+    if (ms >= settings.badMs) return "#f85149";
+    if (ms >= settings.warnMs) return "#d29922";
+    return "#3fb950";
+  }
+
   function verdictOf(frameP95, stallMs, recentMax, commitRate) {
     if (state.dead) return { label: "已停", color: "#8b949e" };
     if (!settings.observe) return { label: "已暂停", color: "#8b949e" };
     // 当前主线程被占死（定时器迟到 >500ms）和"最近刚卡过一次"要分开说：
     // 前者是正在进行，后者是 30s 内的历史峰值，用"刚卡过"避免误读成一直卡死。
-    if (stallMs > 500) return { label: "卡死", color: "#f85149" };
+    if (stallMs > 500) return { label: "卡死", color: thresholdColor(stallMs) };
     if (recentMax !== null && recentMax >= 300) {
-      return { label: "刚卡过", color: "#f85149" };
+      return { label: "刚卡过", color: thresholdColor(recentMax) };
     }
     if (frameP95 === null || frameP95 === undefined) {
       return commitRate === 0
         ? { label: "空闲", color: "#8b949e" }
         : { label: "流畅", color: "#3fb950" };
     }
+    // 文案仍按固定档位描述"卡到什么程度"，主色由阈值决定：
+    // 两套阈值互不干扰，用户调 30/60 后角标必须跟着变色。
     var t = tierOf(frameP95);
-    return { label: t.label, color: t.color };
+    return { label: t.label, color: thresholdColor(frameP95) };
   }
 
   function ensureStyle() {
@@ -857,6 +874,18 @@
         if (r.top > bestTop) { bestTop = r.top; best = cand; }
       }
       if (best) return best;
+      // 旧宿主没有 .chat-composer-input-surface：同样要遍历所有候选并取最靠下的
+      // 可用者，只看第一个会在分屏/草稿页同时挂载时误判"没有输入框"（三审 P2）。
+      var fbBest = null, fbTop = -1;
+      try {
+        var fbList = document.querySelectorAll('[data-testid="v4-composer"]');
+        for (var j = 0; j < fbList.length; j++) {
+          if (!composerUsable(fbList[j])) continue;
+          var fr = fbList[j].getBoundingClientRect();
+          if (fr.top > fbTop) { fbTop = fr.top; fbBest = fbList[j]; }
+        }
+      } catch (e2) {}
+      if (fbBest) return fbBest;
       var fallback = document.querySelector('[data-testid="v4-composer"]');
       return composerUsable(fallback) ? fallback : null;
     } catch (e) { return null; }
@@ -864,7 +893,7 @@
 
   // 角标浮在输入框**上方**（不是内侧）：内侧会压住模型选择/发送按钮等工具行，
   // 用户实测反馈遮挡视线。位置取 composer 顶边再往上让出角标高度 + 6px；
-  // 上方若还有排队面板，就继续让到队列上沿——「立即/编辑/删除」永远不被盖住。
+  // 上方若还有排队面板、额度横幅、恢复提示或回到最新按钮，就继续让到它们上沿。
   // 宿主重渲染可能清掉 React 子节点，所以不往里插，用 fixed + 每秒同步坐标。
   // 返回 false 表示当前没有可用输入框（设置页/被遮住）或上方没有空间，调用方应隐藏角标。
   function positionBadge() {
@@ -885,7 +914,10 @@
     if (!surface) return false;
     var r = surface.getBoundingClientRect();
     if (!r || r.width < 60) return false;
-    var w = el.offsetWidth || 190;
+    // 隐藏一拍的 offsetWidth 是 0；用上一次实测宽度兜底，避免刚恢复显示时
+    // 按 190 估算导致角标右侧溢出到视口外（三审 P2）。
+    var w = el.offsetWidth || el.__lagfixWidth || 190;
+    if (el.offsetWidth > 0) el.__lagfixWidth = el.offsetWidth;
     var vw = window.innerWidth || 1024;
     var left = Math.min(Math.max(8, r.right - w - 8), vw - w - 8);
     // 角标高度约 25px（12px 字号 + 6px 内边距 + 边框），留 26px 上限。
@@ -893,20 +925,61 @@
     var BADGE_H = 26;
     var GAP = 6;
     var top = r.top - BADGE_H - GAP;
-    // 排队面板（data-testid="v4-queue"）在 composer 上方。角标现在也住在这条带上，
-    // 若两者竖向相交，就整体让到队列上沿，绝不覆盖「立即 / 编辑 / 删除」。
+    // 输入框上方这条带上还可能叠着排队面板、额度横幅、待恢复提示、回到最新按钮。
+    // 不写死具体 class：沿 composer 往上走到 dock 锚点，逐个检查前面的兄弟节点，
+    // 任何可见、与角标水平相交、且压到角标纵向区间的块都要让开——否则角标会盖住
+    // 横幅按钮并截走点击（终审 P1-1）。从近到远检查，多层横幅会逐层抬高。
+    var badgeRight = left + w;
+    function liftOver(node2) {
+      if (!node2 || node2 === el || (node2.contains && node2.contains(el))) return null;
+      // 退场中的浮层 opacity:0 仍有非零 rect；给它让位会造成位置跳动。
+      try {
+        var cs = window.getComputedStyle ? window.getComputedStyle(node2) : null;
+        if (cs && (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0")) {
+          return null;
+        }
+      } catch (e2) {}
+      var nr = node2.getBoundingClientRect();
+      if (!nr || nr.height <= 0 || nr.width <= 0) return null;
+      if (!(nr.left < badgeRight && nr.right > left)) return null;
+      if (!(nr.bottom > top && nr.top < top + BADGE_H)) return null;
+      return nr.top - BADGE_H - GAP;
+    }
     try {
-      // 分屏时每个 pane 各有一个队列；优先取输入框所在会话子树里的，
-      // 并要求水平方向有交集，避免拿另一个 pane 的队列把角标顶走。
-      var scope = (surface.closest && surface.closest('[data-session-id]')) || document;
-      var q = scope.querySelector('[data-testid="v4-queue"]');
-      if (q) {
-        var qr = q.getBoundingClientRect();
-        var vh2 = window.innerHeight || 768;
-        var overlapsX = qr && qr.left < r.right && qr.right > r.left;
-        var overlapsY = qr && qr.height > 0 && qr.bottom > top && qr.top < top + BADGE_H;
-        if (qr && overlapsX && overlapsY && qr.top < vh2) {
-          top = qr.top - BADGE_H - GAP;
+      var dock = surface.closest && surface.closest('[data-v4-back-to-bottom-anchor="composer-dock"]');
+      if (dock) {
+        var dockNode = surface;
+        // 只处理 dock 内部、composer 之前的兄弟节点，最多上溯 6 层；
+        // 锚点自身的兄弟是整块时间线，把它算进来会把角标顶出视口。
+        for (var depth = 0; dockNode && dockNode !== dock && depth < 6; depth++) {
+          var sib = dockNode.previousElementSibling;
+          while (sib) {
+            var lifted = liftOver(sib);
+            if (lifted !== null && lifted < top) top = lifted;
+            sib = sib.previousElementSibling;
+          }
+          dockNode = dockNode.parentElement;
+        }
+      } else {
+        // 旧版宿主没有 dock 锚点：退回只认排队面板的保守逻辑。
+        // 分屏时每个 pane 各有一个队列；优先取输入框所在会话子树里的，
+        // 并要求水平方向有交集，避免拿另一个 pane 的队列把角标顶走。
+        var scope = (surface.closest && surface.closest('[data-session-id]')) || document;
+        // 旧宿主同一会话子树可能挂着多个队列（草稿/退场层），第一个不一定可见；
+        // querySelector 只看第一个会漏掉真正压住角标的那个（三审 P2）。
+        var qList = [];
+        try {
+          if (scope.querySelectorAll) {
+            qList = Array.prototype.slice.call(scope.querySelectorAll('[data-testid="v4-queue"]'));
+          }
+        } catch (e2) {}
+        if (!qList.length && scope.querySelector) {
+          var qOne = scope.querySelector('[data-testid="v4-queue"]');
+          if (qOne) qList = [qOne];
+        }
+        for (var qi = 0; qi < qList.length; qi++) {
+          var qLift = liftOver(qList[qi]);
+          if (qLift !== null && qLift < top) { top = qLift; break; }
         }
       }
     } catch (e) {}
@@ -966,7 +1039,9 @@
       }
 
       // 只有主对话页且输入框可见时才显示角标；设置页/被覆盖时整条隐藏。
-      var placed = positionBadge();
+      // 用户主动隐藏角标时不做任何 DOM 探测：大会话里 elementFromPoint +
+      // 祖先 closest 也是每秒一次的可观开销（终审 P2）。
+      var placed = settings.badgeVisible ? positionBadge() : false;
       if (el) el.style.display = (settings.badgeVisible && placed) ? "" : "none";
       if (!placed) hideStats(true);
       if (isStatsVisible()) updateStats(fs, rmax, commitRate);
@@ -1389,7 +1464,8 @@
 
     // --- 修复 ---
     var sFix = section("fix", "修复",
-      "减少流式输出与大会话加载时的卡顿。所有改动只影响渲染时机，不改消息、会话数据与工具执行。"
+      "减少流式输出与大会话加载时的卡顿。前三个开关只影响渲染通知时机；"
+      + "大会话保护只决定是否执行一次性全量补拉。都不改消息、会话数据与工具执行。"
       + "每项标题后的「!」可展开该项影响什么、不影响什么。");
     var capThrottle = document.createElement("div");
     capThrottle.className = "cap";
@@ -1435,7 +1511,7 @@
       switchEl(settings.adaptiveOn, function (v) {
         settings.adaptiveOn = v; saveSettings(); rebuildPanel(); renderPanelStatus();
       }),
-      "影响：最近帧 P95 ≥ 80ms 时窗口抬到 200ms，≥ 150ms 抬到 300ms；帧恢复后自动回到"
+      "影响：最近帧 P95 ≥ 80ms 时窗口至少 200ms，≥ 150ms 至少 300ms（以面板值为下限）；帧恢复后自动回到"
       + "\"节流窗口\"里的值。卡顿时主动少画几帧，把主线程让给布局和输入。\n"
       + "不影响：数据与会话状态；也不会改写\"节流窗口\"设置本身。帧很好时它完全不介入。",
       !settings.throttleOn));
@@ -1520,9 +1596,9 @@
     up.type = "button";
     up.className = "act";
     up.textContent = "检查更新";
-    up.disabled = true;   // 还没发布到 GitHub，先置灰，避免给出假的"已是最新"
-    up.title = "尚未发布到 GitHub，暂无更新源";
-    c4.appendChild(rowEl("检查更新", "暂无更新源；发布到 GitHub 后启用。", up));
+    up.disabled = true;   // 版本检查/自动更新尚未接入，先置灰，避免给出假的"已是最新"
+    up.title = "GitHub 已发布，但版本检查 / 自动更新尚未接入；升级请重新执行安装口令";
+    c4.appendChild(rowEl("检查更新", "版本检查 / 自动更新尚未接入；升级请重新执行安装口令。", up));
     // 日志位置与预算：路径由主进程注入（window.__lagfixDataDir），
     // 上限随采集 payload 回传，由主进程执行删除/滚动。
     var dataDir = "~/.zcode/zcode-lagfix";
@@ -1968,6 +2044,10 @@
             : (winRows && typeof winRows.length === "number" ? winRows.length : 0);
           if (isFinite(total) && total >= BIG_ROWS_GUARD && loaded < total) {
             bigBlocked++;
+            // 记下"被拦的是哪个 store"：关保护时只补它。切会话后
+            // findStoreFrom 拿到的是新会话，拿它顶替会在错误会话里
+            // 触发一次全量补拉（三审 P1）。
+            fixState.blockedStore = this;
             return Promise.resolve({
               status: "not-enough-queries",
               logEpoch: (snap && snap.logEpoch) || "unknown",
@@ -2013,32 +2093,47 @@
   }
 
   // 用户明确关掉大会话保护后调用：宿主已把上次被拦的目录请求记成终态
-  // （not-enough-queries），不主动补一次的话，当前会话的问题导航要等重开才完整。
-  function resumeFullHistory() {
-    if (Date.now() < loadAllInFlightAt) return;
+  // （not-enough-queries），不主动补一次的话，问题导航要等重开才完整。
+  // 只补"真的被我们拦过"的 store，不用当前会话顶替——切会话后顶替会在
+  // 错误的会话里触发一次全量补拉（三审 P1）。
+  function resumeStore(st, attempt) {
+    if (!st || st.closed || settings.bigSessionOn || state.dead) return;
+    if (typeof st.loadAllOlder !== "function") return;
     loadAllInFlightAt = Date.now() + 2000;
     try {
-      var st = findStoreFrom(state.el);
-      if (!st || typeof st.loadAllOlder !== "function") return;
       var pr = st.loadAllOlder();
       if (pr && typeof pr.then === "function") {
         pr.then(function (r) {
-          // 宿主在 loadingOlder=true 时直接返回 stale；等当前分页结束再补一次。
-          if (r && r.status === "stale" && !settings.bigSessionOn && !state.dead) {
-            setTimeout(function () {
-              if (settings.bigSessionOn || state.dead) return;
-              try {
-                var st2 = findStoreFrom(state.el);
-                if (st2 && typeof st2.loadAllOlder === "function") {
-                  var p2 = st2.loadAllOlder();
-                  if (p2 && typeof p2.catch === "function") p2.catch(function () {});
-                }
-              } catch (e) {}
-            }, 800);
+          if (settings.bigSessionOn || state.dead || attempt >= 6) return;
+          // stale：宿主正在分页加载；retryable-failure：传输失败可重试。
+          // 两者都退避后再试，最多 6 次（约 12s），避免无限循环。
+          if (r && (r.status === "stale" || r.status === "retryable-failure")) {
+            setTimeout(function () { resumeStore(st, attempt + 1); }, 600 * (attempt + 1));
           }
         }).catch(function () {});
       }
     } catch (e) {}
+  }
+
+  function resumeFullHistory() {
+    var st = fixState.blockedStore;
+    fixState.blockedStore = null;
+    if (!st || st.closed || settings.bigSessionOn || state.dead) return;
+    if (Date.now() < loadAllInFlightAt) {
+      // 2 秒防抖不能直接丢弃：快速关→开→关时，最后一次关闭也必须有补偿。
+      // 把 store 留在 pending 槽里，等窗口结束后再补一次。
+      fixState.blockedStore = st;
+      if (!fixState.resumeTimer) {
+        fixState.resumeTimer = setTimeout(function () {
+          fixState.resumeTimer = null;
+          var pending = fixState.blockedStore;
+          fixState.blockedStore = null;
+          if (pending && !pending.closed) resumeStore(pending, 0);
+        }, Math.max(50, loadAllInFlightAt - Date.now()));
+      }
+      return;
+    }
+    resumeStore(st, 0);
   }
 
   // 分享入口点击意图位：分享弹窗挂载前 hydrate 就可能被触发，
@@ -2125,11 +2220,15 @@
   // 一键还原（控制台 / 出问题时）
   window.__lagfixOff = function () {
     try {
+      // 与面板/跨窗口关掉大会话保护保持一致：只有本轮真的拦过全量补拉才补一次，
+      // 否则一键还原会把低行数会话也平白拉一遍（终审 P1-7）。
+      var wasBig = settings.bigSessionOn;
       settings.throttleOn = false;
       settings.bigSessionOn = false;
       saveSettings();
       releaseThrottle();
       releaseLoadAllGuard();
+      if (wasBig && bigBlocked !== bigBlockedMark) resumeFullHistory();
       fixState.reason = "已手动关闭";
       renderPanelStatus();
       return "fix off";
@@ -2370,5 +2469,19 @@
       longTaskCount: longTaskCount, maxLongTaskMs: maxLongTaskMs,
       errs: state.errCount,
     };
+  };
+
+  // 冒烟测试入口：只暴露"判定配色"这一条纯逻辑，便于断言面板里的黄/红阈值
+  // 真的会改变角标颜色（终审 P1-1）。不影响运行时行为。
+  window.__lagfixTest = {
+    verdict: verdictOf,
+    setThresholds: function (warnMs, badMs) {
+      // 与面板/加载路径保持同一组不变量：1~5000、2~10000、bad > warn。
+      var w = Math.min(5000, Math.max(1, Number(warnMs) || DEFAULTS.warnMs));
+      var b = Math.min(10000, Math.max(w + 1, Number(badMs) || DEFAULTS.badMs));
+      settings.warnMs = w;
+      settings.badMs = b;
+      return [w, b];
+    },
   };
 })();

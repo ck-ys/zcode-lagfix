@@ -91,7 +91,12 @@ def main() -> None:
     with contextlib.redirect_stdout(io.StringIO()):
         try:
             if pi.OPTOUT_MARKER.exists():
-                pass
+                # 用户执行过卸载：保持静默跳过，但留下可排查的记录。
+                # 直接重装却"没反应"时，看 hook-error.log 就能知道是豁免标记。
+                _log_error(
+                    "optout marker present; skip install. "
+                    f"delete {pi.OPTOUT_MARKER} to reinstall"
+                )
             else:
                 sync_runtime()
                 pi.set_runtime(pi.DATA_DIR)

@@ -22,22 +22,60 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import json
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 HOME = Path.home()
-ASAR_DIR = Path(r"E:\Program Files\ZCode\resources")
-ASAR = ASAR_DIR / "app.asar"
 LOG = HOME / ".zcode" / "zcode-lagfix" / "elevated-finalize.log"
 
-ZUSAGE_DIR = HOME / ".zcode" / "cli" / "plugins" / "cache" / "zusage-marketplace" / \
-    "zcode-token-usage-statusbar" / "1.5.15"
+ZUSAGE_BASE = HOME / ".zcode" / "cli" / "plugins" / "cache" / "zusage-marketplace" / \
+    "zcode-token-usage-statusbar"
 ZUSAGE_RUNTIME = HOME / ".zcode" / "zcode-token-usage-statusbar"
-LAGFIX_DIR = Path(r"D:\Git\git-github\zcode-lagfix\plugins\zcode-lagfix")
+# 脚本位于 <仓库>/tools/，插件源码在 <仓库>/plugins/zcode-lagfix/。
+LAGFIX_DIR = Path(__file__).resolve().parent.parent / "plugins" / "zcode-lagfix"
 
 sys.path.insert(0, str(LAGFIX_DIR))
+import patch_install as pi  # noqa: E402
+
+
+def resolve_asar() -> Path | None:
+    """按 --asar → 运行时 config.json → 自动探测 的顺序找 app.asar。"""
+    argv = sys.argv[1:]
+    if "--asar" in argv:
+        i = argv.index("--asar")
+        if i + 1 < len(argv):
+            candidate = Path(argv[i + 1])
+            if candidate.is_file():
+                return candidate
+    cfg = HOME / ".zcode" / "zcode-lagfix" / "config.json"
+    try:
+        saved = json.loads(cfg.read_text("utf-8")).get("asar_path")
+        if saved and Path(saved).is_file():
+            return Path(saved)
+    except (OSError, ValueError):
+        pass
+    try:
+        return pi.find_asar()
+    except Exception:
+        return None
+
+
+def find_zusage_dir() -> Path | None:
+    """zusage 版本目录不写死：取缓存里带 patch_install.py 的最新版本。"""
+    try:
+        cands = [p for p in ZUSAGE_BASE.glob("*") if (p / "patch_install.py").is_file()]
+    except OSError:
+        return None
+    if not cands:
+        return None
+    return max(cands, key=lambda p: p.stat().st_mtime)
+
+
+ASAR = resolve_asar()
+ZUSAGE_DIR = find_zusage_dir()
 
 
 def log(msg: str) -> None:
@@ -74,8 +112,11 @@ def run(cmd: list, label: str) -> tuple[int, str]:
 
 
 def zusage_pending() -> bool:
-    return (ASAR_DIR / "app.asar.zusage.tmp").exists() and \
-           (ASAR_DIR / "app.asar.zusage.tmp.json").exists()
+    if ASAR is None:
+        return False
+    asar_dir = ASAR.parent
+    return (asar_dir / "app.asar.zusage.tmp").exists() and \
+           (asar_dir / "app.asar.zusage.tmp.json").exists()
 
 
 def main() -> int:
@@ -86,13 +127,15 @@ def main() -> int:
         return 2
     log("✓ 已获得管理员权限")
 
-    if not ASAR.is_file():
-        log(f"❌ 目标不存在：{ASAR}")
+    if ASAR is None or not ASAR.is_file():
+        log(f"❌ 找不到 app.asar：{ASAR}。请先运行 install.py，或用 --asar 指定路径")
         return 2
 
     # 1) zusage 先收尾
     if zusage_pending():
-        if not (ZUSAGE_DIR / "patch_install.py").is_file():
+        if ZUSAGE_DIR is None:
+            log("⚠ 找不到 zusage 版本目录，跳过")
+        elif not (ZUSAGE_DIR / "patch_install.py").is_file():
             log(f"⚠ 找不到 zusage patch_install.py：{ZUSAGE_DIR}，跳过")
         else:
             run([sys.executable, str(ZUSAGE_DIR / "patch_install.py"),
@@ -107,7 +150,6 @@ def main() -> int:
 
     # 3) 最终校验：两行是否都在
     try:
-        import patch_install as pi  # noqa: E402
         pi.set_target(ASAR)
         entry = pi.entry_bytes_of(ASAR)
         lag = pi.line_count(entry)

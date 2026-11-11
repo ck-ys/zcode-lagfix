@@ -170,6 +170,15 @@ def main() -> int:
             check("释放后 finalize 返回 finalized", pi.finalize_pending() == "finalized")
             check("释放后 pending 已清理", pending_cleared(td))
 
+            # 4c. 占用时 uninstall：必须 failed，且绝不能写豁免标记
+            #     （否则会出现"号称卸了、注入还在，钩子又被豁免挡住"的死状态）
+            pi.OPTOUT_MARKER.unlink(missing_ok=True)
+            h2 = k32.CreateFileW(str(asar), 0x80000000, 0x1, None, 3, 0, None)
+            check("能再次构造占用句柄", h2 not in (None, ctypes.c_void_p(-1).value))
+            check("占用时 uninstall 返回 failed", pi.uninstall() == "failed")
+            check("占用时 uninstall 不写豁免标记", not pi.OPTOUT_MARKER.exists())
+            k32.CloseHandle(ctypes.c_void_p(h2))
+
         # 5. finalize 失配分支（R5）：他人（zusage）替换过 asar
         #    模拟：zusage 在我们挂起 pending 期间替换了 asar（我们的行没了）
         foreign_entry = b'console.log("host main v2");\nexport default null;\n' + (
@@ -206,6 +215,40 @@ def main() -> int:
         pi.OPTOUT_MARKER.write_text("", "utf-8")
         check("optout 时 install 返回 optout", pi.install() == "optout")
         pi.OPTOUT_MARKER.unlink()
+
+        # 7b. optout 在"锁外检查之后、拿到锁之前"出现（卸载与安装/收尾的竞态）：
+        #     假标记第一次 exists()=False 骗过锁外检查，第二次 True 验证锁内复查。
+        class _LateOptout:
+            def __init__(self):
+                self.calls = 0
+
+            def exists(self):
+                self.calls += 1
+                return self.calls >= 2
+
+            def unlink(self, missing_ok=False):
+                pass
+
+            def __str__(self):
+                return "<late-optout>"
+
+            @property
+            def parent(self):
+                return pi.DATA_DIR
+
+        real_marker = pi.OPTOUT_MARKER
+        try:
+            pi.OPTOUT_MARKER = _LateOptout()
+            check("install 锁内复查到后写 optout", pi.install() == "optout")
+            write_pending(td, asar, {"out/main/index.js": ENTRY_JS + b"\n" + line,
+                                     "package.json": OTHER_JS})
+            pi.OPTOUT_MARKER = _LateOptout()
+            check("finalize 锁内复查到后写 optout", pi.finalize_pending() == "optout")
+            check("锁内 optout 后 pending 已清理", pending_cleared(td))
+        finally:
+            pi.OPTOUT_MARKER = real_marker
+            pi._clear_pending(asar.parent)
+
         # 恢复到已注入状态供 remove 用
         pi.install()
 

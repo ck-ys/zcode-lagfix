@@ -35,9 +35,10 @@ python "${ZCODE_PLUGIN_ROOT}/hooks/session-start.py" || py -3 "${ZCODE_PLUGIN_RO
 ```
 
 ```bash
-python -c "import json,pathlib;d=json.load(open(pathlib.Path.home()/'.zcode/cli/plugins/installed_plugins.json',encoding='utf-8'));print([p.get('installPath') for p in d.get('plugins',[]) if str(p.get('id','')).startswith('zcode-lagfix@')][0])"
+python -c "import json,pathlib;d=json.load(open(pathlib.Path.home()/'.zcode/cli/plugins/installed_plugins.json',encoding='utf-8'));r=[p.get('installPath') for p in d.get('plugins',[]) if str(p.get('id','')).startswith('zcode-lagfix@')];print(r[0] if r else '')"
 ```
 
+输出为空说明插件未登记，不要继续拼接路径；提示用户先在 设置 → 插件 里安装并启用 zcode-lagfix。
 拿到目录后执行 `<installPath>/hooks/session-start.py`（同样用 `python` 或 `py -3`）。
 完成后核对运行时目录与注入状态：
 
@@ -69,7 +70,7 @@ python install.py remove || py -3 install.py remove
 
 它内部做了「失败就撤回 optout」的保护，成功后会自己写豁免标记。
 
-**从 GitHub 市场安装（没有仓库根目录）**：直接跑运行时目录里的 `patch_install.py uninstall`。它在一次操作里先剥注入行，成功后才写豁免标记；ZCode 还在运行时会返回 `failed`，**不会**写豁免（避免“号称卸了其实还在”）。
+**从 GitHub 市场安装（没有仓库根目录）**：直接跑运行时目录里的 `patch_install.py uninstall`。它先写豁免标记占位（堵住并发钩子/收尾重装），再剥注入行；ZCode 还在运行时 `remove` 返回 `failed` 并撤回标记，**最终状态仍是未卸载**（避免“号称卸了其实还在”）。
 
 ```bash
 python "$HOME/.zcode/zcode-lagfix/patch_install.py" uninstall || py -3 "$HOME/.zcode/zcode-lagfix/patch_install.py" uninstall
@@ -78,8 +79,10 @@ python "$HOME/.zcode/zcode-lagfix/patch_install.py" uninstall || py -3 "$HOME/.z
 运行时目录不存在时（例如钩子从未跑过），再从插件登记表读 `installPath`：
 
 ```bash
-python -c "import json,pathlib;d=json.load(open(pathlib.Path.home()/'.zcode/cli/plugins/installed_plugins.json',encoding='utf-8'));print([p.get('installPath') for p in d.get('plugins',[]) if str(p.get('id','')).startswith('zcode-lagfix@')][0])"
+python -c "import json,pathlib;d=json.load(open(pathlib.Path.home()/'.zcode/cli/plugins/installed_plugins.json',encoding='utf-8'));r=[p.get('installPath') for p in d.get('plugins',[]) if str(p.get('id','')).startswith('zcode-lagfix@')];print(r[0] if r else '')"
 ```
+
+输出为空说明插件未登记；此时直接说明“找不到补丁脚本”，不要用空路径执行命令。
 
 ```bash
 python "<installPath>/patch_install.py" uninstall

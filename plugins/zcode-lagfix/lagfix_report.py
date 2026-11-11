@@ -32,12 +32,13 @@ BAD = "[x]"
 INFO = "[i]"
 
 LOG_KINDS = [
-    ("observe-*.jsonl", "观测样本（每条一个采集周期，间隔可在面板调）"),
+    ("observe-*.jsonl*", "观测样本（每条一个采集周期，间隔可在面板调；.1 为轮转归档）"),
     ("main.log", "主进程加载器（注入、采集泵、自禁用原因）"),
     ("inject.log", "每窗口注入结果（ok=false 带原因）"),
     ("monitor.log", "值守进程（何时等到 / 为何收不了尾）"),
     ("install.log", "安装器（装/卸动作与退出码）"),
     ("hook-error.log", "SessionStart hook 异常"),
+    ("elevated-finalize.log", "管理员权限收尾（tools/finalize_all_admin.py）"),
 ]
 
 

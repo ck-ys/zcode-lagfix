@@ -132,9 +132,9 @@ def _print(msg: str) -> None:
 def _version() -> str:
     try:
         data = json.loads((SRC / ".zcode-plugin" / "plugin.json").read_text("utf-8"))
-        return str(data.get("version", "0.1.1"))
+        return str(data.get("version", "0.3.0"))
     except Exception:
-        return "0.1.1"
+        return "0.3.0"
 
 
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".lagfix-optout", "observe-*.jsonl*",
@@ -315,7 +315,11 @@ def do_install() -> int:
         cfg = json.loads(cfg_path.read_text("utf-8")) if cfg_path.exists() else {}
         cfg["asar_path"] = str(pi.resolve_target())
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), "utf-8")
+        # 与注册表写入同样的原子替换：截断写入中途被杀会留下坏 config，
+        # 之后 hook/monitor 解析失败就找不到 asar（三审 P2）。
+        tmp_cfg = cfg_path.with_name(cfg_path.name + ".tmp")
+        tmp_cfg.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), "utf-8")
+        os.replace(tmp_cfg, cfg_path)
     except Exception as e:
         _print(f"记录 asar 路径失败（不影响安装）：{e}")
     try:
@@ -344,27 +348,54 @@ def do_install() -> int:
 def do_remove() -> int:
     # P1-3：先写 optout 阻止并发 finalize/hook 重装，失败再撤回，绝不留下"已卸载"的假象
     marker = DATA_DIR / ".lagfix-optout"
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text("", "utf-8")
-
-    pi = _patch()
+    pi = None
     try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("", "utf-8")
+        pi = _patch()
         result = pi.remove()
-    except (SystemExit, Exception) as e:
-        # P1-4：patch_install 用 SystemExit 报错，但 IO/权限问题会抛普通异常；
-        # 只捕 SystemExit 会让 optout 标记留在盘上 = "号称卸了，其实还开着"。
-        marker.unlink(missing_ok=True)
+    except BaseException as e:
+        # P1-4：patch_install 用 SystemExit 报错，IO/权限问题抛普通异常；
+        # Ctrl+C 会在写标记之后、remove 前后任意时刻打断。
+        # 只有"确认注入仍在 / 无法确认"时才撤回标记：remove 已经提交后被打断
+        # 必须保留标记，否则下次启动 SessionStart 会把刚剥掉的注入装回来（终审 P2）。
+        injected = None
+        if pi is not None:
+            try:
+                injected = pi.injected_status().get("present")
+            except BaseException:
+                injected = None
+        if injected is None or injected > 0:
+            try:
+                marker.unlink(missing_ok=True)
+            except OSError as ue:
+                _print(f"撤回豁免标记失败（请手动删除 {marker}）：{ue}")
+        if isinstance(e, KeyboardInterrupt):
+            if injected == 0:
+                _print("卸载已完成，但收尾被中断；豁免标记已保留。")
+            else:
+                _print("卸载已中断，未留下 optout 标记。")
+            return 130
         _print(f"卸载失败：{e}")
         return 1
     _print(f"asar 卸载结果：{result}")
 
     if result not in ("removed", "already"):
-        marker.unlink(missing_ok=True)  # 卸载没成功就不能留 optout
+        try:
+            marker.unlink(missing_ok=True)  # 卸载没成功就不能留 optout
+        except OSError as ue:
+            _print(f"卸载失败且豁免标记未能撤回（请手动删除 {marker}）：{ue}")
         _print("❗ 卸载未完成：ZCode 运行中会占用 app.asar。")
         _print("   请完全退出 ZCode（含托盘 / 任务管理器确认无 ZCode 进程）后重跑 remove。")
         return 1
 
-    set_plugin_enabled(False)
+    try:
+        set_plugin_enabled(False)
+    except BaseException as e:
+        # asar 已剥离、optout 已写，这里只是插件启用态没更新：不能静默 traceback。
+        _print(f"注入已移除，但插件启用态未更新：{e}")
+        _print("请在 设置 → 插件 里手动卸载 zcode-lagfix，或修复 config.json 后重跑 remove。")
+        return 1
     _print(f"已写入 optout：{marker}")
     _print("请完全退出 ZCode（含托盘）再打开，角标与观测即消失。")
     return 0

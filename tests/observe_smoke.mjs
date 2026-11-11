@@ -202,6 +202,23 @@ check("允许点击（pointer-events 不是 none）", !/pointer-events:\s*none/.
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+console.log("-- 判定配色：面板黄/红阈值必须真的生效 --");
+window.__lagfixTest.setThresholds(30, 60);
+const vGreen = window.__lagfixTest.verdict(10, 0, null, 3);
+const vYellow = window.__lagfixTest.verdict(40, 0, null, 3);
+const vRed = window.__lagfixTest.verdict(80, 0, null, 3);
+check("P95 10ms（< 黄阈值 30）→ 绿色", vGreen.color === "#3fb950", vGreen.color);
+check("P95 40ms（≥ 黄阈值 30）→ 黄色", vYellow.color === "#d29922", vYellow.color);
+check("P95 80ms（≥ 红阈值 60）→ 红色", vRed.color === "#f85149", vRed.color);
+// "卡死 / 刚卡过"分支也不能硬编码红：用户把红阈值调到 1000 时，
+// 600ms 停顿和 350ms 近期峰值都只能是黄，否则阈值设置仍然形同虚设。
+window.__lagfixTest.setThresholds(200, 1000);
+const vStall = window.__lagfixTest.verdict(30, 600, null, 3);
+const vRecent = window.__lagfixTest.verdict(30, 0, 350, 3);
+check("阈值调高后，600ms 停顿按阈值显示黄色", vStall.color === "#d29922", vStall.color);
+check("阈值调高后，350ms 近期峰值按阈值显示黄色", vRecent.color === "#d29922", vRecent.color);
+window.__lagfixTest.setThresholds(50, 100);   // 恢复默认，后续用例按默认阈值
+
 // 注入一个可见的 composer；elementFromPoint 按矩形命中，模拟真实浏览器的命中测试。
 const surface = makeEl("div");
 surface._rect = { left: 300, top: 500, right: 900, bottom: 620, width: 600, height: 120 };
@@ -401,6 +418,35 @@ check("队列顶到视口顶端时角标隐藏（不压队列）", badge.style.d
   `display=${badge.style.display} top=${badge.style.top}`);
 queueEl._rect = { left: 300, top: 460, right: 900, bottom: 560, width: 600, height: 100 };
 
+console.log("-- dock 内其它横幅（额度 / 待恢复提示）：同样让位 --");
+// 真实宿主把额度横幅、恢复提示、队列都挂在 composer 前面；不能只认 v4-queue。
+// 这里模拟一个没有 testid 的额度横幅，走 dock 兄弟节点路径。
+const quotaEl = makeEl("div");
+quotaEl._rect = { left: 300, top: 440, right: 900, bottom: 492, width: 600, height: 52 };
+const dockEl = makeEl("div");
+const dockSurface = makeEl("div");
+dockSurface._rect = { left: 300, top: 500, right: 900, bottom: 620, width: 600, height: 120 };
+dockEl.appendChild(quotaEl);
+dockEl.appendChild(dockSurface);
+dockSurface.parentElement = dockEl;
+dockSurface.previousElementSibling = quotaEl;
+quotaEl.previousElementSibling = null;
+dockSurface.closest = (sel) =>
+  (String(sel).includes("back-to-bottom-anchor") ? dockEl : null);
+quotaEl.closest = () => null;
+setSurfaces([dockSurface]);
+documentStub.querySelector = (sel) =>
+  (String(sel).includes("chat-composer-input-surface") ? dockSurface : null);
+documentStub.elementFromPoint = () => dockSurface;
+await wait(1100);
+check("额度横幅压到角标带时，让到横幅上沿（top=408）",
+  badge.style.display === "" && badge.style.top === "408px",
+  `display=${badge.style.display} top=${badge.style.top}`);
+// 恢复 fallback 语义：不删掉 closest/兄弟节点，后面的用例会误走 dock 分支。
+delete dockSurface.closest;
+delete dockSurface.previousElementSibling;
+delete dockSurface.parentElement;
+
 // 恢复成普通主页面布局，后面的统计浮层/齿轮测试依赖角标可见
 setSurfaces([mainSurface]);
 documentStub.elementFromPoint = () => mainSurface;
@@ -530,7 +576,13 @@ let dd = 0;
 const unD = s3.store.subscribe(() => { dd++; });   // 此时包装在 s3 的原型上
 s3.store.emit();                                    // 窗口空 → 立即
 const ddAfterFirst = dd;
+const aCallsBeforeOff = store.loadAllCalls || 0;
 window.__lagfixOff();                               // 关开关（会还原原型）
+// 切会话后再关保护：只能补"当初被拦的 A"，不能拿当前会话 B 顶替。
+// B 若也是大会话，顶替会在 B 里平白触发一次全量补拉（三审 P1）。
+check("关闭保护只补被拦过的 A，不误拉当前会话 B",
+  (store.loadAllCalls || 0) === aCallsBeforeOff + 1 && !(s3.store.loadAllCalls || 0),
+  `A=${store.loadAllCalls} B=${s3.store.loadAllCalls}`);
 s3.store.emit();                                    // wrapper 仍在 listeners 里
 check("关掉后已订阅的 wrapper 立即直通（不等 120ms）",
   dd === ddAfterFirst + 1, `dd=${dd}（期望 ${ddAfterFirst + 1}）`);
@@ -551,6 +603,26 @@ check("日志上限默认 50MB 并已持久化", saved.logMaxMB === 50, `logMaxM
 check("没有污染宿主 localStorage 的其它 key",
   Object.keys(localStorage._d).every((k) => k === "lagfix.settings.v1"), Object.keys(localStorage._d).join(","));
 check("重启请求不落盘（防重启死循环）", saved.restart === undefined && saved.restartRequested === undefined);
+
+console.log("-- __lagfixOff：补拉被拦过的历史 --");
+const beforeOffToggle = JSON.parse(localStorage.getItem("lagfix.settings.v1") || "{}");
+localStorage.setItem("lagfix.settings.v1",
+  JSON.stringify({ ...beforeOffToggle, throttleOn: true, bigSessionOn: true }));
+onStorage({ key: "lagfix.settings.v1" });
+await wait(50);
+check("重新开启后大会话保护装到当前原型", !!s3.proto.__lagfixLoadAll);
+const callsBeforeOff = s3.store.loadAllCalls || 0;
+const blockedAgain = await s3.store.loadAllOlder();
+check("重新开启后再次拦下全量补拉",
+  blockedAgain && blockedAgain.status === "not-enough-queries"
+    && (s3.store.loadAllCalls || 0) === callsBeforeOff,
+  `status=${blockedAgain && blockedAgain.status} calls=${s3.store.loadAllCalls}`);
+await wait(2100);   // resumeFullHistory 有 2s 防抖：等上一次一键还原留下的窗口过期
+window.__lagfixOff();
+await wait(50);
+check("__lagfixOff 后自动补拉被拦过的历史一次",
+  (s3.store.loadAllCalls || 0) === callsBeforeOff + 1,
+  `calls=${s3.store.loadAllCalls}（期望 ${callsBeforeOff + 1}）`);
 
 console.log("-- 关闭节流后依赖项变灰 --");
 gear.click();   // 重新打开面板（buildPanel 按当前设置重建）

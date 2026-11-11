@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""zcode-lagfix v0.1 asar 手术库 + CLI（v2：按终审修复 P0-1/P1-1/P1-2/P1-6/P2-*）。
+"""zcode-lagfix v0.3.0 asar 手术库 + CLI（v2：按终审修复 P0-1/P1-1/P1-2/P1-6/P2-*）。
 
 职责：在 ZCode 安装版 app.asar 的入口文件 out/main/index.js 尾部追加一行
 dynamic import，加载我们的主进程 loader（lagfix-main.cjs）。
@@ -25,7 +25,7 @@ dynamic import，加载我们的主进程 loader（lagfix-main.cjs）。
    剥离时连同 \\n 一起剥，字节级可还原）。
 9. install 前确保运行时文件已就位（从本脚本目录复制），手动安装路径不踩空。
 
-CLI：python patch_install.py install|remove|check|status|finalize [--asar PATH] [--runtime DIR]
+CLI：python patch_install.py install|remove|uninstall|check|status|finalize [--asar PATH] [--runtime DIR]
 """
 
 from __future__ import annotations
@@ -390,8 +390,14 @@ def _is_busy(e: OSError) -> bool:
 def _busy_hint(e: OSError) -> str:
     """区分「被占用」与「没权限」，给对提示。"""
     if _is_busy(e):
+        # WinError 5 既可能是进程占用，也可能是 Program Files 的 ACL 拒绝。
+        # 不枚举进程（替换仲裁只信操作系统），但提示必须覆盖第二种可能，
+        # 否则用户会对着"请退出 ZCode"反复重启（三审 P1）。
+        extra = ""
+        if getattr(e, "winerror", None) == 5:
+            extra = " 若确认 ZCode 已完全退出仍失败，通常是 ACL 权限拒绝，请以管理员身份重试。"
         return ("ZCode 正在运行占用 app.asar。请完全退出（含托盘 / 任务管理器确认"
-                "没有 ZCode.exe 与 zcode-runtime-host.exe）后重试。")
+                "没有 ZCode.exe 与 zcode-runtime-host.exe）后重试。" + extra)
     return (f"替换被系统拒绝（{e}）。常见原因：目标目录 ACL 拒绝写入、磁盘满、"
             f"杀毒软件锁定。以管理员身份运行可排查 ACL 问题。")
 
@@ -577,6 +583,10 @@ def install() -> str:
     line = inject_line(runtime)
     for attempt in range(2):
         with file_lock(lock):
+            # 锁外的 optout 检查不具原子性：排队等锁期间用户可能刚卸载并写标记，
+            # 锁内不复查就会把刚剥掉的注入重新装回去（三审 P1）。
+            if OPTOUT_MARKER.exists():
+                return "optout"
             # P2-7：已有可复用 pending 不重打包，只确保 monitor 在跑
             if _pending_valid(asar_dir, asar):
                 _launch_monitor(asar)
@@ -605,6 +615,8 @@ def install() -> str:
                         _print(f"替换 app.asar 失败：{_busy_hint(e)}")
                         return "failed"
                     # 运行中占用 → pending（先确认 TMP 落地再写 sidecar）
+                    if getattr(e, "winerror", None) == 5:
+                        _print(_busy_hint(e))   # 提醒 ACL 也可能返回 WinError 5
                     tmp = asar_dir / TMP_NAME
                     moved = False
                     with contextlib.suppress(OSError):
@@ -681,22 +693,28 @@ def remove() -> str:
 
 
 def uninstall() -> str:
-    """市场安装的一键卸载：剥注入行，成功后再写豁免标记。
+    """市场安装的一键卸载：先写豁免标记占位，再剥注入；失败则撤回标记。
 
-    顺序不能反：ZCode 运行中 remove() 会返回 failed，此时绝不能写 optout，
-    否则用户以为卸了，下次会话钩子又被豁免挡住、注入却还在。
-    成功（removed/already）后写 `.lagfix-optout`，保证即使插件仍启用、
-    或卸载插件前漏了一步，SessionStart 钩子也不会再把注入装回来。
+    - 先写标记：堵住并发的 SessionStart hook / finalize_pending，避免它们
+      在卸载过程中把注入重新装回去（三审 P1 的 TOCTOU）。
+    - remove() 失败（ZCode 仍占用等）→ 撤回标记，绝不留下"号称卸了、
+      其实还在"的假状态。
+    - remove() 成功 → 标记保留；即使插件仍启用，下次启动也不会再注入。
     """
-    result = remove()
-    if result not in ("removed", "already"):
-        return result
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         OPTOUT_MARKER.write_text("uninstalled by patch_install.py uninstall\n", encoding="utf-8")
     except OSError as e:
-        _print(f"注入已移除，但写豁免标记失败：{e}")
+        # 标记都写不了就什么都没改，直接失败，别让用户以为卸载已开始。
+        _print(f"写豁免标记失败，未做任何改动：{e}")
         return "optout-failed"
+    result = remove()
+    if result not in ("removed", "already"):
+        try:
+            OPTOUT_MARKER.unlink(missing_ok=True)
+        except OSError as e:
+            _print(f"卸载失败且豁免标记未能撤回（请手动删除 {OPTOUT_MARKER}）：{e}")
+        return result
     return "uninstalled"
 
 
@@ -740,6 +758,14 @@ def finalize_pending(syntax_check_pkg: bool = True) -> str:
     lock = asar_dir / LOCK_NAME
     with file_lock(lock):
         for _round in range(3):
+            # 锁内复查：卸载可能在 finalize 等锁期间完成并写下 optout。
+            # 不复查的话，下面的"失配重打包"会把刚剥掉的 lagfix 行重新写回，
+            # 造成"卸载成功、注入却复活"（三审 P1）。
+            if OPTOUT_MARKER.exists():
+                _clear_pending(asar_dir)
+                return "optout"
+            if not tmp.exists() or not sidecar_path.exists():
+                return "no-pending"
             fp0 = fingerprint(asar)
             try:
                 if list(fp0) == list(src):
@@ -750,6 +776,10 @@ def finalize_pending(syntax_check_pkg: bool = True) -> str:
                     if fingerprint(asar) != fp0:
                         _print("收尾校验时 asar 又被修改，转重打包分支…")
                         continue
+                    # 语法检查/指纹复查耗时较长，替换前最后确认一次卸载意图。
+                    if OPTOUT_MARKER.exists():
+                        _clear_pending(asar_dir)
+                        return "optout"
                     os.replace(tmp, asar)
                     _clear_pending(asar_dir)
                     return "finalized"
@@ -770,6 +800,9 @@ def finalize_pending(syntax_check_pkg: bool = True) -> str:
                     if fingerprint(asar) != fp0:
                         _print("重打包期间 asar 又被修改，重试…")
                         continue
+                    if OPTOUT_MARKER.exists():
+                        _clear_pending(asar_dir)
+                        return "optout"
                     os.replace(stage, asar)
                     _clear_pending(asar_dir)
                     return "finalized-rederived"
@@ -909,7 +942,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if result in ("removed", "already") else 1
 
     if args.action == "uninstall":
-        result = uninstall()
+        try:
+            result = uninstall()
+        except BaseException as e:
+            # 开源用户可能在没有终端的环境里双击执行；任何异常都要变成可读输出，
+            # 不能只抛栈。remove() 内部仍保证失败时不写豁免标记（终审 P2-1）。
+            _print(f"uninstall 失败：{e}")
+            return 130 if isinstance(e, KeyboardInterrupt) else 1
         _print(f"uninstall → {result}")
         return 0 if result in ("uninstalled", "removed", "already") else 1
 

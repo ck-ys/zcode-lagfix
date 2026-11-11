@@ -40,7 +40,10 @@
   var observeSrcCache = null;
   var hookedWc = null;       // WeakSet：防同一 wc 被事件与快照各挂一次
   var inflight = null;       // Set<wcId>：防 collect 重叠（renderer 卡时调用会堆积）
-  var lastDead = false;      // 连续 dead 样本只记一次，避免日志膨胀
+  // 按窗口去重连续 dead 样本，避免日志膨胀。必须分窗口：全局布尔值在
+  // "窗口 A 已死、窗口 B 还活着"时会被 B 的活样本反复清零，A 的 dead 行
+  // 就会每个采集周期都写一遍（终审 P2-3）。
+  var lastDeadByWin = Object.create(null);
 
   // 打包版 Electron 的 main 进程 stderr 没人接，console.error 等于扔进黑洞。
   // 排查"角标不出现/数据不更新"要能事后看到主进程自己说了什么，所以同时落盘。
@@ -165,10 +168,17 @@
     // dead 样本连续去重：observer 已禁用时它每 5s 返回同一份 dead payload，
     // 不去重会让日志文件被"观测器已停止"刷满（终审 P1-9）。
     if (isDead) {
-      if (lastDead) return;
-      lastDead = true;
+      if (lastDeadByWin[winId]) return;
+      lastDeadByWin[winId] = true;
+      // 窗口 id 会随重开增长；超过 50 个先清掉"活窗口"的 false 记录，
+      // 保留仍 dead 的窗口标记，避免重置后立刻重复刷日志（三审 P2）。
+      if (Object.keys(lastDeadByWin).length > 50) {
+        for (var wid in lastDeadByWin) {
+          if (!lastDeadByWin[wid]) delete lastDeadByWin[wid];
+        }
+      }
     } else {
-      lastDead = false;
+      lastDeadByWin[winId] = false;
     }
     var now = Date.now();
     // 日志预算：收到 renderer 的真实 logMaxMB 之后才开始扫；每 60s 至多一次。
@@ -197,6 +207,8 @@
 
   function collectAll(windows) {
     if (!inflight) inflight = {};
+    // 日志量每轮只扫一次目录，所有窗口共用同一份（多窗口时不重复 readdir）。
+    var statsJson = JSON.stringify(logStats());
     windows.forEach(function (win) {
       try {
         var wc = win.webContents;
@@ -205,7 +217,7 @@
         inflight[wc.id] = true;
         // 采集前把当前日志量推给 renderer（维护页显示「当前 / 上限」），
         // 与 collect 同一次 executeJavaScript，避免额外往返。
-        var pre = "window.__lagfixLogStats=" + JSON.stringify(logStats()) + ";";
+        var pre = "window.__lagfixLogStats=" + statsJson + ";";
         wc.executeJavaScript(pre + "window.__lagfixCollect ? window.__lagfixCollect() : null", false)
           .then(function (text) {
             delete inflight[wc.id];
@@ -216,7 +228,11 @@
             log("采集失败 wc=" + wc.id + "：", e && e.message);
           });
       } catch (e) {
-        if (win && win.webContents) delete inflight[win.webContents.id];
+        // 已销毁窗口的 webContents getter 也可能抛；catch 里再抛会逃出
+        // forEach 被采集泵计为失败，连续 5 次就永久自禁用（三审 P2）。
+        try {
+          if (win && win.webContents) delete inflight[win.webContents.id];
+        } catch (e2) {}
       }
     });
   }
@@ -227,7 +243,7 @@
     try {
       var cutoff = Date.now() - days * 86400000;
       fs.readdirSync(DATA_DIR).forEach(function (name) {
-        if (!/^observe-\d{8}\.jsonl(\.1)?$/.test(name)) return;
+        if (!/^observe-\d{8}\.jsonl(?:\.\d+)?$/.test(name)) return;
         var f = path.join(DATA_DIR, name);
         try {
           if (fs.statSync(f).mtimeMs < cutoff) {
@@ -242,7 +258,9 @@
   // 日志总预算（面板可调，默认 50MB）：超过就删最旧的文件。
   // 只匹配本插件自己生成的日志名；今天正在写的 observe 文件不删，
   // 它的 .1 归档可以删。单个文件仍由 LOG_ROTATE_BYTES 轮转兜底。
-  var LOG_RE = /^(observe-\d{8}\.jsonl(?:\.\d+)?|(?:main|inject|monitor|install|hook-error)\.log(?:\.\d+)?)$/;
+  // elevated-finalize.log 由 tools/finalize_all_admin.py 以管理员身份写入同一目录，
+  // 不纳入预算的话它会绕过 50MB 上限一直长（终审 P2）。
+  var LOG_RE = /^(observe-\d{8}\.jsonl(?:\.\d+)?|(?:main|inject|monitor|install|hook-error|elevated-finalize)\.log(?:\.\d+)?)$/;
   var curLogMaxMB = 50;
   var haveRendererSettings = false;   // 收到过 renderer 设置后才知道真实预算，之前不删日志
   var lastSweepAt = 0;
@@ -266,8 +284,17 @@
     return out;
   }
 
+  var lastRetentionAt = 0;
+  var deniedLogs = Object.create(null);
   function sweepByBudget() {    try {
       if (!ensureDataDir()) return 0;
+      // 14 天保留以前只在启动时跑一次；长期不重启（用户常见的常驻场景）
+      // 会让过期文件一直留着。这里每小时补跑一次，成本是一次 readdir。
+      var nowTs = Date.now();
+      if (nowTs - lastRetentionAt > 3600000) {
+        lastRetentionAt = nowTs;
+        sweepOldLogs(14);
+      }
       var maxBytes = Math.max(5, curLogMaxMB) * 1024 * 1024;
       var nowName = path.basename(logFilePath(Date.now()));
       var files = [];
@@ -290,7 +317,15 @@
           fs.unlinkSync(path.join(DATA_DIR, files[i].name));
           total -= files[i].size;
           removed++;
-        } catch (e) {}
+        } catch (e) {
+          // 提权工具写的 elevated-finalize.log 普通权限删不掉；跳过它继续删
+          // 其它文件，否则预算永远降不下来（三审 P2）。
+          total -= files[i].size;
+          if (!deniedLogs[files[i].name]) {
+            deniedLogs[files[i].name] = true;
+            log("无法删除日志（权限/占用），已跳过：" + files[i].name);
+          }
+        }
       }
       if (removed > 0) {
         log("日志超预算（" + curLogMaxMB + "MB），已删除 " + removed

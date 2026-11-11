@@ -9,9 +9,13 @@ rem  WriteConsoleW，不受代码页影响，所以两边都不需要 chcp。
 rem ============================================================
 
 set PY=python
-set FINALIZE=D:\Git\git-github\zcode-lagfix\plugins\zcode-lagfix\patch_install.py
-set ASAR=E:\Program Files\ZCode\resources\app.asar
-set ZCODE_EXE=E:\Program Files\ZCode\ZCode.exe
+set "FINALIZE=%~dp0..\plugins\zcode-lagfix\patch_install.py"
+rem 从运行时 config.json 读取 asar 路径；没装过就交给 patch_install 自己探测
+set "ASAR="
+for /f "usebackq delims=" %%p in (`%PY% -c "import json,pathlib;p=pathlib.Path.home()/'.zcode'/'zcode-lagfix'/'config.json';print(json.loads(p.read_text('utf-8')).get('asar_path','') if p.exists() else '')"`) do set "ASAR=%%p"
+set "ZCODE_EXE="
+if not "%ASAR%"=="" for %%i in ("%ASAR%") do set "ZCODE_EXE=%%~dpi..\ZCode.exe"
+if "%ZCODE_EXE%"=="" set "ZCODE_EXE=ZCode.exe"
 
 echo ============================================
 echo   zcode-lagfix 一键安装补丁
@@ -35,7 +39,11 @@ for /L %%i in (1,1,4) do (
         taskkill /IM zcode-runtime-host.exe /F >nul 2>&1
         rem 托盘进程/自动拉起可能残留，多等一会儿再动文件
         timeout /t 4 /nobreak >nul
-        "%PY%" "%FINALIZE%" finalize --asar "%ASAR%"
+        if "%ASAR%"=="" (
+            "%PY%" "%FINALIZE%" finalize
+        ) else (
+            "%PY%" "%FINALIZE%" finalize --asar "%ASAR%"
+        )
         set RC=!ERRORLEVEL!
         if !RC! NEQ 0 timeout /t 5 /nobreak >nul
     )

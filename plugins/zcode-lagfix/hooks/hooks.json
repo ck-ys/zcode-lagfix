@@ -1,5 +1,5 @@
 {
-  "description": "zcode-lagfix: 会话启动时同步运行时文件并幂等安装观测注入(修改 app.asar,成功后需完全退出并重开 ZCode 生效;v0.2 起可在面板开关投影订阅通知节流,只合并渲染通知不改数据;不想安装用 /lagfix off 说明里的卸载步骤写豁免标记)",
+  "description": "zcode-lagfix: 会话启动时同步运行时文件并幂等安装观测注入(修改 app.asar,成功后需完全退出并重开 ZCode 生效;v0.3.0 含订阅通知节流与四项可逐项关闭的性能增强,只合并渲染通知不改数据;卸载执行 patch_install.py uninstall,成功后才写豁免标记)",
   "hooks": {
     "SessionStart": [
       {
