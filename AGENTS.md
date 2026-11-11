@@ -171,11 +171,13 @@ python tests/peer_gate.py       # 多插件收尾礼让
 python tests/smoke_asar.py      # 合成 asar 夹具，绝不碰真实安装目录
 python tests/install_remove.py  # 卸载异常边界
 node tests/observe_smoke.mjs    # 渲染端 observer 冒烟
+node tests/update_check.mjs     # 主进程检查更新：白名单/重定向/版本比较/体积上限（不联网）
 ```
 
 规则：
 
 - 改动 observer 行为必须扩展 `tests/observe_smoke.mjs`，覆盖默认值、开关关闭、DOM 属性生命周期、payload 字段、面板行和 `__lagfixOff()` 清理。
+- 改动主进程「检查更新」必须跑 `tests/update_check.mjs`（vm + 假 https，不联网）。
 - 改动 asar 注入/卸载必须跑 `smoke_asar.py` 和 `install_remove.py`；测试只用合成夹具。
 - 实际执行了哪些命令、结果如何，必须如实报告；未执行或环境受限要明确说明，不把“应该能过”写成“已通过”。
 - 自动化测试不等同于 Windows/macOS 实机验收；首次安装后必须提示用户完全退出并重开 ZCode。

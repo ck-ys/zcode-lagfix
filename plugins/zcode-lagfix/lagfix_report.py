@@ -278,6 +278,41 @@ def main() -> int:
         else:
             print(f"  {WARN} 无长任务数据")
 
+        # v0.3.1 滚动/输入诊断：取最后一条带 scroll / input 的样本。
+        # dead / paused 的廉价样本里这两个字段是 null，会被跳过。
+        scroll_row = None
+        input_row = None
+        for r in reversed(rows):
+            if scroll_row is None and isinstance(r.get("scroll"), dict):
+                scroll_row = r["scroll"]
+            if input_row is None and isinstance(r.get("input"), dict):
+                input_row = r["input"]
+            if scroll_row is not None and input_row is not None:
+                break
+        if scroll_row is not None:
+            print(f"  滚动诊断：窗口内帧 P95={fmt(scroll_row.get('p95'), 'ms')}"
+                  f"  最长={fmt(scroll_row.get('max'), 'ms')}"
+                  f"  滚动帧={fmt(scroll_row.get('frames'))}"
+                  f"  时间线事件={fmt(scroll_row.get('events'))}"
+                  f"（任意元素事件={fmt(scroll_row.get('anyEvents'))}）")
+            print(f"    loadOlder：累计 {fmt(scroll_row.get('loadOlderCalls'))} 次"
+                  f"  P95={fmt(scroll_row.get('loadOlderP95'), 'ms')}"
+                  f"  最长={fmt(scroll_row.get('loadOlderMax'), 'ms')}"
+                  f"  失败={fmt(scroll_row.get('loadOlderErrors'))}")
+            print(f"    挂载 turn={fmt(scroll_row.get('mountedTurns'))}"
+                  f"  DOM 峰值={fmt(scroll_row.get('domPeak'))}"
+                  f"  长动画帧={fmt(scroll_row.get('lafCount'))}"
+                  f"（最长 {fmt(scroll_row.get('lafMax'), 'ms')}）")
+            if scroll_row.get("mismatch"):
+                print(f"  {WARN} 有人在滚但没命中时间线选择器（mismatch=true），"
+                      f"先确认宿主 DOM 是否改版")
+        else:
+            print(f"  {INFO} 无滚动诊断数据（旧样本，或滚动诊断已关闭）")
+        if input_row is not None:
+            print(f"  输入延迟：按键→下一帧 P95={fmt(input_row.get('p95'), 'ms')}"
+                  f"  最长={fmt(input_row.get('max'), 'ms')}"
+                  f"  样本={fmt(input_row.get('samples'))}")
+
         if sampled and sampled < 20:
             print(f"  {WARN} 样本仅 {sampled} 个，P95 无统计意义（需 >=20），建议跑久一点再看")
     else:
@@ -363,7 +398,7 @@ def main() -> int:
     print("  · 真实帧间隔 P95 > 50ms 或 单帧最长 > 200ms  → 用户能感知到卡")
     print("  · 长任务次数 > 0 → 主线程被单次阻塞，与卡顿直接相关")
     print("  · 投影提交率高但帧间隔正常 → 宿主在勤快重渲染，暂未卡死")
-    print("[lagfix] v0.3.0：修复页四项增强（自适应窗口/冷静期/后台降频/大会话保护）可逐项关闭，关了节流后依赖项自动变灰；__lagfixOff() 一键还原；维护页显示日志路径与 50MB 上限；角标隐藏后按 Ctrl+Alt+L 或 __lagfixSettings() 重开设置。")
+    print("[lagfix] v0.3.1：观测页新增滚动诊断/输入延迟（只读），性能页新增滚动期隐藏遮罩；大历史会话保护与渲染四项增强均可逐项关闭，关了节流后依赖项自动变灰；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置；维护页可手动检查更新（只查 GitHub Releases，不自动安装）。")
     print()
     print_logs()
     return 0
