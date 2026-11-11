@@ -248,6 +248,21 @@ const old = 3 * 86400000;              // 3 天前
       inst.logs.join(" | "));
   }
 
+  console.log("-- 不可删文件本身大于预算：后面的可删文件仍要删 --");
+  {
+    const inst = createInstance([
+      { name: "elevated-finalize.log", mb: 10, ageMs: old },
+      { name: "observe-20261101.jsonl", mb: 1, ageMs: old - 1000 },
+    ], new Set(["elevated-finalize.log"]));
+    inst.collect({ collectSec: 5, logMaxMB: 5 });
+    await wait(20);
+    check("不可删文件大于预算时仍继续删后面的小文件",
+      inst.unlinked.includes("observe-20261101.jsonl"),
+      JSON.stringify(inst.unlinked));
+    check("剩余量按磁盘真实占用记录（10MB，不是 1MB）",
+      inst.logs.some((l) => /剩余 10MB/.test(l)), inst.logs.join(" | "));
+  }
+
   console.log("-- 默认预算 50MB --");
   {
     const inst = createInstance([

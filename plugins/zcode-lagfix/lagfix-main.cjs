@@ -326,9 +326,9 @@
           total -= files[i].size;
           removed++;
         } catch (e) {
-          // 提权工具写的 elevated-finalize.log 普通权限删不掉；跳过它继续删
-          // 其它文件，否则预算永远降不下来（三审 P2）。
-          total -= files[i].size;
+          // 文件还在磁盘上，不能从 total 里扣掉；否则「不可删文件 > 预算」时
+          // 循环会误以为已经达标，后面的可删文件一个都不会动。
+          // 只记录一次（按文件名去重），然后继续尝试后面的文件。
           if (!deniedLogs[files[i].name]) {
             deniedLogs[files[i].name] = true;
             log("无法删除日志（权限/占用），已跳过：" + files[i].name);

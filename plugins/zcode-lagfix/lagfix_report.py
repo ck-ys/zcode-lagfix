@@ -204,10 +204,10 @@ def print_scroll_diag(rows: list[dict]) -> None:
               f"  最长={fmt(scroll_row.get('max'), 'ms')}"
               f"  滚动帧={fmt(scroll_row.get('frames'))}"
               f"  时间线事件={fmt(scroll_row.get('events'))}"
-              f"（任意元素事件={fmt(scroll_row.get('anyEvents'))}）")
+              f"（会话区非时间线事件={fmt(scroll_row.get('anyEvents'))}）")
         print(f"    loadOlder：累计 {fmt(scroll_row.get('loadOlderCalls'))} 次"
-              f"  P95={fmt(scroll_row.get('loadOlderP95'), 'ms')}"
-              f"  最长={fmt(scroll_row.get('loadOlderMax'), 'ms')}"
+              f"  窗口内 P95={fmt(scroll_row.get('loadOlderP95'), 'ms')}"
+              f"  窗口内最长={fmt(scroll_row.get('loadOlderMax'), 'ms')}"
               f"  失败={fmt(scroll_row.get('loadOlderErrors'))}")
         print(f"    挂载 turn={fmt(scroll_row.get('mountedTurns'))}"
               f"  DOM 峰值={fmt(scroll_row.get('domPeak'))}"

@@ -68,9 +68,10 @@
   var ACQUIRE_RETRY_MS = 30000;     // 找不到锚点时降频重试（不永久放弃）
   var ACQUIRE_TIMEOUT_MS = 10 * 60 * 1000;
   var RING_MAX = 300;
+  var INPUT_RING_MAX = 3600;        // 30s × 120Hz：高频输入不截断 30s 窗口
   var WINDOW_MS = 30000;            // P95 只看最近 30 秒
   var SCROLL_HOLD_MS = 200;         // 滚动后 200ms 内的帧才算「滚动帧」
-  var SCROLL_RING_MAX = 1800;       // 30s × 60fps：与 30s 窗口口径一致
+  var SCROLL_RING_MAX = 3600;       // 30s × 120Hz：高刷屏也保留完整 30s 窗口
   var MASK_IDLE_MS = 180;           // 停滚后多久恢复消息层遮罩
   var VERSION = "0.3.1";
   var ERR_LIMIT = 50;
@@ -276,7 +277,9 @@
     try { setScrollMaskActive(false); } catch (e) {}
     try { if (lafObserver) lafObserver.disconnect(); } catch (e) {}
     try { setScrollListener(false); } catch (e) {}
+    try { setPageUnloadListener(false); } catch (e) {}
     try { setInputListener(false); } catch (e) {}
+    try { stopRaf(); } catch (e) {}
     try { inputPendingAt = 0; } catch (e) {}
     // 自禁用后不再有下一次 collect，环形窗口与周期计数一并清掉。
     scrollRing.length = 0;
@@ -354,8 +357,31 @@
   }
 
   // ---- rAF 采样：真实绘制帧间隔 ----
+  // generation 防止「隐藏窗口 + 关/开观测」留下两条自续链：旧回调被挂起后
+  // 恢复可见时仍会执行，若只看 rafRunning 布尔值就会和新链并存。
+  var rafGen = 0;
+
+  function scheduleRafTick(gen) {
+    requestAnimationFrame(function (t) {
+      if (gen !== rafGen) return;   // 已被暂停/重开取代的旧链
+      rafTick(t);
+    });
+  }
+
+  function startRaf() {
+    if (rafRunning || state.dead || !settings.observe) return;
+    rafRunning = true;
+    rafGen++;
+    scheduleRafTick(rafGen);
+  }
+
+  function stopRaf() {
+    rafRunning = false;
+    rafGen++;
+  }
+
   function rafTick(t) {
-    if (state.dead || !settings.observe) { rafRunning = false; return; }
+    if (state.dead || !settings.observe) { stopRaf(); return; }
     try {
       if (!document.hidden) {
         if (rafLast) {
@@ -374,10 +400,14 @@
         }
         rafLast = t;
         // 输入延迟：按键后第一帧就是「界面能响应」的时刻；d=0 也算有效样本，
-        // 所以不受上面 d>0 门控影响。
+        // 所以不受上面 d>0 门控影响。超过 60s 的待处理按键按无效丢弃
+        // （启动期/页面冻结不应污染 max）。
         if (settings.inputLagOn && inputPendingAt) {
-          inputRing.push({ t: t, ms: Math.round(t - inputPendingAt) });
-          if (inputRing.length > RING_MAX) inputRing.shift();
+          var lag = Math.round(t - inputPendingAt);
+          if (lag >= 0 && lag < 60000) {
+            inputRing.push({ t: t, ms: lag });
+            if (inputRing.length > INPUT_RING_MAX) inputRing.shift();
+          }
           inputPendingAt = 0;
         }
       } else {
@@ -385,8 +415,8 @@
         inputPendingAt = 0;  // 后台不采样，避免把整段后台时长记成一次按键延迟
       }
     } catch (e) { err(); }
-    if (!state.dead) requestAnimationFrame(rafTick);
-    else rafRunning = false;
+    if (!state.dead && settings.observe) scheduleRafTick(rafGen);
+    else stopRaf();
   }
   // 后台期间 rAF 通常整段挂起，rafLast 停在进入后台前；不显式归零的话，
   // 回到前台的第一帧会把整段后台时长当成"一帧"记录（角标变红、P95 被污染）。
@@ -540,6 +570,9 @@
   function onComposerKeydown(ev) {
     try {
       if (state.dead || !settings.inputLagOn || !settings.observe) return;
+      // 采样循环还没启动（尚未 attach 到会话）时不记按键：
+      // 否则第一帧会把「启动等待时间」记成一次输入延迟，污染 30s 窗口的 max。
+      if (!rafRunning) return;
       if (inputPendingAt) return;   // 连按时只记第一个待处理按键（最坏等待）
       var t = ev && ev.target;
       if (!t || typeof t.closest !== "function") return;
@@ -567,10 +600,18 @@
       if (root) root.removeAttribute("data-lagfix-scroll");
     } catch (e) {}
   }
-  try {
-    window.addEventListener("pagehide", onPageUnload);
-    window.addEventListener("beforeunload", onPageUnload);
-  } catch (e) {}
+  function setPageUnloadListener(on) {
+    try {
+      if (on) {
+        window.addEventListener("pagehide", onPageUnload);
+        window.addEventListener("beforeunload", onPageUnload);
+      } else {
+        window.removeEventListener("pagehide", onPageUnload);
+        window.removeEventListener("beforeunload", onPageUnload);
+      }
+    } catch (e) {}
+  }
+  setPageUnloadListener(settings.scrollDiagOn || settings.maskOffOnScroll);
 
   // ---- v0.3.1 loadOlder 观测包装（只观测，不拦截） ----
   // generation：释放/关闭后递增；在途 promise 的回调据此丢弃，
@@ -810,7 +851,7 @@
       clearInterval(acquireTimer);
       acquireTimer = null;
       attach(a);
-      if (!rafRunning) { rafRunning = true; requestAnimationFrame(rafTick); }
+      startRaf();
     } else if (Date.now() - state.since > ACQUIRE_TIMEOUT_MS) {
       clearInterval(acquireTimer);
       acquireTimer = null;
@@ -826,7 +867,7 @@
           state.missed = false;
           state.missedReason = "";
           attach(a2);
-          if (!rafRunning) { rafRunning = true; requestAnimationFrame(rafTick); }
+          startRaf();
           return;
         }
         slowRetryTimer = setTimeout(retry, ACQUIRE_RETRY_MS);
@@ -1230,6 +1271,9 @@
   function positionBadge() {
     var el = document.getElementById(OVERLAY_ID);
     if (!el) return false;
+    // 自家设置弹窗打开时直接让位：遮罩 z-index 高于角标，继续定位只会
+    // 让用户在黑色遮罩后看到一层变暗的角标（与 A8「弹窗内自动隐藏」不符）。
+    if (state.panelOpen) return false;
     var surface = composerSurface();
     if (surface !== observedSurface) {
       observedSurface = surface;
@@ -2714,6 +2758,7 @@
     setLafObserving(settings.scrollDiagOn && settings.observe && !state.dead);
     // 监听器按当前开关装卸；关闭后不再空转，重新开启时这里会挂回来。
     setScrollListener((settings.scrollDiagOn || settings.maskOffOnScroll) && !state.dead);
+    setPageUnloadListener((settings.scrollDiagOn || settings.maskOffOnScroll) && !state.dead);
     setInputListener(settings.inputLagOn && settings.observe && !state.dead);
   }
 
@@ -2736,6 +2781,7 @@
       setScrollMaskActive(false);
       try { if (lafObserver) lafObserver.disconnect(); } catch (e) {}
       setScrollListener(false);
+      setPageUnloadListener(false);
       setInputListener(false);
       scrollRing.length = 0;
       loadOlderRing.length = 0;
@@ -2798,14 +2844,11 @@
       try { if (ltObserver) ltObserver.observe({ entryTypes: ["longtask"] }); } catch (e) {}
       frameRing.length = 0;
       rafLast = 0;
-      if (!rafRunning && !state.dead) {
-        rafRunning = true;
-        requestAnimationFrame(rafTick);
-      }
+      startRaf();
     } else {
       try { if (mo) { mo.disconnect(); mo = null; } } catch (e) {}
       try { if (ltObserver) ltObserver.disconnect(); } catch (e) {}
-      rafRunning = false;
+      stopRaf();
       // 暂停后不再采样：清掉待处理按键，避免恢复后把整段暂停时长记成一次延迟。
       inputPendingAt = 0;
       scrollEvents = 0;

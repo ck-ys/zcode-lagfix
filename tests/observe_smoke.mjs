@@ -220,8 +220,17 @@ globalThis.PerformanceObserver = class {
 };
 window.innerWidth = 1440;
 window.innerHeight = 900;
-window.addEventListener = (t, fn) => { (window._listeners = window._listeners || {}); (window._listeners[t] = window._listeners[t] || []).push(fn); };
-window.removeEventListener = () => {};
+window.addEventListener = (t, fn) => {
+  const bag = (window._listeners = window._listeners || {});
+  const arr = (bag[t] = bag[t] || []);
+  if (arr.indexOf(fn) < 0) arr.push(fn);   // 与真实 DOM 一致：同函数同阶段只挂一次
+};
+window.removeEventListener = (t, fn) => {
+  const arr = (window._listeners || {})[t];
+  if (!arr) return;
+  const i = arr.indexOf(fn);
+  if (i >= 0) arr.splice(i, 1);
+};
 
 // ---------- 加载被测脚本 ----------
 const src = readFileSync(SRC, "utf8");
@@ -606,6 +615,20 @@ const samplesAfterOutside = inputOf().samples;
 check("输入框外按键不计入", samplesAfterOutside === samplesBeforeOutside,
   `before=${samplesBeforeOutside} after=${samplesAfterOutside}`);
 
+// 超过 60s 的待处理按键不是有效输入延迟（启动期/页面冻结），必须丢弃。
+const realDateNow = Date.now;
+let fakeNow = realDateNow();
+Date.now = () => fakeNow;
+keydownAll.forEach((fn) => fn({ target: keySurface, key: "ArrowDown" }));
+fakeNow += 61000;
+driveFrame(fakeNow);
+Date.now = realDateNow;
+driveFrame(realDateNow());   // 把 rafLast 从假时间轴拉回真实时间
+const samplesAfterStale = inputOf().samples;
+check("超过 60s 的待处理按键被丢弃",
+  samplesAfterStale === samplesBeforeOutside,
+  `before=${samplesBeforeOutside} after=${samplesAfterStale}`);
+
 const kdBeforeInputOff = (documentStub._listeners.keydown || []).length;
 writeSettings({ inputLagOn: false });
 check("inputLagOn=false 时 input 为 null",
@@ -619,13 +642,26 @@ check("重新开启后 keydown 监听挂回来",
   `now=${(documentStub._listeners.keydown || []).length}`);
 
 console.log("-- 暂停观测：廉价 payload 的 scroll/input 为 null --");
+const rafBeforePause = rafCb;
 writeSettings({ observe: false });
 const pausedPayload = JSON.parse(window.__lagfixCollect());
 check("paused payload 的 scroll 为 null", pausedPayload.scroll === null);
 check("paused payload 的 input 为 null", pausedPayload.input === null);
 writeSettings({ observe: true });
+const resumedScroll = JSON.parse(window.__lagfixCollect()).scroll;
 check("恢复观测后 scroll 回到对象",
-  scrollOf() !== null);
+  resumedScroll && typeof resumedScroll === "object", JSON.stringify(resumedScroll));
+// 暂停前挂起的旧 rAF 回调在恢复后不能再记账（否则隐藏窗口会留下两条自续链）。
+const framesBeforeOldChain = window.__lagfixDiag().frameSamples;
+rafBeforePause(performance.now() + 16);
+check("暂停/恢复后旧的 rAF 链不再记账",
+  window.__lagfixDiag().frameSamples === framesBeforeOldChain,
+  `before=${framesBeforeOldChain} after=${window.__lagfixDiag().frameSamples}`);
+driveFrame(performance.now() + 16);   // 新链先建基线
+driveFrame(performance.now() + 32);   // 再记一帧
+check("恢复后新 rAF 链继续采样",
+  window.__lagfixDiag().frameSamples === framesBeforeOldChain + 1,
+  `frames=${window.__lagfixDiag().frameSamples}`);
 
 console.log("-- 角标可见性：设置页 / 被遮挡 / 多个输入框 --");
 const badgeClick = (badge._listeners.click || [])[0];
@@ -958,6 +994,10 @@ check("__lagfixOff 移除了 document 级 scroll 监听",
 check("__lagfixOff 会断开 long-animation-frame 观察器",
   perfCalls.disconnect > perfDiscBeforeOff,
   `before=${perfDiscBeforeOff} after=${perfCalls.disconnect}`);
+check("__lagfixOff 移除 pagehide/beforeunload 监听",
+  (window._listeners.pagehide || []).length === 0
+    && (window._listeners.beforeunload || []).length === 0,
+  `pagehide=${(window._listeners.pagehide || []).length}`);
 check("原型 subscribe 已还原为包装前的同一引用", proto.subscribe === origSubscribeRef);
 check("原型上的标记已删除", !proto.__lagfixThrottle);
 check("大会话保护已还原到原始 loadAllOlder", proto.loadAllOlder === origLoadAllRef);
@@ -992,6 +1032,9 @@ check("重新开启后 loadOlder 观测装到当前原型", !!s3.proto.__lagfixL
 check("重新开启后 scroll 监听只挂一份",
   (documentStub._listeners.scroll || []).length === 1,
   `count=${(documentStub._listeners.scroll || []).length}`);
+check("重新开启后 pagehide 监听挂回来",
+  (window._listeners.pagehide || []).length === 1,
+  `count=${(window._listeners.pagehide || []).length}`);
 const callsBeforeReenable = JSON.parse(window.__lagfixCollect()).scroll.loadOlderCalls;
 await s3.store.loadOlder();
 const reenabledPayload = JSON.parse(window.__lagfixCollect());
@@ -1054,8 +1097,8 @@ check("关闭态开关用可见中性灰（避免浅色主题白底白轨）",
 const badgeRow = findRow(documentStub.getElementById("lagfix-settings-panel"), "显示角标");
 check("面板里已经没有「显示角标」开关", !badgeRow);
 await wait(1100);
-check("即使 localStorage 存过 badgeVisible:false，角标仍显示（A8）",
-  badge.style.display !== "none", `display=${badge.style.display}`);
+check("设置弹窗打开时角标自动隐藏（A8 布局让位）",
+  badge.style.display === "none", `display=${badge.style.display}`);
 check("settings 快照不再输出 badgeVisible",
   !("badgeVisible" in JSON.parse(window.__lagfixCollect()).settings));
 check("注册了全局快捷键监听", (window._listeners.keydown || []).length > 0);
@@ -1064,6 +1107,9 @@ check("注册了全局快捷键监听", (window._listeners.keydown || []).length
 }));
 check("Esc 后弹窗隐藏",
   documentStub.getElementById("lagfix-modal-mask").style.display === "none");
+await wait(1100);
+check("关闭设置后角标恢复显示（旧 badgeVisible:false 被忽略）",
+  badge.style.display !== "none", `display=${badge.style.display}`);
 (window._listeners.keydown || []).forEach((fn) => fn({
   key: "l", ctrlKey: true, altKey: true,
   preventDefault() {}, stopPropagation() {},
