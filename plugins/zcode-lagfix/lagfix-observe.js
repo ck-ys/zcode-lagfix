@@ -180,6 +180,8 @@
     lastEffMs: 0,              // 最近一次实际生效的节流窗口（面板展示）
     restartRequested: false,   // 只存内存：随样本回传给主进程，不落盘（防重启死循环）
     updateCheckRequested: false, // 只存内存：随下一个样本回传一次，主进程检查 GitHub Releases
+    updateCheckWaiting: false,   // 请求已随样本发出，等主进程注入 __lagfixUpdate
+    updateCheckSentAt: 0,        // 发出请求时的本地时间，用于判断结果是否已更新
   };
 
   // rAF 真实帧间隔
@@ -200,7 +202,6 @@
   var loadOlderRing = [];    // [{t, ms}]
   var loadOlderCalls = 0;    // 自 observer 启动累计
   var loadOlderErrors = 0;   // 同步抛错 + promise reject
-  var loadOlderMax = 0;
   var loadOlderTarget = null;// 当前被包装的 store 或原型（同一时刻只包一个）
   var inputRing = [];        // [{t, ms}] keydown → 下一帧
   var inputPendingAt = 0;    // 0 表示没有待处理按键
@@ -285,7 +286,6 @@
     anyScrollEvents = 0;
     loadOlderCalls = 0;
     loadOlderErrors = 0;
-    loadOlderMax = 0;
     lafCount = 0;
     lafMax = 0;
     lastScrollAt = 0;
@@ -493,8 +493,9 @@
       if (!isDoc && typeof el.matches !== "function") return;
       if (isDoc || !el.matches('[data-v4-timeline-scroll="true"]')) {
         // 非时间线的滚动也计数：用来区分「没人滚」与「选择器失配」（宿主改版）。
-        // 但要排除本插件自己的面板/浮层，否则在设置面板里滚动会伪造 mismatch。
-        if (countDiag && !isOwnUiScroll(el)) anyScrollEvents++;
+        // 只认会话 pane 内或 document 级目标：宿主设置页等区域滚动不算信号，
+        // 本插件自己的面板/浮层同样排除，避免伪造 mismatch。
+        if (countDiag && !isOwnUiScroll(el) && isSessionScrollTarget(el)) anyScrollEvents++;
         return;
       }
       if (countDiag) {
@@ -514,6 +515,16 @@
       if (typeof el.closest !== "function") return true;
       return !!(el.closest("#" + PANEL_ID) || el.closest("#" + STATS_ID));
     } catch (e) { return true; }
+  }
+
+  // 非时间线滚动的归属判定：只有会话 pane 子树或 document 级目标才算「宿主改版信号」。
+  // 宿主设置页、侧栏等区域的滚动不进入 anyScrollEvents，否则 mismatch 会误报。
+  function isSessionScrollTarget(el) {
+    try {
+      if (el === document || el === document.documentElement || el === document.body) return true;
+      if (typeof el.closest !== "function") return false;
+      return !!el.closest("[data-session-id]");
+    } catch (e) { return false; }
   }
 
   // 监听器按开关装卸：__lagfixOff / 暂停 / 自禁用时真正移除，重新开启时再挂。
@@ -571,7 +582,6 @@
     var ms = Math.round(now - t0);
     loadOlderRing.push({ t: now, ms: ms });
     if (loadOlderRing.length > RING_MAX) loadOlderRing.shift();
-    if (ms > loadOlderMax) loadOlderMax = ms;
   }
 
   function makeProbedLoadOlder(orig) {
@@ -1036,6 +1046,8 @@
       "#" + PANEL_ID + " .seg button.on{background:rgba(88,166,255,.2);color:#79c0ff;opacity:1}",
       "#" + PANEL_ID + " .status{font-size:12px;line-height:1.5;",
       "color:var(--color-foreground-subtle,#8791a3);word-break:break-all}",
+      "#" + PANEL_ID + " .ver{font-size:12px;color:var(--color-foreground-subtle,#8791a3);",
+      "font-variant-numeric:tabular-nums;white-space:nowrap}",
       "#" + PANEL_ID + " .dlg-ft{display:flex;justify-content:space-between;align-items:center;",
       "padding:10px 18px;border-top:1px solid var(--color-border,rgba(255,255,255,.1));",
       "font-size:11.5px;color:var(--color-foreground-subtle,#8791a3)}",
@@ -2059,10 +2071,11 @@
     });
     c4.appendChild(rowEl("日志上限", "超过上限自动删最旧的日志；今天正在写的文件会先滚动再删。", logSel));
 
-    var verLine = document.createElement("div");
-    verLine.className = "status";
-    verLine.textContent = "版本 v" + VERSION + " · 控制台 __lagfixOff() 可一键还原全部优化项";
-    c4.appendChild(verLine);
+    var verEl = document.createElement("span");
+    verEl.className = "ver";
+    verEl.textContent = "v" + VERSION;
+    c4.appendChild(rowEl("版本",
+      "本机只读诊断与缓解；不修改会话内容，不联网上报。", verEl));
     sM.appendChild(c4);
 
     var reset = document.createElement("button");
@@ -2096,7 +2109,7 @@
     var ft = document.createElement("div");
     ft.className = "dlg-ft";
     var ftL = document.createElement("span");
-    ftL.textContent = "所有设置已展示";
+    ftL.textContent = "设置修改后自动保存";
     ft.appendChild(ftL);
     var ftR = document.createElement("span");
     ftR.textContent = "zcode-lagfix";
@@ -2139,13 +2152,27 @@
 
   // 「检查更新」结果由主进程注入 window.__lagfixUpdate（本机不读网络）。
   // 主进程只在收到 updateCheck=1 的样本后写一次；这里只负责展示。
+  function markUpdateRequestSent() {
+    state.updateCheckWaiting = true;
+    state.updateCheckSentAt = Date.now();
+  }
+
   function renderUpdateStatus() {
     var el = document.getElementById(PANEL_ID + "-updatestatus");
     if (!el) return;
     var u = null;
     try { u = window.__lagfixUpdate || null; } catch (e) {}
+    // 请求已随样本发出、主进程结果还没注入时，继续显示「正在检查」。
+    // 结果以 __lagfixUpdate.at 为准；15s 兜底避免主进程异常时永远停在检查中。
+    if (state.updateCheckWaiting) {
+      var gotResult = u && typeof u === "object"
+        && typeof u.at === "number" && u.at >= state.updateCheckSentAt;
+      if (gotResult || Date.now() - state.updateCheckSentAt > 15000) {
+        state.updateCheckWaiting = false;
+      }
+    }
     // 「正在检查」优先：第二次点击时不能还显示上一次的结论。
-    if (state.updateCheckRequested) {
+    if (state.updateCheckRequested || state.updateCheckWaiting) {
       el.textContent = "正在检查…（主进程下一个采集周期发出请求）";
       return;
     }
@@ -2667,7 +2694,6 @@
       anyScrollEvents = 0;
       loadOlderCalls = 0;
       loadOlderErrors = 0;
-      loadOlderMax = 0;
       lafCount = 0;
       lafMax = 0;
       lastScrollAt = 0;
@@ -2719,7 +2745,6 @@
       anyScrollEvents = 0;
       loadOlderCalls = 0;
       loadOlderErrors = 0;
-      loadOlderMax = 0;
       lafCount = 0;
       lafMax = 0;
       lastScrollAt = 0;
@@ -2919,7 +2944,7 @@
       mismatch: anyScrollEvents > 0 && scrollEvents === 0,
       loadOlderCalls: loadOlderCalls,
       loadOlderP95: pctOf(loVals, 0.95),
-      loadOlderMax: loVals.length ? loadOlderMax : null,
+      loadOlderMax: ringMax(loadOlderRing, now),
       loadOlderErrors: loadOlderErrors,
       mountedTurns: turns,
       domPeak: domPeak || null,
@@ -2976,6 +3001,7 @@
       // 否则暂停期间每个周期都会重复请求。
       var pausedAsk = state.updateCheckRequested ? 1 : 0;
       state.updateCheckRequested = false;
+      if (pausedAsk) markUpdateRequestSent();
       return JSON.stringify({
         sid: state.sid, frames: 0, dt: 0,
         commitP50: null, commitP95: null, frameP50: null, frameP95: null,
@@ -2989,6 +3015,7 @@
       });
     }
     var now = performance.now();
+    var askUpdate = state.updateCheckRequested ? 1 : 0;
     var dtS = state.lastCollectAt ? (now - state.lastCollectAt) / 1000 : 0;
     state.lastCollectAt = now;
     try {
@@ -3038,7 +3065,7 @@
         scroll: scrollSnapshot(now),
         input: inputSnapshot(now),
         ver: VERSION,
-        updateCheck: state.updateCheckRequested ? 1 : 0,
+        updateCheck: askUpdate,
         restart: state.restartRequested ? 1 : 0,
       };
       return JSON.stringify(out);
@@ -3047,7 +3074,7 @@
       return JSON.stringify({ sid: state.sid, frames: 0, dt: 0, dead: false, errs: state.errCount,
         settings: cfg, fix: fixSnapshot(),
         scroll: null, input: null, ver: VERSION,
-        updateCheck: state.updateCheckRequested ? 1 : 0,
+        updateCheck: askUpdate,
         restart: state.restartRequested ? 1 : 0 });
     } finally {
       state.frames = 0;   // 异常路径也要清零，否则下次会跨窗口累计上报
@@ -3057,6 +3084,8 @@
       anyScrollEvents = 0;
       lafCount = 0;
       // 检查更新请求只随一个样本回传：主进程收到后就会去查，不需要重发。
+      // 记下已发出，面板在结果注入前继续显示「正在检查」。
+      if (askUpdate) markUpdateRequestSent();
       state.updateCheckRequested = false;
     }
   };

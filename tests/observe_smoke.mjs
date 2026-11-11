@@ -509,6 +509,15 @@ const mmPanel = scrollOf();
 check("设置面板内滚动不计入 anyEvents", mmPanel.anyEvents === 0 && mmPanel.mismatch === false,
   `any=${mmPanel.anyEvents} mismatch=${mmPanel.mismatch}`);
 
+// 会话 pane 外的宿主区域（设置页、侧栏）滚动不是「宿主改版」信号，不计数。
+const outsidePaneEl = makeEl("div");
+outsidePaneEl.closest = () => null;
+dispatchScroll(outsidePaneEl);
+const mmOutside = scrollOf();
+check("会话 pane 外的滚动不计入 anyEvents",
+  mmOutside.anyEvents === 0 && mmOutside.mismatch === false,
+  `any=${mmOutside.anyEvents} mismatch=${mmOutside.mismatch}`);
+
 // 宿主若把滚动改到 document，target 没有 matches，也必须计入 anyEvents。
 dispatchScroll(documentStub);
 const mmDoc = scrollOf();
@@ -796,7 +805,10 @@ check("分类不再叫「修复」", !panelText.includes("修复"));
 check("面板含「渲染节流」", panelText.includes("渲染节流"));
 check("面板含「重启 ZCode」", panelText.includes("重启 ZCode"));
 check("面板含「检查更新」", panelText.includes("检查更新"));
-check("底部说明「所有设置已展示」", panelText.includes("所有设置已展示"));
+check("底部说明「设置修改后自动保存」", panelText.includes("设置修改后自动保存"));
+check("维护页有正式版本行",
+  panelText.includes("版本") && panelText.includes("本机只读诊断与缓解"));
+check("面板不再出现控制台 __lagfixOff 提示", !panelText.includes("__lagfixOff"));
 check("状态条页改用「显示文字 / 信息量 / 警告阈值 / 严重阈值」",
   ["显示文字", "信息量", "警告阈值", "严重阈值"].every((t) => panelText.includes(t)));
 check("旧的颜色式阈值命名已消失",
@@ -847,6 +859,12 @@ if (upBtn) {
   check("本次 payload 的 updateCheck=1", JSON.parse(window.__lagfixCollect()).updateCheck === 1);
   check("下一次 payload 的 updateCheck 归零（只请求一次）",
     JSON.parse(window.__lagfixCollect()).updateCheck === 0);
+  // 标记清零后、主进程结果注入前，面板不能回落到「尚未检查」。
+  window.__lagfixSettings();
+  const upStatus = documentStub.getElementById("lagfix-settings-panel-updatestatus");
+  check("请求发出后仍显示「正在检查」",
+    !!upStatus && String(upStatus.textContent).includes("正在检查"),
+    `text=${upStatus && upStatus.textContent}`);
 }
 
 const infoBtn = panel ? findButton(panel, "!") : null;
@@ -880,7 +898,8 @@ check("弹窗打开时注册了 keydown", kdAll.length > 0);
 // 真实 DOM 会把同一个 keydown 发给所有监听者；输入延迟采样也监听 keydown，
 // 所以这里必须遍历全部，不能只取 [0]。
 kdAll.forEach((fn) => fn({ key: "Escape", target: panel, stopPropagation() {} }));
-check("Esc 后弹窗隐藏", mask.style.display === "none");
+check("Esc 后弹窗隐藏",
+  documentStub.getElementById("lagfix-modal-mask").style.display === "none");
 
 console.log("-- 跨窗口设置同步（storage 事件）--");
 const before = JSON.parse(localStorage.getItem("lagfix.settings.v1") || "{}");
