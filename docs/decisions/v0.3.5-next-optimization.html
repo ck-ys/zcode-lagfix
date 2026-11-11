@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>zcode-lagfix 下一版本拍板 · v0.3.5 面板期归因与合并</title>
+<title>zcode-lagfix 下一版本拍板 · v0.3.5 最佳推荐方案与修复前后流程</title>
 <style>
   :root {
     --bg: #0b1017;
@@ -224,24 +224,41 @@
 </style>
 </head>
 <body>
+<style>
+  .flow { display: flex; flex-direction: column; gap: 0; margin: 18px 0 6px; }
+  .flow-step {
+    border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px;
+    background: var(--card); color: var(--text); font-size: 14px; line-height: 1.55;
+  }
+  .flow-step b { color: #fff; }
+  .flow-step small { display: block; margin-top: 4px; color: var(--muted); font-size: 12.5px; }
+  .flow-step.warn { border-color: rgba(248,81,73,.45); background: rgba(248,81,73,.07); }
+  .flow-step.ok { border-color: rgba(63,185,80,.45); background: rgba(63,185,80,.07); }
+  .flow-step.measure { border-color: rgba(88,166,255,.45); background: rgba(88,166,255,.07); }
+  .flow-step.idle { border-style: dashed; color: var(--muted); }
+  .flow-arrow { text-align: center; color: var(--dim); font-size: 18px; line-height: 1.2; padding: 4px 0; }
+  .flow-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .flow-note { color: var(--dim); font-size: 12.5px; margin: 6px 0 0; }
+  @media (max-width: 720px) { .flow-split { grid-template-columns: 1fr; } }
+</style>
 <div class="wrap">
 
   <header class="hero">
     <div class="hero-main">
-      <div class="eyebrow"><span class="dot" style="background:var(--red);box-shadow:0 0 0 5px rgba(248,81,73,.12)"></span>NEXT RELEASE · v0.3.5</div>
-      <h1>下一项优化 <span>先分清「谁在占主线程」</span></h1>
-      <p class="lede">你复现的路径是：<b>长会话正在运行/回复 + 右侧面板打开一个 HTML + 在面板里高频上下滑动</b>。日志显示这段时间<b>聊天区零滚动、零投影提交</b>，主线程仍持续每秒产生 3–10 个 100ms+ 长帧。插件能改的只有自己那部分；先把归因做准，再决定值不值得做缓解。</p>
+      <div class="eyebrow"><span class="dot" style="background:var(--red);box-shadow:0 0 0 5px rgba(248,81,73,.12)"></span>NEXT RELEASE · v0.3.5 · 最佳推荐方案</div>
+      <h1>先量准，再让路 <span>面板滑动卡顿的可行边界</span></h1>
+      <p class="lede">你复现的路径：<b>长会话运行/回复中 + 右侧面板打开 HTML + 在面板里高频上下滑动</b>。日志里这段时间聊天区零滚动、零提交，主线程仍持续每秒产生 3–10 个 100ms+ 长帧。根因一半在宿主 <code>&lt;webview&gt;</code> 合成，插件改不了；插件能做的是<b>把归因做准</b>，并在面板期<b>给主线程让路</b>。本页给出唯一推荐方案与修复前后流程。</p>
       <div class="meta">
-        <span class="chip">状态 <b>研究完成 · 待拍板</b></span>
-        <span class="chip">样本 <b>496 条带长帧归因（22:11–22:35）</b></span>
-        <span class="chip">候选 <b>4 项</b></span>
-        <span class="chip">建议 <b>P0 + O5，O3b 后置</b></span>
+        <span class="chip">状态 <b>设计完成 · 待拍板</b></span>
+        <span class="chip">证据 <b>496 条长帧样本 / 22:11–22:35</b></span>
+        <span class="chip">推荐 <b>P0 + O5 + U1</b></span>
+        <span class="chip">不承诺 <b>修好 webview 绘制</b></span>
       </div>
     </div>
     <aside class="hero-side">
       <div class="verdict-box">
-        <div class="big">建议 v0.3.5 = P0 归因补强 + O5 面板期合并（实验，默认关）</div>
-        <p>P0 只读、默认开：给每条长帧标出触发来源与面板状态。O5 默认关：面板打开时把通知合并抬到 400ms。webview 自身的绘制成本，插件修不了，只能如实写进上游建议。</p>
+        <div class="big">v0.3.5：归因（默认开）+ 面板期合并（实验，默认关）</div>
+        <p>P0 只读、无行为改动；O5 只改通知时机，关掉即回到 v0.3.4。O3b 自动补拉降频后置——它解决的是另一条路径，且动它会碰首 turn 完整性。</p>
       </div>
       <div class="version-line">基于 v0.3.4（2026-11-11 已发布）· 本页只定路线</div>
     </aside>
@@ -249,179 +266,161 @@
 
   <section>
     <div class="sec-head">
-      <h2>01 · 已确认的事实</h2>
-      <p>只写日志与源码能证明的事；结论标注样本数与时间窗。</p>
+      <h2>01 · 为什么是这三项（结论先行）</h2>
+      <p>一句话：能改的只有「通知合并」和「归因」；补页降频与 webview 合成都不在本版。</p>
     </div>
-    <div class="grid-3">
-      <div class="card">
-        <h3>面板期长帧：最硬的一组数据</h3>
-        <p>22:33:02–22:33:41：<b>时间线滚动 0 次、投影提交 0 次</b>，仍出现每 3 秒 <b>20–33 个</b> ≥100ms 长帧（中位 139ms、P90 345ms、最大 1501ms），强制布局中位 65ms。侧栏此时 722px 打开。</p>
+    <table class="accept-table">
+      <thead><tr><th>候选</th><th>针对哪条路径</th><th>证据</th><th>本版决定</th><th>理由</th></tr></thead>
+      <tbody>
+        <tr>
+          <td data-label="候选"><b>P0 归因补强</b></td>
+          <td data-label="路径">全部长帧</td>
+          <td data-label="证据">现在 <code>TimerHandler</code> 同时可能是插件补发、宿主 1s 时钟、面板 webview 相关定时器，无法区分</td>
+          <td data-label="决定"><b>做，默认开</b></td>
+          <td data-label="理由">只读、零行为改动；不做它，后面所有缓解都是猜。</td>
+        </tr>
+        <tr>
+          <td data-label="候选"><b>O5 面板期合并</b></td>
+          <td data-label="路径">面板 HTML 滑动</td>
+          <td data-label="证据">面板期零滚动零提交仍有 20–33 个长帧/3 秒；插件唯一可控变量是通知频率</td>
+          <td data-label="决定"><b>做，实验默认关</b></td>
+          <td data-label="理由">300→400ms 只让时间线少渲染几次，给 webview 合成让出主线程；风险为零，但收益需 A/B。</td>
+        </tr>
+        <tr>
+          <td data-label="候选"><b>U1 上游文档</b></td>
+          <td data-label="路径">面板 HTML 滑动</td>
+          <td data-label="证据"><code>UnifiedBrowserView.tsx:41</code>：webview guest 在宿主 DOM 内合成，滚动绘制成本落在宿主渲染层</td>
+          <td data-label="决定"><b>做，只出文档</b></td>
+          <td data-label="理由">插件没有 API 能改 webview 合成；把证据交上游是唯一正确动作。</td>
+        </tr>
+        <tr>
+          <td data-label="候选"><b>O3b 自动补拉降频</b></td>
+          <td data-label="路径">长会话上翻</td>
+          <td data-label="证据">40 秒 +78 次补页、P95 561ms、最长 1517ms；但 O3 只覆盖 4/200</td>
+          <td data-label="决定"><b>后置</b></td>
+          <td data-label="理由">跳过 effect 自动补拉会让首 turn header 延迟；先等 P0 证明面板期长帧与补页相关。</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>02 · 修复前：现在卡在哪</h2>
+      <p>两条路径共用一个主线程；插件当前的参与点只有节流与观测。</p>
+    </div>
+
+    <h3 style="margin:18px 0 4px;font-size:15px">路径 A · 面板 HTML 高频滑动</h3>
+    <div class="flow">
+      <div class="flow-step"><b>① 长会话运行/回复</b><small>投影提交约 4 次/秒（commitP50 ≈ 240ms），大 DOM 会话最高 9.9k 节点</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step"><b>② store 通知 → 插件节流窗口</b><small>120ms / 自适应 200–300ms / 面板常开 300ms；窗口未到期时用 <code>setTimeout(fire)</code> 合并补发</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step"><b>③ React 渲染时间线</b><small>每条通知触发一次时间线渲染；9.9k DOM 下单次渲染可达 100ms+</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step"><b>④ 宿主布局效应</b><small>消息层遮罩同步（6 次样式写 + 几何读）、虚拟化测高、滚动补偿</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step warn"><b>⑤ 主线程排队</b><small>③④ 与右侧面板 webview 的滚动/合成争同一个主线程</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step"><b>⑥ 右侧面板 <code>&lt;webview&gt;</code> 滚动/合成</b><small>guest 像素在宿主 DOM 内合成，滚动时持续产生合成/绘制工作</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step warn"><b>⑦ 长帧 100–1500ms → 面板滑动掉帧</b><small>实测：零滚动零提交时每 3 秒仍有 20–33 个 ≥100ms 长帧，中位 139ms</small></div>
+    </div>
+    <p class="flow-note">实测补充：这段里 <code>turnContentVisOn</code>（屏外减负）是开着的，长帧仍为 139ms 中位——它只省屏外绘制，救不了屏内与 webview 合成。</p>
+
+    <h3 style="margin:26px 0 4px;font-size:15px">路径 B · 长会话上翻补页</h3>
+    <div class="flow">
+      <div class="flow-split">
+        <div class="flow-step"><b>滚动到接近顶部</b><small><code>handleScroll</code> 同步调用 <code>onLoadOlder()</code></small></div>
+        <div class="flow-step"><b>SessionPane effect 自动补齐</b><small>首 turn 缺 header 时触发，cursor 去重，跳过不会重试</small></div>
       </div>
-      <div class="card">
-        <h3>面板期在日志里的占比</h3>
-        <p>带长帧归因的 496 条样本中，面板打开 115 条；其中 70 条「无时间线滚动」。这 70 条里有 <b>17 条</b>长帧数 ≥10，全部集中在 22:30–22:39（中位 16.5、最大 33）。</p>
-      </div>
-      <div class="card">
-        <h3>长会话滚动本身也很重</h3>
-        <p>22:32:29–22:32:56：40 秒内补页 <b>+78 次</b>，单次 P95 <b>561ms</b>、最长 <b>1517ms</b>；frameP95 从 12 升到 <b>158ms</b>；DOM 3k→<b>9.9k</b>。</p>
-      </div>
-      <div class="card">
-        <h3>O3 降频基本没覆盖到</h3>
-        <p>约 200 次补页里，只有 <b>4 次</b>落在 scroll 派发栈内（<code>pace.allowed/skipped = 4/0</code>）。绝大多数补页来自 <code>SessionPane.tsx:4870</code> 的 effect 自动补齐，O3 按设计不拦它。</p>
-      </div>
-      <div class="card">
-        <h3>O4 开着也压不住屏内成本</h3>
-        <p>面板期这段 <code>turnContentVisOn=true</code>（<code>data-lagfix-cv</code> 生效），长帧中位仍 139ms。它只省屏外绘制，对屏内内容与 webview 合成无效。</p>
-      </div>
-      <div class="card">
-        <h3>宿主面板是 webview</h3>
-        <p><code>UnifiedBrowserView.tsx:41</code>：网页像素由 renderer 内的 <code>&lt;webview&gt;</code> guest 直接渲染、在 DOM 内合成。也就是说面板 HTML 的滚动绘制成本落在宿主合成层上，插件没有任何 API 能改它。</p>
-      </div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step"><b>插件 O3 降频判定</b><small>只拦「滚动派发栈内」的调用：实机约 200 次里只命中 <b>4 次</b>；effect 自动补齐按设计不拦</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step warn"><b>后端全量过滤 + 前端整窗拷贝</b><small>每次 O(全会话行数)；实测单次 P95 <b>561ms</b>、最长 <b>1517ms</b>，40 秒内 78 次</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step warn"><b>DOM 3k → 9.9k，frameP95 12 → 158ms</b><small>补页与渲染叠加，进入下一轮长帧</small></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>03 · 修复后：推荐方案怎么改</h2>
+      <p>只加两个开关与一段文档；宿主渲染链路一行不改。</p>
+    </div>
+    <div class="flow">
+      <div class="flow-step ok"><b>① 长会话运行/回复（不变）</b><small>插件仍然只合并通知，不改数据、不改宿主</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step measure"><b>② P0 归因层（默认开，只读）</b><small>每条 ≥100ms 长帧记录：距上次通知 / 上次节流补发 / 上次时间线滚动 / 上次投影提交的毫秒数；分类 <code>flush / notify / scroll / other</code>；样本带 <code>paneOpen</code> 与 <code>panelQuiet</code>（面板开着且聊天区没滚）</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step ok"><b>③ O5 面板期合并（实验，默认关）</b><small>检测到面板打开：通知窗口下限 300 → <b>400ms</b>；角标定位 1.8s → <b>3s</b>；面板关闭立即恢复</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step ok"><b>④ 时间线渲染次数下降</b><small>预期 -20%~-30%（需 A/B 证实）；每次渲染的耗时不变，只是次数变少</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step ok"><b>⑤ 主线程给面板 webview 合成让出时间</b><small>这是插件唯一能影响到那条链路的点；不能消除 webview 自身绘制成本</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step measure"><b>⑥ 用 P0 数据判定是否过线</b><small>长帧数或 frameP95 下降 ≥20% → 保留可选；否则永久默认关，并如实标注「未达门槛」</small></div>
     </div>
     <div class="callout">
       <div class="icon">!</div>
-      <p><b>这条路径的瓶颈很可能不在插件管辖范围内。</b>插件能做的只有：把归因做准（谁触发、面板期还是聊天期），以及在面板交互期降低<b>我们自己</b>和宿主通知链路的竞争成本。面板 webview 的绘制开销不能包装成「已优化」。</p>
+      <p><b>不承诺：</b>面板 HTML 自身的滚动绘制、webview 合成、宿主 1 秒 <code>liveNowMs</code> 整树时钟，这三项插件都改不了。O5 只减少「时间线渲染」这一份竞争成本，可能只占面板期长帧的一部分。</p>
     </div>
   </section>
 
   <section>
     <div class="sec-head">
-      <h2>02 · 两个必须先解开的歧义</h2>
-      <p>不解决它们，任何缓解都只能靠猜。</p>
-    </div>
-    <div class="grid-2">
-      <div class="card hot-card">
-        <h3>歧义一：TimerHandler ≠ 宿主定时器</h3>
-        <p>本插件节流补发就是 <code>setTimeout(fire, wait)</code>，<code>fire()</code> 里同步跑 React 订阅回调，整段渲染都会被 LoAF 记成 <code>TimerHandler:setTimeout</code>。宿主还有 <code>ConversationTimeline.tsx:721</code> 的 1 秒 <code>liveNowMs</code> 整树时钟。现在无法区分这三者。</p>
-      </div>
-      <div class="card">
-        <h3>歧义二：面板滚动我们看不见</h3>
-        <p>插件的滚动计数只认 <code>[data-v4-timeline-scroll]</code> 和会话 pane；webview 内部的滚动事件不会冒泡到宿主文档。所以「面板在滑」在样本里表现为「滚动 0、提交 0」——和你实际的操作对不上。</p>
-      </div>
-      <div class="card">
-        <h3>解决方式：时间上下文 + 面板标记</h3>
-        <p>长帧开始时记下距「上次通知 / 上次节流补发 / 上次时间线滚动 / 上次投影提交」的毫秒数，按最近者分类；样本额外记 <code>paneOpen</code> 与「面板打开且无时间线滚动」的 <code>panelQuiet</code> 标记。</p>
-      </div>
-      <div class="card">
-        <h3>边界：不能声称测到了 webview 内部</h3>
-        <p><code>panelQuiet</code> 只代表「面板开着且聊天区没滚」，不能证明 webview 正在滚。报告与文档必须按这个口径写，避免把相关性说成因果。</p>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <div class="sec-head">
-      <h2>03 · 候选方案</h2>
-      <p>全部遵守：独立开关、默认值有理由、关闭即回到 v0.3.4、不读会话内容。</p>
+      <h2>04 · 归因 → 决策映射（拿到 P0 数据后怎么走）</h2>
+      <p>这张表是 v0.3.5 之后的分叉条件，先写清楚，避免下次又靠感觉。</p>
     </div>
     <table class="accept-table">
-      <thead><tr><th>编号</th><th>做什么</th><th>开关 / 默认</th><th>代价与边界</th><th>验收门槛</th></tr></thead>
+      <thead><tr><th>P0 分类结果</th><th>说明</th><th>下一步</th></tr></thead>
       <tbody>
-        <tr>
-          <td data-label="编号"><b>P0</b></td>
-          <td data-label="做什么">长帧上下文：每条 ≥100ms 长帧记录 <code>sinceNotify / sinceFlush / sinceScroll / sinceCommit</code>，分类 <code>flush / notify / scroll / other</code>；样本加 <code>paneOpen</code> 与 <code>panelQuiet</code>；报告新增分类计数。</td>
-          <td data-label="开关"><code>lafCtxOn</code><br><b>默认开</b>（只读）</td>
-          <td data-label="代价">每帧多 4 个整数；4 个模块级时间戳；不新增监听器、不改宿主。面板 webview 内部状态仍不可见。</td>
-          <td data-label="验收">≥90% 长帧可归入四类；<code>other</code> &lt;30%；关闭后 <code>laf</code> 恢复 v0.3.4 形状。</td>
-        </tr>
-        <tr>
-          <td data-label="编号"><b>O5</b></td>
-          <td data-label="做什么">面板期合并：<code>paneOpen</code> 时通知窗口下限从 300ms 抬到 <b>400ms</b>，角标定位降到每 3 秒一次；面板关闭立即恢复。</td>
-          <td data-label="开关"><code>panelQuietOn</code><br><b>默认关</b>（实验）</td>
-          <td data-label="代价">面板开着时长会话内容更新最多晚 400ms；不碰 webview、不改布局；关掉即恢复。收益可能有限，必须先 A/B。</td>
-          <td data-label="验收">同场景（长会话运行 + 面板 HTML 快速滑动）A/B：长帧数或 <code>scrollP95</code> 下降 ≥20%；不过就永久默认关。</td>
-        </tr>
-        <tr>
-          <td data-label="编号"><b>O3b</b></td>
-          <td data-label="做什么">自动补拉降频：对 effect 自动补齐也做限流（同一会话 800ms 内只放行一次），并保留首 turn 完整性闸门。</td>
-          <td data-label="开关">待定<br><b>本版不做</b></td>
-          <td data-label="代价">跳过自动补拉会让首 turn header 延迟出现；闸门设计错就会留下永久缺口。风险高于当前收益。</td>
-          <td data-label="验收">等 P0 证明面板期长帧与自动补拉相关，再单独拍板。</td>
-        </tr>
-        <tr>
-          <td data-label="编号"><b>U1</b></td>
-          <td data-label="做什么">上游建议（只写文档）：面板 HTML 预览的滚动绘制落在宿主合成层；建议改用独立 BrowserView/进程隔离，或限制预览页的动画与超大内容。</td>
-          <td data-label="开关">—<br><b>文档</b></td>
-          <td data-label="代价">无代码风险；采纳与否取决于宿主团队。</td>
-          <td data-label="验收">附样本时间窗、长帧分布与源码位置；不把「插件观测到」写成「插件已解决」。</td>
-        </tr>
-      </tbody>
-    </table>
-    <div class="callout">
-      <div class="icon">→</div>
-      <p><b>为什么不是 O3b：</b>它直接动补页完整性，而当前证据还不能证明面板期长帧来自自动补拉。先让 P0 把「面板期长帧到底由谁触发」测出来，再决定要不要冒这个险。</p>
-    </div>
-  </section>
-
-  <section>
-    <div class="sec-head">
-      <h2>04 · 推荐路线与验收</h2>
-      <p>一个只读归因 + 一个低风险实验，不加第三项。</p>
-    </div>
-    <div class="grid-2">
-      <div class="card">
-        <h3>发布内容</h3>
-        <p>P0 默认开；O5 默认关；U1 只出文档。O3b 与「隐藏 pane 降频」留到拿到 P0 分类数据之后。</p>
-      </div>
-      <div class="card">
-        <h3>你的复现路径 A/B</h3>
-        <p>同一长会话保持回复中，面板打开同一个 HTML：<b>关 O5 快速滑 30 秒 → 开 O5 快速滑 30 秒 → 再关</b>。对比长帧数、<code>frameP95</code>、强制布局时长与主观跟手度。</p>
-      </div>
-      <div class="card">
-        <h3>数据口径</h3>
-        <p>P0 的 <code>since*</code> 用 <code>performance.now()</code> 与 LoAF <code>entry.startTime</code> 对齐；只在内存环形缓冲，样本上报毫秒差，不落原始时间序列、不含任何页面内容。</p>
-      </div>
-      <div class="card">
-        <h3>回退路径</h3>
-        <p>P0 关闭 → <code>laf.detail</code> 恢复 v0.3.4 字段；O5 关闭 → 回到 P2 的 300ms 规则；<code>__lagfixOff()</code>、自禁用、暂停三条路径都清掉新时间戳与标记。</p>
-      </div>
-    </div>
-    <table class="accept-table">
-      <thead><tr><th>场景</th><th>怎么操作</th><th>重点看什么</th><th>用来判断</th></tr></thead>
-      <tbody>
-        <tr>
-          <td data-label="场景"><b>A 面板 HTML 滑动</b></td>
-          <td data-label="操作">长会话保持运行/回复中，右侧面板打开一个 HTML，快速上下滑动 30 秒；O5 关/开各一轮。</td>
-          <td data-label="指标"><code>laf.count</code>、<code>laf.detail[].since*</code>、<code>paneOpen/panelQuiet</code>、<code>frameP95</code>、<code>longTasks</code>。</td>
-          <td data-label="判断">长帧是插件补发、宿主定时器、还是面板期其它来源；O5 是否过 20% 门槛。</td>
-        </tr>
-        <tr>
-          <td data-label="场景"><b>B 长会话上翻</b></td>
-          <td data-label="操作">面板关闭，同一段历史快速上翻 3 次。</td>
-          <td data-label="指标"><code>loadOlderP95/max</code>、<code>pace.allowed/skipped</code>、DOM 峰值、顶部空白时间。</td>
-          <td data-label="判断">O3 的 4/200 覆盖率是否要重定义（O3b）。</td>
-        </tr>
-        <tr>
-          <td data-label="场景"><b>C 静止对照</b></td>
-          <td data-label="操作">同样的长会话，面板关闭、不做任何操作 30 秒。</td>
-          <td data-label="指标">长帧计数与 <code>frameP95</code>。</td>
-          <td data-label="判断">区分「面板交互成本」与「大 DOM 底噪」。</td>
-        </tr>
+        <tr><td data-label="结果"><code>flush</code> 占比最高</td><td data-label="说明">长帧紧跟在本插件节流补发之后</td><td data-label="下一步">O5 继续加严（400→500ms）或按面板期暂停通知；A/B 验证。</td></tr>
+        <tr><td data-label="结果"><code>notify</code> 占比最高</td><td data-label="说明">通知未合并、直接触发渲染</td><td data-label="下一步">降低基础窗口或按 DOM 规模自适应，先量再调。</td></tr>
+        <tr><td data-label="结果"><code>scroll</code> 占比最高</td><td data-label="说明">滚动事件处理本身重</td><td data-label="下一步">O3b 自动补拉降频 + 遮罩同步抑制复查。</td></tr>
+        <tr><td data-label="结果"><code>other</code> 占比最高</td><td data-label="说明">宿主定时器、webview 合成或纯绘制</td><td data-label="下一步">停插件侧优化，集中出 U1 上游证据；不在插件里硬扛。</td></tr>
       </tbody>
     </table>
   </section>
 
   <section>
     <div class="sec-head">
-      <h2>05 · 需要你拍板</h2>
-      <p>回复一句话即可；实现前不会再改代码。</p>
+      <h2>05 · 验收：你怎么用三段对照验证</h2>
+      <p>同一个长会话保持回复中，右侧面板打开同一个 HTML，每段 30 秒。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>段</th><th>操作</th><th>看什么</th><th>说明什么</th></tr></thead>
+      <tbody>
+        <tr><td data-label="段">1</td><td data-label="操作">面板关闭，不操作</td><td data-label="看"><code>laf.count</code>、<code>frameP95</code></td><td data-label="说明">大 DOM 会话底噪</td></tr>
+        <tr><td data-label="段">2</td><td data-label="操作">面板打开，不滚动</td><td data-label="看">同上 + <code>paneOpen/panelQuiet</code></td><td data-label="说明">面板内容自身绘制</td></tr>
+        <tr><td data-label="段">3</td><td data-label="操作">面板打开，快速上下滑</td><td data-label="看">同上 + 主观跟手度</td><td data-label="说明">webview 滚动/合成成本</td></tr>
+        <tr><td data-label="段">4</td><td data-label="操作">第 3 段重复，O5 开/关各一轮</td><td data-label="看">长帧数、<code>frameP95</code>、<code>longTasks</code></td><td data-label="说明">O5 是否过 20% 门槛</td></tr>
+      </tbody>
+    </table>
+    <p class="flow-note">判定门槛沿用 v0.3.4 实验规则：长帧数或滚动 P95 下降 ≥20%（或长任务下降 ≥30%）才保留；否则默认关并如实标注。</p>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>06 · 拍板</h2>
+      <p>回复一句即可；未获批准不写实现代码。</p>
     </div>
     <div class="grid-2">
       <div class="card">
         <h3>A（推荐）</h3>
-        <p>P0 归因补强（默认开）+ O5 面板期合并（实验、默认关）+ U1 上游文档；O3b 后置。</p>
+        <p>P0 归因补强（默认开）+ O5 面板期合并（实验、默认关）+ U1 上游文档。O3b 后置。</p>
       </div>
       <div class="card">
         <h3>B</h3>
-        <p>只做 P0 归因，先拿到面板期分类数据，再决定做不做 O5。</p>
+        <p>只做 P0，先拿面板期分类数据，再决定 O5 做不做。</p>
       </div>
       <div class="card">
         <h3>C</h3>
-        <p>P0 + O5 + O3b 三项一起上（O3b 有首 turn 完整性风险，需要更长的验收）。</p>
+        <p>P0 + O5 + O3b 一起上（O3b 有首 turn 完整性风险，验收周期更长）。</p>
       </div>
       <div class="card">
         <h3>D</h3>
-        <p>先不写代码：我把这段证据整理成上游问题说明，由宿主侧评估 webview 合成成本。</p>
+        <p>先不写代码：把面板 webview 合成证据整理成上游问题说明。</p>
       </div>
     </div>
   </section>
