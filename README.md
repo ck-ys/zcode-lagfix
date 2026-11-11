@@ -394,7 +394,7 @@ python tests/line_regex.py      # 注入行正则与 zusage 互不误伤（11 �
 python tests/peer_gate.py       # 多插件收尾礼让与上限（5 项）
 python tests/smoke_asar.py      # 合成 asar 夹具，byte 级验证重打包、busy 与卸载竞态（46 项，不碰真实安装目录）
 python tests/install_remove.py  # install.py 卸载异常边界：Ctrl+C / 占用 / 插件态写入失败（8 项）
-python tests/report_session_diag.py # 报告：会话桶/补页明细/侧栏与回前台/卡顿归因/翻页降频/暂停回退/关闭边界/坏行（59 项）
+python tests/report_session_diag.py # 报告：会话桶/补页明细/侧栏与回前台/卡顿归因/翻页降频/暂停回退/关闭边界/坏行（61 项）
 python tests/probe_latency.py   # 外部探针方法有效性：空闲 vs UI 线程占死
 node tests/observe_smoke.mjs    # 渲染端：可见性/角标/节流/滚动诊断/输入延迟/多会话/loadOlder/侧栏与回前台/卡顿归因/翻页降频/渲染减负/日志/一键还原（384 项）
 node tests/update_check.mjs     # 主进程检查更新：白名单/重定向/过滤/版本比较/体积上限/注入（19 项，不联网）

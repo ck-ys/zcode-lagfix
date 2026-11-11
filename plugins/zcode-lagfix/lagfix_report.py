@@ -241,6 +241,16 @@ def _settings_of(row: dict) -> dict:
     return st if isinstance(st, dict) else {}
 
 
+def _laf_script_label(script: dict) -> str:
+    """脚本条目的展示名：文件名优先，其次调用点。
+
+    Electron 里宿主脚本的 PerformanceScriptTiming.sourceURL 实测常为空
+    （2026-11-11 实机 449 条全空），此时 invoker（如 TimerHandler:setTimeout）
+    才是唯一可用的归类信息，不能一律塌成 "?"。
+    """
+    return str(script.get("src") or script.get("invoker") or "?")[:24]
+
+
 def print_session_diag(rows: list[dict]) -> None:
     """v0.3.2 多会话归因 + loadOlder 明细。
 
@@ -517,7 +527,7 @@ def print_laf_diag(rows: list[dict]) -> None:
                     scripts = [s for s in (raw_scripts if isinstance(raw_scripts, list) else [])
                                if isinstance(s, dict)]
                     top = " / ".join(
-                        f"{str(s.get('src') or '?')[:24]} {fmt(s.get('ms'), 'ms')}"
+                        f"{_laf_script_label(s)} {fmt(s.get('ms'), 'ms')}"
                         for s in scripts[:3]) or "（无脚本归属）"
                     style = d.get("styleMs")
                     style_note = f"，其中强制布局 {style}ms" if num(style) and style > 0 else ""
@@ -528,7 +538,7 @@ def print_laf_diag(rows: list[dict]) -> None:
                     raw_sc = d.get("scripts")
                     for s in (raw_sc if isinstance(raw_sc, list) else []):
                         if isinstance(s, dict) and num(s.get("ms")):
-                            key = str(s.get("src") or "?")[:24]
+                            key = _laf_script_label(s)
                             agg[key] = agg.get(key, 0) + int(s.get("ms"))
                 if agg:
                     tops = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:3]

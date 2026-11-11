@@ -271,6 +271,28 @@ def main() -> int:
     detail_line = next((ln for ln in out.splitlines() if "←" in ln), "")
     check("None src 在明细行归到 ?（且 None ms 显示为 -）",
           "?" in detail_line and "-" in detail_line, detail_line)
+
+    # 实机口径（2026-11-11）：宿主脚本 sourceURL 实测全空，改由 invoker 归类，
+    # 否则明细和聚合会整片塌成 "?"，归因等于没用。
+    laf_nosrc = {
+        "settings": {"lafDiagOn": True},
+        "laf": {"supported": 1, "count": 2, "max": 140, "detail": [{
+            "t": 1730000099000, "ms": 140, "styleMs": 34,
+            "scripts": [
+                {"src": "", "invoker": "TimerHandler:setTimeout", "ms": 59},
+                {"src": "", "invoker": "TimerHandler:setInterval", "ms": 45},
+            ],
+        }]},
+    }
+    out_nosrc = run_laf([laf_nosrc])
+    check("sourceURL 为空时明细行用 invoker 归类",
+          "TimerHandler:setTimeout 59ms" in out_nosrc
+          and "TimerHandler:setInterval 45ms" in out_nosrc, out_nosrc)
+    agg_nosrc = next((ln for ln in out_nosrc.splitlines() if "窗口内脚本耗时聚合" in ln), "")
+    check("空 src 的聚合按 invoker 分组而不是塌成 ?",
+          "TimerHandler:setTimeout 59ms" in agg_nosrc
+          and "TimerHandler:setInterval 45ms" in agg_nosrc
+          and "?" not in agg_nosrc, agg_nosrc)
     check("pace 打印参数与放行/跳过计数",
           "触发间隔 600ms" in out and "放行 4 次" in out and "跳过 9 次" in out, out)
 
