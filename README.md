@@ -196,7 +196,7 @@ ZCode 桌面版**超长会话卡顿**的观测与缓解插件。
 隐私边界：
 
 - 只记录指标、窗口 id 与设置快照，**不记录**提示词、模型回复、文件内容、工具参数或数据库；
-- 所有数据只写本机目录，不上传、不联网；
+- 所有数据只写本机目录，不上传、不自动联网；唯一网络请求是用户手动点击「检查更新」时对 GitHub Releases 的一次查询（无 token、不自动下载/安装）；
 - 不打开 CDP 端口，不读取 `db.sqlite`。
 
 ## 卸载
@@ -308,7 +308,7 @@ python tests/peer_gate.py       # 多插件收尾礼让与上限（5 项）
 python tests/smoke_asar.py      # 合成 asar 夹具，byte 级验证重打包、busy 与卸载竞态（46 项，不碰真实安装目录）
 python tests/install_remove.py  # install.py 卸载异常边界：Ctrl+C / 占用 / 插件态写入失败（8 项）
 python tests/probe_latency.py   # 外部探针方法有效性：空闲 vs UI 线程占死
-node tests/observe_smoke.mjs    # 渲染端：可见性/角标/横幅让位/阈值配色/节流/滚动诊断/遮罩/输入延迟/日志/一键还原（179 项）
+node tests/observe_smoke.mjs    # 渲染端：可见性/角标/横幅让位/阈值配色/节流/滚动诊断/遮罩/输入延迟/日志/一键还原（183 项）
 node tests/update_check.mjs     # 主进程检查更新：白名单/重定向/过滤/版本比较/体积上限/注入（19 项，不联网）
 node tests/log_budget.mjs      # 主进程日志预算：超限删最旧/保留活动文件/14 天清理/权限失败（15 项，假 fs 不写盘）
 ```
