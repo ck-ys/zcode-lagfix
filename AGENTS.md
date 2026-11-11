@@ -76,7 +76,8 @@ ZCode app.asar 入口尾部
             └─ 三处宿主包装：
                  ├─ store.subscribe(listener)  → 合并通知（不改数据）
                  ├─ store.loadAllOlder()      → 大会话拦截一次性全量补拉
-                 └─ store.loadOlder()         → 只观测耗时/失败/行数（v0.3.2，不改返回值）
+                 └─ store.loadOlder()         → 只观测耗时/失败/行数（v0.3.2，默认不改返回值；
+                                              v0.3.4 翻页降频实验开启时跳过 600ms 内重复触发）
 ```
 
 状态所有者：
@@ -115,6 +116,8 @@ ZCode app.asar 入口尾部
 | 右侧面板外框 | `[data-workspace-side-frame="true"]`，`aria-hidden="true"` 表示收起 |
 | 外层可调整面板 | `frame.closest('[data-panel]')` |
 | 显式开合信号 | panel class 新增 `transition-[flex-grow]`（拖拽改宽不加） |
+| turn 内的行级块（O4 作用对象） | `[data-row-id]`（`ConversationRowView`/`ConversationTurnGroup` 渲染） |
+| 正在生成的回合（O4 排除标记） | `[data-v4-running-live-tail="true"]`（CV 选择器用 `:not()` 排除） |
 
 已知宿主事实（v0.3.1 相关）：
 
@@ -162,6 +165,14 @@ v0.3.3 已拍板范围（Route A，侧栏与回前台）：
 - 全部开关默认开、可独立关闭；关闭后行为回到 v0.3.2（`visibilitychange` 基线监听保留，继续重置帧基线并立即补发；P3 只额外挂 `blur/focus` 并接管补发时机）。`__lagfixOff()` 必须清掉两个 DOM 属性、P3 的 `blur/focus` 监听、两个 MutationObserver 与所有定时器；`visibilitychange` 基线与 v0.3.2 一样保留。暂停/自禁用仍移除全部监听。
 - 验收目标见 `docs/decisions/v0.3.3-pane-lag.html` 第 06 节；本版只处理侧栏开合、面板常开、回前台三段，不改宿主布局、不折叠内容。
 - 历史 backlog（O3 补页合并、O4 turn 内 `content-visibility`、O7 多会话策略、预览 HTML 自身绘制成本）留到 v0.3.4，按 v0.3.3 三段 A/B 数据再选 1–2 项。
+
+v0.3.4 已拍板范围（Route A，归因先行 + 双实验）：
+
+- P0 LoAF 卡顿归因（`lafDiagOn`，默认开，只读）：≥100ms 长帧记最近 10 条 `t/ms/styleMs/scripts[]`；`src` 只留文件名、`invoker` 截 120 字符；环是窗口级，不随会话切换清空；与 `lafCount`/`lafMax` 共用 observer，`(scrollDiagOn || lafDiagOn) && observe` 任一需要才装。
+- O3 翻页降频（`loadOlderPaceOn`，默认关，实验）：窗口 >3000 行时两次 `loadOlder` 触发至少隔 600ms；跳过 = 不调原方法、不进观测环/明细、不计 `loadOlderCalls`、返回已结算 promise、不碰 `loadingOlder`/`canLoadOlder`。降频与 `scrollDiagOn` 独立，两者同关才卸载包装。宿主后端全量过滤是 O(全会话行数)/次的宿主侧成本，插件只减次数，文档不得包装成已解决。
+- O4 turn 内 content-visibility（`turnContentVisOn`，默认关，实验）：`data-lagfix-cv="1"` + CSS 只作用 `[data-v4-turn-unit]:not([data-v4-running-live-tail]) [data-row-id]`，`contain-intrinsic-size:auto 160px` 用 remembered size 保证已渲染块对 virtualizer 测高无扰动；不碰 turn wrapper、不碰 live tail；纯 CSS 无新增监听器。
+- 三键均可独立关闭；`__lagfixOff()`/自禁用/暂停三条路径必须清掉 CV 属性、归因环、降频计数。两项实验保留门槛：A/B 滚动 P95 或长任务下降 ≥20%（或长任务 ≥30%），否则永久默认关闭并如实标注。
+- 行为规格见 `docs/specs/v0.3.4-loadolder-dom.md`；路线与数据门槛见 `docs/decisions/v0.3.4-route.html` 第 04/07 节。O7 多会话策略与预览绘制成本本版不做。
 
 ## 7. 版本与发布
 
@@ -216,7 +227,7 @@ node tests/log_budget.mjs       # 主进程日志预算：超限删最旧/保留
 
 - 运行时目录：`~/.zcode/zcode-lagfix/`。
 - 观测/运行日志共享总预算（默认 50MB，可在面板调整），单个 `observe-*.jsonl` 5MB 轮转，14 天保留。清理只允许删 `~/.zcode/zcode-lagfix/` 直接子项里命中白名单的普通文件；删前 `lstat` 复核非符号链接、非目录、路径未越界；活动 `observe-*.jsonl`、未轮转日志与 `settings.json` 永不删除，任何异常一律跳过。
-- 只记录指标、窗口 id、设置快照、会话 sid 与计数、`loadOlder` 元数据；不记录提示词、回复、文件内容、分页内容、消息 id、工具参数。
+- 只记录指标、窗口 id、设置快照、会话 sid 与计数、`loadOlder` 元数据、长帧的脚本文件名与调用点（`invoker` 截断 120 字符，不含路径/源码位置）；不记录提示词、回复、文件内容、分页内容、消息 id、工具参数。
 - UI 日志用 `packages/ui/src/logger.ts` 的等价约束不适用于本仓库；本仓库渲染端不引入宿主 logger，调试输出走观测器内部 `err()`/日志，不往控制台刷敏感信息。
 - 不把日志文件提交进 git。
 

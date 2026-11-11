@@ -241,6 +241,16 @@ def _settings_of(row: dict) -> dict:
     return st if isinstance(st, dict) else {}
 
 
+def _laf_script_label(script: dict) -> str:
+    """脚本条目的展示名：文件名优先，其次调用点。
+
+    Electron 里宿主脚本的 PerformanceScriptTiming.sourceURL 实测常为空
+    （2026-11-11 实机 449 条全空），此时 invoker（如 TimerHandler:setTimeout）
+    才是唯一可用的归类信息，不能一律塌成 "?"。
+    """
+    return str(script.get("src") or script.get("invoker") or "?")[:24]
+
+
 def print_session_diag(rows: list[dict]) -> None:
     """v0.3.2 多会话归因 + loadOlder 明细。
 
@@ -467,6 +477,112 @@ def print_pane_diag(rows: list[dict]) -> None:
         print(f"  {INFO} 无回前台数据（旧样本，或开关已关闭）")
 
 
+def print_laf_diag(rows: list[dict]) -> None:
+    """v0.3.4 卡顿来源定位（LoAF 归因）+ 翻页降频计数。
+
+    - laf 取最近一条 dict；detail 为 [] 时向前找最近一次非空（与 loadOlderDetail 同约定）。
+    - supported=0 明确提示浏览器不支持，不把「不支持」说成「没有卡顿」。
+    - pace 是缓解项计数：开关关闭时打印「已关闭」，开启时打印参数与累计放行/跳过。
+    - 旧样本没有字段时只提示，不报错。
+    """
+    # v0.3.4 终审 P1-3：状态判定只看**最新样本**，不能用反向扫描的结果决定
+    # 「已关闭」——先关闭过、后来重开但处于暂停/自禁用的日志，扫描会命中更老的
+    # 关闭样本，把「暂停」误报成「已关闭」，还 break 掉更早的有效明细。
+    newest = rows[-1] if rows else {}
+    newest_settings = _settings_of(newest)
+
+    lrow = None
+    l_older = False
+    l_disabled = False
+    for idx, r in enumerate(reversed(rows)):
+        val = r.get("laf")
+        if isinstance(val, dict):
+            if val.get("detail"):
+                lrow = val
+                l_older = idx > 0
+                break
+            if lrow is None:
+                lrow = val  # 先记住最近一条（带 count/max），明细继续向前找
+        elif val is None and _settings_of(r).get("lafDiagOn") is False:
+            break        # 遇到关闭样本就停止回退，不把关闭前的数据当当前数据
+
+    if lrow is not None:
+        supported = lrow.get("supported")
+        if supported == 0:
+            print(f"  {INFO} 当前浏览器不支持 long-animation-frame，无法做卡顿来源定位")
+        else:
+            suffix = "（最近一次有效样本）" if l_older else ""
+            print(f"  卡顿来源定位：本周期长帧 {fmt(lrow.get('count'))} 次"
+                  f"，最长 {fmt(lrow.get('max'), 'ms')}{suffix}")
+            if lrow.get("count") == 0 and lrow.get("detail"):
+                print(f"    {INFO} 计数为 0 但已有明细：旧样本只开了卡顿归因、未开滚动诊断"
+                      f"（v0.3.4 起两者共用计数，新样本不会再出现）")
+            raw_detail = lrow.get("detail")
+            details = [d for d in (raw_detail if isinstance(raw_detail, list) else [])
+                       if isinstance(d, dict)][-10:]
+            if details:
+                print(f"    最近 {len(details)} 次 ≥100ms 长帧：")
+                for d in details:
+                    raw_scripts = d.get("scripts")
+                    scripts = [s for s in (raw_scripts if isinstance(raw_scripts, list) else [])
+                               if isinstance(s, dict)]
+                    top = " / ".join(
+                        f"{_laf_script_label(s)} {fmt(s.get('ms'), 'ms')}"
+                        for s in scripts[:3]) or "（无脚本归属）"
+                    style = d.get("styleMs")
+                    style_note = f"，其中强制布局 {style}ms" if num(style) and style > 0 else ""
+                    print(f"      {_fmt_ts(d.get('t'))}  {fmt(d.get('ms'), 'ms'):>8s}{style_note}"
+                          f"  ← {top}")
+                agg: dict = {}
+                for d in details:
+                    raw_sc = d.get("scripts")
+                    for s in (raw_sc if isinstance(raw_sc, list) else []):
+                        if isinstance(s, dict) and num(s.get("ms")):
+                            key = _laf_script_label(s)
+                            agg[key] = agg.get(key, 0) + int(s.get("ms"))
+                if agg:
+                    tops = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:3]
+                    print("    窗口内脚本耗时聚合："
+                          + " / ".join(f"{k} {v}ms" for k, v in tops))
+            else:
+                print(f"    {INFO} 本文件内没有 ≥100ms 的长帧记录（没卡到这个量级，"
+                      f"或记录在上一个日志文件）")
+    elif newest_settings.get("lafDiagOn") is False:
+        print(f"  {INFO} 卡顿来源定位已关闭")
+    elif newest_settings.get("observe") is False:
+        print(f"  {INFO} 卡顿来源定位已暂停（开关仍开，恢复观测后继续记录）")
+    elif newest.get("dead"):
+        print(f"  {INFO} 观测器已自禁用，卡顿来源定位停止")
+    elif l_disabled:
+        print(f"  {INFO} 卡顿来源定位已关闭")
+    else:
+        print(f"  {INFO} 无卡顿来源数据（旧样本，或本文件内还没有开启过）")
+
+    prow = None
+    p_disabled = False
+    p_seen = False
+    for r in reversed(rows):
+        val = r.get("pace")
+        if isinstance(val, dict):
+            prow = val
+            p_seen = True
+            break
+        if val is None and _settings_of(r).get("loadOlderPaceOn") is False:
+            p_disabled = True
+            break
+
+    if prow is not None:
+        print(f"  翻页降频（实验）：窗口 >{fmt(prow.get('minRows'))} 行时触发间隔"
+              f" {fmt(prow.get('intervalMs'), 'ms')}，累计放行 {fmt(prow.get('allowed'))} 次"
+              f" / 跳过 {fmt(prow.get('skipped'))} 次")
+        if prow.get("skipped") == 0 and prow.get("allowed") == 0:
+            print(f"    （自开关开启后还没有被计数的补页触发；非滚动触发的补页不进这项统计）")
+    elif p_disabled:
+        print(f"  {INFO} 翻页降频已关闭（实验项，默认关闭）")
+    else:
+        print(f"  {INFO} 无翻页降频数据（旧样本）")
+
+
 def main() -> int:
     # 必须在任何 print 之前：中文 Windows 默认 GBK，符号会抛 UnicodeEncodeError
     try:
@@ -573,6 +689,8 @@ def main() -> int:
     print_session_diag(rows)
     # v0.3.3：侧栏开合与回前台同样独立，面板常开但 0 提交的样本也要纳入。
     print_pane_diag(rows)
+    # v0.3.4：卡顿来源定位与翻页降频计数同样独立于 active 判断。
+    print_laf_diag(rows)
 
     if rows:
         print(f"  静止占比：{len(idle) * 100 // len(rows)}%")
@@ -654,7 +772,7 @@ def main() -> int:
     print("  · 真实帧间隔 P95 > 50ms 或 单帧最长 > 200ms  → 用户能感知到卡")
     print("  · 长任务次数 > 0 → 主线程被单次阻塞，与卡顿直接相关")
     print("  · 投影提交率高但帧间隔正常 → 宿主在勤快重渲染，暂未卡死")
-    print("[lagfix] v0.3.3：新增侧栏开合 420ms 保护、面板常开期保护与回前台 700ms 保护（四项独立开关，默认开）；collect 新增 pane/refocus 字段，报告新增「侧栏开合」「回前台」两段。仍不读消息正文、不写 store、不联网上报；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
+    print("[lagfix] v0.3.4：新增卡顿来源定位（记录 ≥100ms 长帧的脚本归属与强制布局占比，只留文件名，默认开）；新增两项默认关闭的实验缓解——大会话翻页降频与长回合渲染减负；collect 新增 laf/pace 字段，报告新增「卡顿来源定位」「翻页降频」两段。仍不读消息正文、不写 store、不联网上报；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
     print()
     print_logs()
     return 0

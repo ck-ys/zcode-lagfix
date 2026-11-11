@@ -234,6 +234,142 @@ def main() -> int:
         check("非 dict 的 JSONL 行被跳过", len(rows) == 1, f"n={len(rows)}")
         check("有效行保留 d 字段", rows and rows[0].get("sessions") == [])
 
+    print("-- v0.3.4 LoAF 归因 + pace 计数 --")
+
+    def run_laf(rows2):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            lr.print_laf_diag(rows2)
+        return buf.getvalue()
+
+    laf_entry = {
+        "t": 1730000099000, "ms": 812, "styleMs": 143,
+        "scripts": [
+            {"src": "index-a1b2.js", "invoker": "SCRIPT.getElementById:onclick", "ms": 402},
+            {"src": "vendor.js", "invoker": "Promise.then", "ms": 90},
+            "bad-script",
+            {"src": None, "invoker": None, "ms": None},
+        ],
+    }
+    laf_on = {
+        "settings": {"lafDiagOn": True, "loadOlderPaceOn": True},
+        "laf": {"supported": 1, "count": 3, "max": 812, "detail": [laf_entry]},
+        "pace": {"minRows": 3000, "intervalMs": 600, "allowed": 4, "skipped": 9},
+    }
+    out = run_laf([laf_on])
+    check("laf 归因打印本周期计数与最长值",
+          "本周期长帧 3 次" in out and "812ms" in out, out)
+    check("明细行带脚本 top3 与强制布局占比",
+          "index-a1b2.js 402ms" in out and "强制布局 143ms" in out, out)
+    agg_line = next((ln for ln in out.splitlines() if "窗口内脚本耗时聚合" in ln), "")
+    check("脚本耗时聚合行内容与排序正确（402 在前，坏行/None 不进聚合）",
+          "index-a1b2.js 402ms" in agg_line
+          and "vendor.js 90ms" in agg_line
+          and "?" not in agg_line
+          and agg_line.index("index-a1b2.js") < agg_line.index("vendor.js"), agg_line)
+    check("非 dict 脚本行被跳过不炸", "bad-script" not in out and "Traceback" not in out, out)
+    detail_line = next((ln for ln in out.splitlines() if "←" in ln), "")
+    check("None src 在明细行归到 ?（且 None ms 显示为 -）",
+          "?" in detail_line and "-" in detail_line, detail_line)
+
+    # 实机口径（2026-11-11）：宿主脚本 sourceURL 实测全空，改由 invoker 归类，
+    # 否则明细和聚合会整片塌成 "?"，归因等于没用。
+    laf_nosrc = {
+        "settings": {"lafDiagOn": True},
+        "laf": {"supported": 1, "count": 2, "max": 140, "detail": [{
+            "t": 1730000099000, "ms": 140, "styleMs": 34,
+            "scripts": [
+                {"src": "", "invoker": "TimerHandler:setTimeout", "ms": 59},
+                {"src": "", "invoker": "TimerHandler:setInterval", "ms": 45},
+            ],
+        }]},
+    }
+    out_nosrc = run_laf([laf_nosrc])
+    check("sourceURL 为空时明细行用 invoker 归类",
+          "TimerHandler:setTimeout 59ms" in out_nosrc
+          and "TimerHandler:setInterval 45ms" in out_nosrc, out_nosrc)
+    agg_nosrc = next((ln for ln in out_nosrc.splitlines() if "窗口内脚本耗时聚合" in ln), "")
+    check("空 src 的聚合按 invoker 分组而不是塌成 ?",
+          "TimerHandler:setTimeout 59ms" in agg_nosrc
+          and "TimerHandler:setInterval 45ms" in agg_nosrc
+          and "?" not in agg_nosrc, agg_nosrc)
+    check("pace 打印参数与放行/跳过计数",
+          "触发间隔 600ms" in out and "放行 4 次" in out and "跳过 9 次" in out, out)
+
+    # detail 未变化发 []：向前找最近一次非空
+    out = run_laf([laf_on, dict(laf_on, laf=dict(laf_on["laf"], detail=[]))])
+    check("detail=[] 时回退到最近非空样本并标注",
+          "index-a1b2.js" in out and "最近一次有效样本" in out, out)
+
+    # 开启但没有任何 ≥100ms 记录
+    out = run_laf([{"settings": {"lafDiagOn": True},
+                    "laf": {"supported": 1, "count": 1, "max": 60, "detail": []}}])
+    check("开启但无长帧记录时如实提示",
+          "没有 ≥100ms 的长帧记录" in out, out)
+
+    # 浏览器不支持
+    out = run_laf([{"settings": {"lafDiagOn": True},
+                    "laf": {"supported": 0, "count": 0, "max": None, "detail": []}}])
+    check("supported=0 明确提示不支持",
+          "不支持 long-animation-frame" in out, out)
+
+    # 开关关闭：明确「已关闭」，不把旧数据当当前数据
+    out = run_laf([{"settings": {"lafDiagOn": False, "loadOlderPaceOn": False},
+                    "laf": None, "pace": None}])
+    check("lafDiagOn=false 时提示已关闭", "卡顿来源定位已关闭" in out, out)
+    check("loadOlderPaceOn=false 时提示已关闭（实验项）",
+          "翻页降频已关闭" in out, out)
+
+    # 旧样本没有字段
+    out = run_laf([{"settings": {}, "ver": "0.3.3"}])
+    check("旧样本（无 laf/pace 字段）不报错",
+          "无卡顿来源数据" in out and "无翻页降频数据" in out and "Traceback" not in out, out)
+
+    # pace 开启但还没触发过
+    out = run_laf([{"settings": {"lafDiagOn": True, "loadOlderPaceOn": True},
+                    "laf": None,
+                    "pace": {"minRows": 3000, "intervalMs": 600, "allowed": 0, "skipped": 0}}])
+    check("pace 0/0 时提示还没触发（并说明非滚动触发不计入）",
+          "还没有被计数的补页触发" in out and "非滚动触发" in out, out)
+
+    # 暂停样本（laf=None 且 lafDiagOn 仍开）：向前回退找有效数据
+    out = run_laf([laf_on, dict(laf_on, laf=None, pace=None)])
+    check("暂停样本回退到最近一次有效 laf",
+          "index-a1b2.js" in out, out)
+
+    print("-- v0.3.4 终审：状态判定看最新样本 / 坏形状不炸 --")
+    # P1-3：先关闭过、后来重开但暂停 —— 不能被判成「已关闭」
+    off_then_paused = [
+        {"settings": {"lafDiagOn": False}, "laf": None},
+        {"settings": {"lafDiagOn": True, "observe": False}, "laf": None},
+    ]
+    out = run_laf(off_then_paused)
+    check("重开后暂停：报「已暂停」而不是「已关闭」",
+          "卡顿来源定位已暂停" in out and "已关闭" not in out, out)
+    # 自禁用同理
+    off_then_dead = [
+        {"settings": {"lafDiagOn": False}, "laf": None},
+        {"settings": {"lafDiagOn": True}, "laf": None, "dead": True},
+    ]
+    out = run_laf(off_then_dead)
+    check("重开后自禁用：报「已自禁用」而不是「已关闭」",
+          "观测器已自禁用" in out and "已关闭" not in out, out)
+    # 最新样本真的是关闭态 → 报已关闭
+    out = run_laf([laf_on, {"settings": {"lafDiagOn": False}, "laf": None}])
+    check("最新样本是关闭态才报「已关闭」", "卡顿来源定位已关闭" in out, out)
+    # P2-1：detail/scripts 是数字时不能抛异常
+    bad_shapes = {"settings": {"lafDiagOn": True, "loadOlderPaceOn": True},
+                  "laf": {"supported": 1, "count": 1, "max": 200, "detail": 5},
+                  "pace": {"minRows": 3000, "intervalMs": 600, "allowed": 0, "skipped": 0}}
+    out = run_laf([bad_shapes])
+    check("detail 非列表时不炸", "Traceback" not in out, out)
+    bad_scripts = {"settings": {"lafDiagOn": True},
+                   "laf": {"supported": 1, "count": 1, "max": 200,
+                           "detail": [{"t": 1730000099000, "ms": 200, "styleMs": 0,
+                                       "scripts": 7}]}}
+    out = run_laf([bad_scripts])
+    check("scripts 非列表时不炸", "Traceback" not in out, out)
+
     print("== report_session_diag 结果：", "PASS" if ok else "FAIL", "==")
     return 0 if ok else 1
 

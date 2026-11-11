@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>zcode-lagfix 日志审查 · 长会话 + 右侧面板登录卡顿</title>
+<style>
+  :root {
+    --bg: #0b1017;
+    --bg-2: #101824;
+    --card: #141d2b;
+    --card-2: #182334;
+    --line: #263449;
+    --text: #e6edf7;
+    --muted: #93a4bb;
+    --dim: #6e8098;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --radius: 14px;
+    --shadow: 0 18px 50px rgba(0, 0, 0, .28);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    color: var(--text);
+    background:
+      radial-gradient(900px 500px at 18% -8%, rgba(88, 166, 255, .14), transparent 60%),
+      radial-gradient(800px 420px at 92% 4%, rgba(188, 140, 255, .10), transparent 60%),
+      var(--bg);
+    font: 15px/1.72 "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+  code { overflow-wrap: anywhere; word-break: break-word; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 44px 22px 120px; }
+
+  /* ── header ── */
+  .hero {
+    display: grid;
+    grid-template-columns: 1.35fr .65fr;
+    gap: 24px;
+    align-items: stretch;
+    margin-bottom: 30px;
+  }
+  .hero-main, .hero-side {
+    background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,0));
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .hero-main { padding: 30px 30px 26px; }
+  .hero-side { padding: 22px; display: flex; flex-direction: column; justify-content: space-between; gap: 16px; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--blue); font-size: 12.5px; font-weight: 700;
+    letter-spacing: .12em; text-transform: uppercase;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); box-shadow: 0 0 0 5px rgba(248,81,73,.12); }
+  h1 { margin: 12px 0 10px; font-size: clamp(28px, 4vw, 42px); line-height: 1.18; letter-spacing: -.02em; }
+  h1 span { color: var(--muted); font-weight: 500; }
+  .lede { margin: 0; color: var(--muted); max-width: 760px; font-size: 16px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border-radius: 999px;
+    border: 1px solid var(--line); background: rgba(255,255,255,.025);
+    color: var(--muted); font-size: 12.5px;
+  }
+  .chip b { color: var(--text); font-weight: 650; }
+  .verdict-box { padding: 16px; border-radius: 12px; background: rgba(88,166,255,.07); border: 1px solid rgba(88,166,255,.25); }
+  .verdict-box .big { font-size: 20px; font-weight: 750; line-height: 1.35; }
+  .verdict-box p { margin: 8px 0 0; color: var(--muted); font-size: 13.5px; }
+  .version-line { color: var(--dim); font-size: 12.5px; }
+
+  /* ── sections ── */
+  section { margin-top: 38px; }
+  .sec-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+  h2 { margin: 0; font-size: 21px; letter-spacing: -.01em; }
+  .sec-head p { margin: 0; color: var(--dim); font-size: 13px; max-width: 580px; text-align: right; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .grid-2 > *, .grid-3 > * { min-width: 0; }
+  .card {
+    min-width: 0;
+    background: linear-gradient(180deg, rgba(255,255,255,.028), rgba(255,255,255,.008));
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 18px;
+  }
+  pre { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+  .card h3 { margin: 0 0 8px; font-size: 15.5px; }
+  .card p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12.5px; }
+  .dim { color: var(--dim); }
+  .tag {
+    display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 650; border: 1px solid var(--line); color: var(--muted);
+    background: rgba(255,255,255,.03); white-space: nowrap;
+  }
+  .tag.green { color: #7ee787; border-color: rgba(63,185,80,.35); background: rgba(63,185,80,.08); }
+  .tag.yellow { color: #e3b341; border-color: rgba(210,153,34,.35); background: rgba(210,153,34,.08); }
+  .tag.red { color: #ff7b72; border-color: rgba(248,81,73,.35); background: rgba(248,81,73,.08); }
+  .tag.blue { color: #79c0ff; border-color: rgba(88,166,255,.35); background: rgba(88,166,255,.08); }
+  .tag.purple { color: #d2a8ff; border-color: rgba(188,140,255,.35); background: rgba(188,140,255,.08); }
+
+  /* ── evidence ── */
+  .metric { display: flex; flex-direction: column; gap: 10px; }
+  .metric .label { display: flex; justify-content: space-between; color: var(--muted); font-size: 12.5px; }
+  .metric .label b { color: var(--text); font-size: 13px; }
+  .bar { height: 8px; border-radius: 999px; background: #1b2638; overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 999px; background: var(--green); }
+  .bar.yellow > i { background: var(--yellow); }
+  .bar.red > i { background: var(--red); }
+  .bar.blue > i { background: var(--blue); }
+  .phase { position: relative; }
+  .phase .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .phase .name { font-weight: 700; }
+  .phase .when { color: var(--dim); font-size: 12px; }
+  .phase .rows { display: flex; flex-direction: column; gap: 11px; }
+  .phase .foot { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--dim); font-size: 12px; }
+  .hot-card { border-color: rgba(248,81,73,.35); background: linear-gradient(180deg, rgba(248,81,73,.055), rgba(248,81,73,.015)); }
+
+  .callout {
+    display: grid; grid-template-columns: 36px 1fr; gap: 12px;
+    border: 1px solid rgba(88,166,255,.28); background: rgba(88,166,255,.055);
+    border-radius: var(--radius); padding: 16px 18px; margin-top: 14px;
+  }
+  .callout .icon {
+    width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+    background: rgba(88,166,255,.14); color: var(--blue); font-weight: 800;
+  }
+  .callout p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .callout b { color: var(--text); }
+
+  /* ── options ── */
+  .option {
+    position: relative; display: grid; grid-template-columns: 22px 1fr; gap: 12px;
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 16px;
+    background: linear-gradient(180deg, rgba(255,255,255,.024), rgba(255,255,255,.006));
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .option:hover { border-color: #3a4d68; }
+  .option.checked { border-color: rgba(88,166,255,.6); background: rgba(88,166,255,.06); }
+  .option input[type="checkbox"] { appearance: none; width: 19px; height: 19px; margin-top: 2px; border: 1.5px solid #40536e; border-radius: 6px; background: transparent; cursor: pointer; }
+  .option input[type="checkbox"]:checked { background: var(--blue); border-color: var(--blue); box-shadow: inset 0 0 0 3px var(--bg-2); }
+  .option .head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 6px; }
+  .option h4 { margin: 0; font-size: 14.5px; }
+  .option p { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+  .option ul { margin: 6px 0 0; padding-left: 18px; color: var(--dim); font-size: 12.5px; }
+  .option li { margin: 3px 0; }
+  .option .kv { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font-size: 12px; color: var(--dim); }
+  .option .kv b { color: var(--muted); font-weight: 650; }
+  .recommend { box-shadow: 0 0 0 1px rgba(63,185,80,.18) inset; }
+
+  /* ── acceptance table ── */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 12px; letter-spacing: .03em; text-transform: uppercase; }
+  td { color: var(--muted); }
+  td b { color: var(--text); font-weight: 650; }
+  .check { color: var(--green); font-weight: 800; }
+
+  /* ── summary ── */
+  .summary {
+    position: static; z-index: 20; margin-top: 34px;
+    display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: center;
+    padding: 14px 16px; border-radius: 14px; border: 1px solid rgba(88,166,255,.34);
+    background: rgba(16, 24, 36, .94); backdrop-filter: blur(12px);
+    box-shadow: 0 16px 40px rgba(0,0,0,.45);
+  }
+  .summary .line { color: var(--muted); font-size: 13px; }
+  .summary .line b { color: var(--text); }
+  .summary .picks { margin-top: 4px; color: var(--dim); font-size: 12px; }
+  .summary .actions { display: flex; gap: 8px; }
+  button {
+    border: 1px solid #365072; background: rgba(88,166,255,.13); color: #cfe6ff;
+    padding: 9px 13px; border-radius: 9px; font: inherit; font-size: 13px; font-weight: 650; cursor: pointer;
+  }
+  button:hover { background: rgba(88,166,255,.2); }
+  .toast { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%) translateY(10px); opacity: 0; pointer-events: none; background: #1b293b; border: 1px solid var(--line); color: var(--text); padding: 9px 14px; border-radius: 9px; font-size: 13px; transition: .18s ease; z-index: 50; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .footnote { margin-top: 32px; color: var(--dim); font-size: 12px; line-height: 1.8; }
+  .footnote code { color: var(--muted); background: rgba(255,255,255,.04); padding: 1px 5px; border-radius: 4px; }
+
+  .research-list { margin: 8px 0 0; padding-left: 17px; color: var(--muted); font-size: 12.5px; }
+  .research-list li { margin: 4px 0; }
+
+  @media (max-width: 900px) {
+    .hero { grid-template-columns: 1fr; }
+    .grid-3 { grid-template-columns: 1fr; }
+    .grid-2 { grid-template-columns: 1fr; }
+    .sec-head { display: block; }
+    .sec-head p { text-align: left; margin-top: 6px; }
+    .summary { grid-template-columns: 1fr; position: static; }
+    .summary .actions { justify-content: flex-start; }
+  }
+
+  @media (max-width: 720px) {
+    .accept-table thead { display: none; }
+    .accept-table, .accept-table tbody, .accept-table tr, .accept-table td { display: block; width: 100%; }
+    .accept-table tr { border-bottom: 1px solid var(--line); padding: 10px 0; }
+    .accept-table tr:last-child { border-bottom: 0; }
+    .accept-table td { border: 0; padding: 3px 0 3px 84px; position: relative; }
+    .accept-table td::before {
+      content: attr(data-label); position: absolute; left: 0; top: 3px; width: 76px;
+      color: var(--dim); font-size: 11.5px; font-weight: 600;
+    }
+  }
+
+  @media print {
+    body { background: #fff; color: #111; }
+    .wrap { padding: 0; max-width: none; }
+    .card, .hero-main, .hero-side, .option, .summary { box-shadow: none; background: #fff; border-color: #ddd; }
+    .summary { position: static; }
+    .toast, .actions { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="hero-main">
+      <div class="eyebrow"><span class="dot"></span>LOG REVIEW · 2026-11-11 18:56–18:58</div>
+      <h1>长会话 + 右侧面板登录 <span>日志审查</span></h1>
+      <p class="lede">这次“很卡很卡”的峰值不在聊天区滚动，也不在补页或隐藏会话，而是在右侧面板里的登录页开始挂载 / 渲染的那几秒。关闭面板后指标在 6 秒内明显回落；但面板关闭时，这个超长会话本身也已经有不低的底噪。</p>
+      <div class="meta">
+        <span class="chip">严重度 <b>高</b></span>
+        <span class="chip">峰值 <b>273ms / 41 次长任务</b></span>
+        <span class="chip">DOM 峰值 <b>8519</b></span>
+        <span class="chip">结论 <b>面板内容强相关</b></span>
+      </div>
+    </div>
+    <aside class="hero-side">
+      <div class="verdict-box" style="background:rgba(248,81,73,.07);border-color:rgba(248,81,73,.30)">
+        <div class="big">面板登录页挂载与本次峰值强相关</div>
+        <p>P1/P3 有命中计数，P2 已开启；但它们只能改通知时机、遮罩和角标定位，管不到面板内登录页自身的 DOM / 布局 / 绘制。</p>
+      </div>
+      <div class="version-line">数据：v0.3.3 observe-20261111.jsonl / .1 · 仅指标，不含会话正文</div>
+    </aside>
+  </header>
+
+  <section>
+    <div class="sec-head">
+      <h2>01 · 结论</h2>
+      <p>先把“谁导致的”说清楚，再谈 v0.3.4 做什么。</p>
+    </div>
+    <div class="grid-3">
+      <div class="card hot-card">
+        <h3>强相关：面板登录页挂载</h3>
+        <p>18:57:09 起可见会话 DOM 从 151 跳到 1790；18:57:26 全页 DOM 冲到 8519，单个 5.46 秒采样窗内出现 41 次 &gt;50ms 长任务，帧 P95 242ms、单帧 952ms。关闭面板后 6 秒内帧 P95 回到 18–24ms。</p>
+      </div>
+      <div class="card">
+        <h3>次因：长会话底噪</h3>
+        <p>面板关闭的基线段（18:56:42–18:56:51）帧 P95 已在 97–158ms，长任务 10–28 次/窗，DOM 约 4k。即使不做面板操作，这个会话本身也不轻。</p>
+      </div>
+      <div class="card">
+        <h3>保护项：生效但管不到内容</h3>
+        <p>开合保护 <code>switchP95=24ms / max=115ms</code>，<code>guardHits=8</code>；回前台 P95=36ms；面板常开保护为开。它们没有失效，只是作用域不包含面板里的登录页。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>02 · 事故时间线</h2>
+      <p>同一会话、同一段操作，按 3 秒采样窗还原。时间为本机时间。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>时间</th><th>阶段</th><th>帧 P95</th><th>长任务 / 窗</th><th>DOM</th><th>可见会话 DOM</th><th>读法</th></tr></thead>
+      <tbody>
+        <tr>
+          <td data-label="时间">18:56:42–18:56:51</td>
+          <td data-label="阶段"><b>面板关闭 · 基线</b></td>
+          <td data-label="帧">97–158ms</td>
+          <td data-label="长任务">10–28 次</td>
+          <td data-label="DOM">3959–4272</td>
+          <td data-label="会话 DOM">151</td>
+          <td data-label="读法">长会话本身已有明显底噪，不是“打开面板才开始卡”。</td>
+        </tr>
+        <tr>
+          <td data-label="时间">18:56:54–18:57:06</td>
+          <td data-label="阶段"><b>面板打开 · 登录页之前</b></td>
+          <td data-label="帧">67–115ms</td>
+          <td data-label="长任务">7–24 次</td>
+          <td data-label="DOM">4003–4206</td>
+          <td data-label="会话 DOM">151</td>
+          <td data-label="读法">仅打开面板，指标没有立即恶化；P2 已开启，但单一样本不能证明它减少了多少。</td>
+        </tr>
+        <tr style="background:rgba(248,81,73,.04)">
+          <td data-label="时间">18:57:09–18:57:36</td>
+          <td data-label="阶段"><b>登录页挂载 / 渲染</b></td>
+          <td data-label="帧">127–273ms</td>
+          <td data-label="长任务">17–41 次</td>
+          <td data-label="DOM">4094–<b>8519</b></td>
+          <td data-label="会话 DOM">1790</td>
+          <td data-label="读法">峰值段。DOM 抬升、长任务密集、单帧 952ms；这不是补页或滚动。</td>
+        </tr>
+        <tr>
+          <td data-label="时间">18:57:39–18:57:48</td>
+          <td data-label="阶段"><b>关闭面板 · 恢复</b></td>
+          <td data-label="帧">79→18–24ms</td>
+          <td data-label="长任务">24→2–7 次</td>
+          <td data-label="DOM">4160→3001</td>
+          <td data-label="会话 DOM">739</td>
+          <td data-label="读法">关闭后几秒内明显回落，说明峰值与面板内容强相关。</td>
+        </tr>
+        <tr>
+          <td data-label="时间">18:57:51–18:58:18</td>
+          <td data-label="阶段"><b>再次打开 · 页面已稳定</b></td>
+          <td data-label="帧">36–55ms</td>
+          <td data-label="长任务">7–12 次</td>
+          <td data-label="DOM">3033–3680</td>
+          <td data-label="会话 DOM">739</td>
+          <td data-label="读法">同样的面板，页面加载完成后不再复现峰值；问题集中在“挂载/跳转/登录瞬间”。</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <div class="icon">!</div>
+      <p><b>指标口径：</b>帧 P95 是最近 30 秒 rAF 窗口，长任务是当前采样窗内 &gt;50ms 的次数；<code>dt</code> 在峰值样本为 5.46 秒，所以“41 次”不能直接换算成每秒。DOM 是整页节点数，不包含 iframe 内部文档；它只能证明主文档里多出了大量节点。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>03 · 可以排除什么</h2>
+      <p>每一项都用同一窗口的日志做对照，不靠猜。</p>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <h3><span class="tag green">排除</span> O3 补页合并</h3>
+        <p>峰值段 <code>loadOlderCalls</code> 从 218 只到 219，基本没有新增；18:57:30 / 18:57:33 / 18:57:36 的滚动事件都是 0。补页不是本次峰值的主要解释。</p>
+      </div>
+      <div class="card">
+        <h3><span class="tag green">排除</span> O7 多会话调度</h3>
+        <p>4 个会话桶里，3 个隐藏会话的 <code>dom=0</code>、<code>frames=0</code>、<code>commitRate=0</code>。没有证据表明隐藏 pane 在持续工作。</p>
+      </div>
+      <div class="card">
+        <h3><span class="tag green">排除</span> P3 回前台</h3>
+        <p>本次回前台 <code>p95=36ms</code>、<code>max=67ms</code>，<code>hiddenMs=1293</code>，P3 没有制造这次峰值，也不是主要受害段。</p>
+      </div>
+      <div class="card">
+        <h3><span class="tag green">排除</span> 内存 / 滚动</h3>
+        <p>堆内存全程约 69MB，没有抬升；峰值样本滚动事件为 0，<code>scroll.p95</code> 是之前滚动留下的 30 秒窗口值，不是当前操作。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>04 · 还需要你做的测试</h2>
+      <p>目标不是“再卡一次”，而是把面板壳、预览容器、登录页、登录跳转、长会话底噪分开。每项 30 秒，记录开始/结束时间。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>编号</th><th>怎么测</th><th>要区分什么</th><th>预期读数</th></tr></thead>
+      <tbody>
+        <tr><td data-label="编号"><b>T1</b></td><td data-label="怎么测">同一超长会话，面板关闭，静止 30 秒。</td><td data-label="区分">长会话底噪。</td><td data-label="预期">帧 P95 约 100–160ms、长任务 10–28 次/窗，属于当前基线。</td></tr>
+        <tr><td data-label="编号"><b>T2</b></td><td data-label="怎么测">打开右侧面板，但不要打开登录页或预览，停留 30 秒。</td><td data-label="区分">面板壳 / 遮罩 / 布局本身的成本。</td><td data-label="预期">若与 T1 接近，面板壳不是问题；若明显升高，P2 还有优化空间。</td></tr>
+        <tr><td data-label="编号"><b>T3</b></td><td data-label="怎么测">面板里打开一个静态预览 HTML（无网络、无动画），停留 30 秒。</td><td data-label="区分">预览容器 / iframe 布局成本。</td><td data-label="预期">若 T3 正常、T4 差，问题在登录页内容，不在预览容器。</td></tr>
+        <tr><td data-label="编号"><b>T4</b></td><td data-label="怎么测">面板里打开登录页，停在登录表单，不提交，停留 30 秒。</td><td data-label="区分">登录页首次挂载 / 静态渲染。</td><td data-label="预期">若 DOM 和长任务明显上升，登录页挂载至少是强相关项。</td></tr>
+        <tr><td data-label="编号"><b>T5</b></td><td data-label="怎么测">实际输入账号并提交，经过跳转 / 登录成功页，停留 30 秒。</td><td data-label="区分">登录提交、重定向、仪表盘渲染。</td><td data-label="预期">若峰值只在提交/跳转出现，属于页面导航成本；若持续高，仪表盘也在拖。</td></tr>
+        <tr><td data-label="编号"><b>T6</b></td><td data-label="怎么测">关闭右侧面板，停留 30 秒。</td><td data-label="区分">恢复是否彻底。</td><td data-label="预期">帧 P95 和长任务应在几秒内回到 T1 附近。</td></tr>
+        <tr><td data-label="编号"><b>T7</b></td><td data-label="怎么测">新开一个空会话，打开同一个登录页，停留 30 秒。</td><td data-label="区分">长会话底噪 vs 面板内容。</td><td data-label="预期">若空会话 + 登录页仍差，问题独立于长会话；若明显更好，是两者叠加。</td></tr>
+        <tr><td data-label="编号"><b>T8</b></td><td data-label="怎么测">用系统 Chrome / Edge 打开同一个登录页，停留 30 秒。</td><td data-label="区分">页面自身 vs ZCode 内嵌面板。</td><td data-label="预期">若外部浏览器也卡，页面自身重；若只有面板卡，是内嵌集成成本。</td></tr>
+        <tr><td data-label="编号"><b>T9</b></td><td data-label="怎么测">重复 T4 / T5，分别关闭和打开「面板常开保护」。</td><td data-label="区分">P2 对面板内容是否真的有效。</td><td data-label="预期">若两者差不多，P2 管不到面板内容，不要继续加码 P2。</td></tr>
+        <tr><td data-label="编号"><b>T10</b></td><td data-label="怎么测">重复 T1 / T6，分别关闭和打开「侧栏开合保护」。</td><td data-label="区分">P1 对开合瞬间的帮助。</td><td data-label="预期">P1 主要影响 420ms 开合窗口，不应期待它解决持续卡顿。</td></tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <div class="icon">→</div>
+      <p><b>最低可判读组合：</b>T1 + T2 + T4 + T5 + T6 + T7 + T8，各 1–2 轮。T3/T9/T10 用于确认边界。每轮只改一个变量；测完把时间段告诉我，不需要贴原始日志。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>05 · 怎么判读</h2>
+      <p>把测试结果套进这四条，基本就能决定 v0.3.4 该不该碰面板。</p>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <h3>情况 A：T2/T3 正常，T4/T5 差</h3>
+        <p>最大嫌疑是登录页内容。插件不应尝试“优化”第三方登录页；可行的是外部浏览器登录、登录后关闭面板，或只做面板内容诊断。不要把它包装成插件已修复。</p>
+      </div>
+      <div class="card">
+        <h3>情况 B：T2 也差</h3>
+        <p>面板壳 / 遮罩 / 布局本身有成本，P2 还有空间；可以先做面板常开期的布局/绘制降载实验，但必须默认关闭并 A/B。</p>
+      </div>
+      <div class="card">
+        <h3>情况 C：T7 也差</h3>
+        <p>问题独立于超长会话，属于面板/内嵌页面；O4（turn 内 content-visibility）帮不上，别把它当万能解。</p>
+      </div>
+      <div class="card">
+        <h3>情况 D：T1 已很差，T4 只再差一点</h3>
+        <p>长会话底噪是主线，面板只是放大器；v0.3.4 优先 O4（turn 内）而不是面板策略，O3/O7 继续留到有数据再说。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>06 · 对 v0.3.4 的初步影响</h2>
+      <p>只写这次日志能支持的判断，不把“待测”写成“已确定”。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>候选</th><th>这次日志怎么说</th><th>结论</th></tr></thead>
+      <tbody>
+        <tr><td data-label="候选"><b>O3 补页合并</b></td><td data-label="证据">峰值段补页调用几乎不增长，滚动事件为 0。</td><td data-label="结论"><span class="tag yellow">本次不支持</span> 留到 C 类长历史上翻数据。</td></tr>
+        <tr><td data-label="候选"><b>O7 多会话调度</b></td><td data-label="证据">隐藏会话 DOM / frames / commitRate 全为 0。</td><td data-label="结论"><span class="tag yellow">本次不支持</span> 不要因为“多切换”就直接做卸载/暂停。</td></tr>
+        <tr><td data-label="候选"><b>O4 turn 内 content-visibility</b></td><td data-label="证据">面板关闭时基线仍有 97–158ms 帧 P95、10–28 次长任务；但本次峰值主要来自面板内容。</td><td data-label="结论"><span class="tag blue">可继续评估</span> 只针对聊天区底噪，不承诺解决登录页。</td></tr>
+        <tr><td data-label="候选"><b>面板内容降载</b></td><td data-label="证据">登录页挂载时 DOM 8519、帧 273ms；关闭面板即恢复。插件目前没有安全的“暂停第三方页面”接口。</td><td data-label="结论"><span class="tag red">先别做</span> 先跑 T2–T8，确认是内容还是面板壳；动内容必须先拍板。</td></tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <div class="icon">✓</div>
+      <p><b>现在就能做的规避：</b>需要登录重页面时，优先用系统浏览器完成登录，再回到 ZCode；或者登录完成后关闭右侧面板。这是使用方式上的规避，不是插件修复，也不会改变会话数据。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>07 · 你的实测回填（19:11–19:18）</h2>
+      <p>第二轮实测把结论往前推了一大步：最重的帧出现在面板<b>关闭</b>时，根因在聊天区自身的补页与挂载 DOM。</p>
+    </div>
+    <div class="callout" style="border-color:rgba(248,81,73,.30);background:rgba(248,81,73,.05)">
+      <div class="icon" style="background:rgba(248,81,73,.14);color:var(--red)">!</div>
+      <p><b>结论修正：</b>18:57 那次峰值与面板登录页强相关；但 19:13:45–19:14:12 在面板<b>关闭</b>状态下就出现了帧 P95 588ms、单帧 1000ms、DOM 8436。面板是放大器，不是根因。根因链：上翻补页在大会话窗口下单次 0.8–2.3 秒 → 挂载 DOM 冲到 8.4k → 持续长任务。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>时间</th><th>阶段（面板）</th><th>帧 P95</th><th>长任务/窗</th><th>DOM</th><th>补页</th><th>关键读数</th></tr></thead>
+      <tbody>
+        <tr><td data-label="时间">19:11:53–19:12:53</td><td data-label="阶段">关闭 · 切会话后上翻</td><td data-label="帧">6→164ms</td><td data-label="长任务">0→30 次</td><td data-label="DOM">2347→6427</td><td data-label="补页">334→359 次</td><td data-label="读法">单次补页 <b>1293ms</b>（窗口约 6.6k 行时）。</td></tr>
+        <tr><td data-label="时间">19:12:56–19:13:41</td><td data-label="阶段">关闭 · 持续上翻</td><td data-label="帧">49→218ms</td><td data-label="长任务">4→29 次</td><td data-label="DOM">4.0k–5.1k</td><td data-label="补页"><b>+104 次 / 45 秒</b></td><td data-label="读法">补页单次 353→619ms，随窗口变大持续恶化。</td></tr>
+        <tr style="background:rgba(248,81,73,.04)"><td data-label="时间">19:13:45–19:14:12</td><td data-label="阶段"><b>关闭 · 峰值</b></td><td data-label="帧"><b>267→588ms</b></td><td data-label="长任务">12→20 次</td><td data-label="DOM">5065→<b>8436</b></td><td data-label="补页">P95 <b>1789ms</b> / 最长 <b>2262ms</b></td><td data-label="读法">单帧 1000ms 与 2.2 秒补页同窗出现；行数 8164→8404。</td></tr>
+        <tr><td data-label="时间">19:14:15–19:17:36</td><td data-label="阶段"><b>打开 · 持续</b></td><td data-label="帧">61–585ms</td><td data-label="长任务">15–32 次/3 秒</td><td data-label="DOM">8.4k–8.7k</td><td data-label="补页">持平（487）</td><td data-label="读法">打开瞬间 <code>switchP95=576ms</code>；随后每 3 秒 15–32 次长任务，P2 无法压住。</td></tr>
+        <tr><td data-label="时间">19:17:38–19:18:17</td><td data-label="阶段">关闭 · DOM 回落</td><td data-label="帧">73→6–79ms</td><td data-label="长任务">0–19 次</td><td data-label="DOM">→3.3k–3.5k</td><td data-label="补页">9–25ms（约 1.1k 行）</td><td data-label="读法">挂载 DOM 6220→783 后立即恢复；补页成本随窗口缩小回到两位数毫秒。</td></tr>
+      </tbody>
+    </table>
+    <div class="grid-2">
+      <div class="card hot-card">
+        <h3>补页成本随窗口规模放大 ~100 倍</h3>
+        <p>约 1100 行时单次补页 9–25ms；窗口到 8000+ 行时同样一页（+60 行）要 822–2262ms。O3 的门槛（P95 &gt;200ms）被超了 9 倍。</p>
+      </div>
+      <div class="card hot-card">
+        <h3>挂载 DOM 是长任务燃料</h3>
+        <p>DOM 8.4–8.7k 时每 3 秒 15–32 次长任务；面板关闭时帧 P95 也到 588ms。O4 门槛（DOM &gt;4000 或长任务 &gt;6）两项都超。</p>
+      </div>
+    </div>
+    <div class="callout">
+      <div class="icon">✓</div>
+      <p><b>对 v0.3.4 的意义：</b>O3（补页合并）与 O4（turn 内 content-visibility）现在都有实机数据支持，且互不冲突——O3 砍单次补页成本，O4 砍挂载 DOM。O7 依旧不支持（全程隐藏会话 dom/frames/commitRate=0）。如果这几段对应的操作和你的实际顺序不一致，把时间段告诉我，我重新对齐。</p>
+    </div>
+  </section>
+
+  <div class="footnote">
+    数据范围：<code>observe-20261111.jsonl</code> 与轮转文件，2026-11-11 18:32–19:00 的可见窗口样本；只读取指标、设置快照、pane/refocus/scroll/sessions 字段，不读取会话正文、提示词或工具参数。时间线中的 DOM / 帧 P95 / 长任务均来自插件自身采样，<code>maxLongTask</code> 为全局最大值，不能单独用来定位某一秒。主因判断来自时间相关性（面板打开、登录页挂载、关闭的先后顺序），不是 DevTools 调用栈归因；插件不开 CDP，无法看到面板内部执行细节。相关页面：<code>docs/decisions/v0.3.4-route.html</code>、<code>docs/decisions/v0.3.3-pane-lag.html</code>。
+  </div>
+</div>
+
+</body>
+</html>
