@@ -428,6 +428,35 @@
     </div>
   </section>
 
+  <section>
+    <div class="sec-head">
+      <h2>07 · 深度复核（读 ZCode v3.17.2 源码）</h2>
+      <p>用本地源码仓（D:\Git\git-github\ZCode）核对 O3/O4 的机制是否成立，结论：方向对，但 O3 要改定义。</p>
+    </div>
+    <div class="grid-2">
+      <div class="card hot-card">
+        <h3>一次 loadOlder 的真实成本结构</h3>
+        <p>后端 <code>getRowsRange</code> 每次先<b>全量过滤整个投影</b>再 <code>.filter().slice(-60)</code>，O(全会话行数)/次；前端 <code>mergeOlderRows</code> 整窗拷贝 <code>[...older, ...window]</code>；<code>rowsPartitions</code> WeakMap 按数组身份缓存，每次补页必失效重算。最后两次 <code>setState</code> 同步通知订阅者。</p>
+      </div>
+      <div class="card">
+        <h3>O3「合并」改定义为「触发降频」</h3>
+        <p>宿主自己就有 <code>loadingOlder</code> 单飞防重入，不存在并发可合并；页大小 60 行是协议定的，插件改不了。可做的是<b>大窗口时给触发限流</b>（比如窗口 &gt;3000 行时两次触发至少隔几百毫秒），减少 O(n) 全窗操作次数。注意：时间线触发是 fire-and-forget、锚点在触发时捕获，降频间隔太长锚点会陈旧。</p>
+      </div>
+      <div class="card">
+        <h3>O4 有宿主先例，可行</h3>
+        <p><code>ConversationShareReadonlyTimeline</code> 已对元素用 <code>content-visibility:auto + contain-intrinsic-size:0 420px</code>。活时间线只能加在 turn 内部行级块（virtualizer 要测 wrapper 高度），这个约束与 v0.3.1 拍板一致。</p>
+      </div>
+      <div class="card">
+        <h3>新增 P0：LoAF 脚本归因</h3>
+        <p>记录 long-animation-frame 的 <code>scripts[]</code>（sourceURL / invoker / duration），确认 2.2 秒到底在后端 filter、前端整窗拷贝、还是同步订阅者里。先归因再动手，避免做错方向。只读，不碰数据。</p>
+      </div>
+    </div>
+    <div class="callout">
+      <div class="icon">✓</div>
+      <p><b>复核结论：</b>O3+O4 方向仍然正确，但 v0.3.4 最终形态 = <b>P0 LoAF 归因 + O3 触发降频（非合并）+ O4 turn 内 content-visibility</b>。后端全量 filter 是宿主侧成本，插件只能减少触发次数、不能降低单次成本——这部分如实写进边界，不包装成插件已解决。</p>
+    </div>
+  </section>
+
   <div class="footnote">
     本页只定路线与验收，不写实现代码。所有结论以实际日志、测试和实机 A/B 为准；没有数据的项不写成“已改善”。相关文件：<code>docs/decisions/v0.3.4-panel-browser-lag-review.html</code>、<code>docs/specs/v0.3.3-pane-lag.md</code>、<code>docs/releases/v0.3.3.md</code>、<code>docs/decisions/v0.3.3-pane-lag.html</code>。
   </div>
