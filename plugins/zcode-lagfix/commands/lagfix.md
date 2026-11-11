@@ -69,22 +69,22 @@ python install.py remove || py -3 install.py remove
 
 它内部做了「失败就撤回 optout」的保护，成功后会自己写豁免标记。
 
-**从 GitHub 市场安装（没有仓库根目录）**：先从插件登记表读出 `installPath`：
+**从 GitHub 市场安装（没有仓库根目录）**：直接跑运行时目录里的 `patch_install.py uninstall`。它在一次操作里先剥注入行，成功后才写豁免标记；ZCode 还在运行时会返回 `failed`，**不会**写豁免（避免“号称卸了其实还在”）。
+
+```bash
+python "$HOME/.zcode/zcode-lagfix/patch_install.py" uninstall || py -3 "$HOME/.zcode/zcode-lagfix/patch_install.py" uninstall
+```
+
+运行时目录不存在时（例如钩子从未跑过），再从插件登记表读 `installPath`：
 
 ```bash
 python -c "import json,pathlib;d=json.load(open(pathlib.Path.home()/'.zcode/cli/plugins/installed_plugins.json',encoding='utf-8'));print([p.get('installPath') for p in d.get('plugins',[]) if str(p.get('id','')).startswith('zcode-lagfix@')][0])"
 ```
 
-然后用该目录下的 `patch_install.py` 剥注入行；**只有命令成功（退出码 0）才写豁免标记**，否则钩子会在下次会话重新注入：
-
 ```bash
-python "<installPath>/patch_install.py" remove
+python "<installPath>/patch_install.py" uninstall
 ```
 
-```bash
-python -c "import pathlib; p=pathlib.Path.home()/'.zcode/zcode-lagfix/.lagfix-optout'; p.parent.mkdir(parents=True,exist_ok=True); p.write_text('removed by /lagfix off')"
-```
+最后在 **设置 → 插件 → 已安装 → zcode-lagfix → 卸载**，再重开 ZCode。**顺序不要反**：先在插件还在时跑上面的卸载命令，再去设置里卸载插件。即使不小心先卸载了插件，`~/.zcode/zcode-lagfix/patch_install.py` 仍然保留，完全退出 ZCode 后跑同一条 `uninstall` 即可清干净；要恢复使用，删除 `~/.zcode/zcode-lagfix/.lagfix-optout` 后执行 `/lagfix install`。
 
-最后在 **设置 → 插件 → 已安装 → zcode-lagfix → 卸载**，再重开 ZCode。若不卸载插件，插件仍启用但豁免标记会阻止重新注入；要恢复使用，删除 `.lagfix-optout` 后执行 `/lagfix install`。
-
-注意：remove 只剥 lagfix 自己的注入行，绝不影响已装的其它注入插件（如 zusage 状态条）。
+注意：remove/uninstall 只剥 lagfix 自己的注入行，绝不影响已装的其它注入插件（如 zusage 状态条）。

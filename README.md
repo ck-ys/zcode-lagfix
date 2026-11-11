@@ -18,7 +18,7 @@ ZCode 超长会话卡顿的观测与修复插件。**v0.3.0**：浮在输入框�
 - 插件启用后，`SessionStart` 钩子会自动同步运行时文件并幂等注入；`/lagfix install` 可在当前会话立刻触发一次。
 - 安装会修改 ZCode 的 `app.asar`，**首次注入成功后必须完全退出 ZCode（含托盘）再重开**；只关窗口或重开会话不算。
 - 权限不足（例如 ZCode 装在 `Program Files`）时注入会失败；请让 ZCode 以管理员身份运行，或按 `/lagfix install` 输出的提示手动执行。失败原因会写到 `~/.zcode/zcode-lagfix/hook-error.log`。
-- 卸载：`/lagfix off` 按说明执行 `install.py remove`，再在 **设置 → 插件** 里卸载，最后完全退出重开。
+- 卸载：先完全退出 ZCode，执行 `/lagfix off` 的 `patch_install.py uninstall`（市场安装）或 `install.py remove`（源码安装），再在 **设置 → 插件** 里卸载，最后重开。即使先卸载了插件，运行时目录里的 `patch_install.py` 仍可完成清理。
 
 > 本项目是社区插件，非 ZCode 官方功能；通过修改 `app.asar` 加载，依赖客户端内部 DOM 与接口，不承诺兼容未来所有 ZCode 版本。MIT License，按「现状」提供。
 
@@ -109,12 +109,23 @@ ZCode 运行中时补丁会挂起（pending）。**收尾不再靠"数进程数 
 
 ## 卸载
 
+**先完全退出 ZCode（含托盘）**，再执行对应的一条命令。`uninstall` 会先剥注入行，成功后才写豁免标记；ZCode 还在运行时会返回 `failed`，**不会**写豁免（避免“号称卸了其实还在”）。
+
+GitHub 市场安装（运行时目录由钩子同步，插件卸载后仍在）：
+
+```bash
+python "$HOME/.zcode/zcode-lagfix/patch_install.py" uninstall
+```
+
+本地源码安装（仓库根目录）：
+
 ```bash
 python D:\Git\git-github\zcode-lagfix\install.py remove
 ```
 
-ZCode 运行中无法替换 asar（会被占用），必须先完全退出再执行 `remove`；
-若在运行中执行，安装器会明确报错并**不**写入 optout（避免"号称卸了其实还在"）。
+市场安装的完整顺序：先在插件还在时跑上面的 `uninstall` → 再在 **设置 → 插件 → 已安装 → zcode-lagfix → 卸载** → 重开 ZCode。顺序不要反；即使不小心先卸载了插件，`~/.zcode/zcode-lagfix/patch_install.py` 仍然保留，完全退出 ZCode 后跑同一条 `uninstall` 即可清干净。要恢复使用，删除 `~/.zcode/zcode-lagfix/.lagfix-optout` 后执行 `/lagfix install`。
+
+`uninstall`/`remove` 只剥 lagfix 自己的注入行，绝不影响已装的其它注入插件（如 zusage 状态条）。
 
 ## 安全设计（三轮审查结论落地）
 

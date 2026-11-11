@@ -217,6 +217,14 @@ def main() -> int:
         check("其余内容字节级不变", entry == foreign_entry)
         check("重复 remove 返回 already", pi.remove() == "already")
 
+        # 9. uninstall：市场安装用户的一键卸载（剥注入 + 写豁免，顺序不可反）
+        pi.install()
+        check("重新注入成功", pi.line_count(pi.entry_bytes_of(asar)) == 1)
+        check("uninstall 返回 uninstalled", pi.uninstall() == "uninstalled")
+        check("uninstall 后注入行消失", pi.line_count(pi.entry_bytes_of(asar)) == 0)
+        check("uninstall 写了豁免标记", pi.OPTOUT_MARKER.exists())
+        check("卸载后 install 被豁免挡住", pi.install() == "optout")
+
     print("== smoke_asar 结果：", "PASS" if ok else "FAIL", "==")
     return 0 if ok else 1
 

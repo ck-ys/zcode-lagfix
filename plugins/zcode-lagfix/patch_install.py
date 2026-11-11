@@ -680,6 +680,26 @@ def remove() -> str:
             _sweep_stages(asar_dir)
 
 
+def uninstall() -> str:
+    """市场安装的一键卸载：剥注入行，成功后再写豁免标记。
+
+    顺序不能反：ZCode 运行中 remove() 会返回 failed，此时绝不能写 optout，
+    否则用户以为卸了，下次会话钩子又被豁免挡住、注入却还在。
+    成功（removed/already）后写 `.lagfix-optout`，保证即使插件仍启用、
+    或卸载插件前漏了一步，SessionStart 钩子也不会再把注入装回来。
+    """
+    result = remove()
+    if result not in ("removed", "already"):
+        return result
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        OPTOUT_MARKER.write_text("uninstalled by patch_install.py uninstall\n", encoding="utf-8")
+    except OSError as e:
+        _print(f"注入已移除，但写豁免标记失败：{e}")
+        return "optout-failed"
+    return "uninstalled"
+
+
 # ---------- 收尾（monitor 调用） ----------
 
 def finalize_pending(syntax_check_pkg: bool = True) -> str:
@@ -864,7 +884,7 @@ def _launch_monitor(asar: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="zcode-lagfix asar installer")
-    ap.add_argument("action", choices=["install", "remove", "check", "status", "finalize"])
+    ap.add_argument("action", choices=["install", "remove", "uninstall", "check", "status", "finalize"])
     ap.add_argument("--asar", type=Path, default=None)
     ap.add_argument("--runtime", type=Path, default=None)
     args = ap.parse_args(argv)
@@ -887,6 +907,11 @@ def main(argv: list[str] | None = None) -> int:
         result = remove()
         _print(f"remove → {result}")
         return 0 if result in ("removed", "already") else 1
+
+    if args.action == "uninstall":
+        result = uninstall()
+        _print(f"uninstall → {result}")
+        return 0 if result in ("uninstalled", "removed", "already") else 1
 
     if args.action == "check":
         asar = resolve_target()
