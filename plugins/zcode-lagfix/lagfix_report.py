@@ -184,6 +184,46 @@ def diagnose() -> None:
     print()
 
 
+def print_scroll_diag(rows: list[dict]) -> None:
+    """v0.3.1 滚动/输入诊断：取最后一条带 scroll / input 的样本。
+
+    dead / paused 的廉价样本里这两个字段是 null，会被跳过。
+    独立于 active 判断：纯滚动不产生投影提交（frames=0），不能因此不打印。
+    """
+    scroll_row = None
+    input_row = None
+    for r in reversed(rows):
+        if scroll_row is None and isinstance(r.get("scroll"), dict):
+            scroll_row = r["scroll"]
+        if input_row is None and isinstance(r.get("input"), dict):
+            input_row = r["input"]
+        if scroll_row is not None and input_row is not None:
+            break
+    if scroll_row is not None:
+        print(f"  滚动诊断：窗口内帧 P95={fmt(scroll_row.get('p95'), 'ms')}"
+              f"  最长={fmt(scroll_row.get('max'), 'ms')}"
+              f"  滚动帧={fmt(scroll_row.get('frames'))}"
+              f"  时间线事件={fmt(scroll_row.get('events'))}"
+              f"（会话区非时间线事件={fmt(scroll_row.get('anyEvents'))}）")
+        print(f"    loadOlder：累计 {fmt(scroll_row.get('loadOlderCalls'))} 次"
+              f"  窗口内 P95={fmt(scroll_row.get('loadOlderP95'), 'ms')}"
+              f"  窗口内最长={fmt(scroll_row.get('loadOlderMax'), 'ms')}"
+              f"  失败={fmt(scroll_row.get('loadOlderErrors'))}")
+        print(f"    挂载 turn={fmt(scroll_row.get('mountedTurns'))}"
+              f"  DOM 峰值={fmt(scroll_row.get('domPeak'))}"
+              f"  长动画帧={fmt(scroll_row.get('lafCount'))}"
+              f"（最长 {fmt(scroll_row.get('lafMax'), 'ms')}）")
+        if scroll_row.get("mismatch"):
+            print(f"  {WARN} 有人在滚但没命中时间线选择器（mismatch=true），"
+                  f"先确认宿主 DOM 是否改版")
+    else:
+        print(f"  {INFO} 无滚动诊断数据（旧样本，或滚动诊断已关闭）")
+    if input_row is not None:
+        print(f"  输入延迟：按键→下一帧 P95={fmt(input_row.get('p95'), 'ms')}"
+              f"  最长={fmt(input_row.get('max'), 'ms')}"
+              f"  样本={fmt(input_row.get('samples'))}")
+
+
 def main() -> int:
     # 必须在任何 print 之前：中文 Windows 默认 GBK，符号会抛 UnicodeEncodeError
     try:
@@ -283,6 +323,10 @@ def main() -> int:
     else:
         print(f"  {INFO} 没有活跃采样：还没有会话在流式输出。发条消息让它跑起来再看。")
 
+    # v0.3.1 滚动/输入诊断放在 active 判断之外：纯滚动不产生投影提交
+    # （frames 恒为 0），放进去会被整体吞掉，正好错过滚动 A/B 的核心场景。
+    print_scroll_diag(rows)
+
     if rows:
         print(f"  静止占比：{len(idle) * 100 // len(rows)}%")
 
@@ -294,11 +338,11 @@ def main() -> int:
             break
     if fix_row:
         if not fix_row.get("on"):
-            print(f"  修复开关：节流 关（用户关闭）")
+            print(f"  性能开关：节流 关（用户关闭）")
         elif fix_row.get("applied"):
-            print(f"  修复开关：节流 开 {fix_row.get('ms')}ms · 已生效")
+            print(f"  性能开关：节流 开 {fix_row.get('ms')}ms · 已生效")
         else:
-            print(f"  修复开关：节流 开 {fix_row.get('ms')}ms · {WARN} 未生效"
+            print(f"  性能开关：节流 开 {fix_row.get('ms')}ms · {WARN} 未生效"
                   f"（{fix_row.get('why') or '等待会话挂载'}）")
         # 装了不等于宿主走这条路：命中数才是"节流真的在拦通知"的证据
         hits = fix_row.get("hits")
@@ -313,15 +357,15 @@ def main() -> int:
         base = fix_row.get("ms")
         if fix_row.get("on") and num(eff) and num(base) and eff != base:
             print(f"    实际窗口：{eff}ms（基础 {base}ms，自适应/切会话冷静期已抬升）")
-        # v0.3：大会话保护独立于节流，单独报状态与拦截次数
+        # v0.3：大历史会话保护独立于节流，单独报状态与拦截次数
         if fix_row.get("big") is False:
-            print("    大会话保护：关（用户关闭）")
+            print("    大历史会话保护：关（用户关闭）")
         elif fix_row.get("bigApplied"):
-            print(f"    大会话保护：已装 · 累计拦下 {fix_row.get('blocked') or 0} 次全量补拉")
+            print(f"    大历史会话保护：已装 · 累计拦下 {fix_row.get('blocked') or 0} 次全量补拉")
         elif fix_row.get("big"):
-            print("    大会话保护：待装（还没找到会话 store）")
+            print("    大历史会话保护：待装（还没找到会话 store）")
     else:
-        print(f"  修复开关：{INFO} 本版样本没带 fix 字段（观测脚本旧版本）")
+        print(f"  性能开关：{INFO} 本版样本没带 fix 字段（观测脚本旧版本）")
     if heaps:
         print(f"  渲染进程 JS 堆：峰值 {max(heaps)} MB / 中位 {pct(heaps, 0.5)} MB")
         print(f"    （performance.memory 是 Chromium 粗粒度分桶值，仅供趋势参考）")
@@ -363,7 +407,7 @@ def main() -> int:
     print("  · 真实帧间隔 P95 > 50ms 或 单帧最长 > 200ms  → 用户能感知到卡")
     print("  · 长任务次数 > 0 → 主线程被单次阻塞，与卡顿直接相关")
     print("  · 投影提交率高但帧间隔正常 → 宿主在勤快重渲染，暂未卡死")
-    print("[lagfix] v0.3.0：修复页四项增强（自适应窗口/冷静期/后台降频/大会话保护）可逐项关闭，关了节流后依赖项自动变灰；__lagfixOff() 一键还原；维护页显示日志路径与 50MB 上限；角标隐藏后按 Ctrl+Alt+L 或 __lagfixSettings() 重开设置。")
+    print("[lagfix] v0.3.1：观测页新增滚动诊断/输入延迟（只读），性能页新增滚动期隐藏遮罩；大历史会话保护与渲染四项增强均可逐项关闭，关了节流后依赖项自动变灰；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置；维护页可手动检查更新（只查 GitHub Releases，不自动安装）。")
     print()
     print_logs()
     return 0

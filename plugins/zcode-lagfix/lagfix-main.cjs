@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
- * zcode-lagfix 主进程加载器 v0.3（观测 + 渲染通知节流 + 日志预算）。
+ * zcode-lagfix 主进程加载器 v0.3.1（观测 + 渲染通知节流 + 日志预算 + 检查更新）。
  *
  * 由 app.asar 入口尾部的 dynamic import 加载（CommonJS）。
  * 职责：
  *   1. 每个窗口 webContents dom-ready 时注入 lagfix-observe.js（先 new Function 语法预检）；
  *      同时接管注册监听之前就已存在的窗口（loader 晚于首窗加载时不漏注，P1-4）；
  *   2. 每 5s 收集各窗口观测数据，追加写 ~/.zcode/zcode-lagfix/observe-YYYYMMDD.jsonl；
- *   3. 连续 5 次异常永久自禁用。
+ *   3. 手动「检查更新」时请求一次 GitHub Releases（仅 https + api.github.com）；
+ *   4. 连续 5 次异常永久自禁用。
  *
  * 安全约束：
  *   - 绝不 appendSwitch（不开 CDP/调试端口）；
@@ -25,6 +26,7 @@
 
   var fs = require("fs");
   var path = require("path");
+  var https = require("https");
 
   var RUNTIME_DIR = __dirname; // 运行时文件即本目录
   var DATA_DIR = RUNTIME_DIR;  // observe 日志也写这里（~/.zcode/zcode-lagfix）
@@ -157,8 +159,8 @@
   }
 
   function appendSample(winId, payloadText) {
-    if (!ensureDataDir()) return;
     var parsed = safeParse(payloadText);
+    if (!ensureDataDir()) return parsed;
     var isDead = !!(parsed && parsed.dead);
     // 自禁用的窗口内存里是旧设置；它每 5s 仍会回传同一份 payload。若照常应用，
     // 活窗口改过的 collectSec/logMaxMB 会被旧值反复覆盖（采集泵来回重建、预算反复 sweep）。
@@ -199,6 +201,7 @@
     }).catch(function (e) {
       log("日志落盘失败：", e && e.message);
     });
+    return parsed;
   }
 
   function safeParse(text) {
@@ -221,7 +224,12 @@
         wc.executeJavaScript(pre + "window.__lagfixCollect ? window.__lagfixCollect() : null", false)
           .then(function (text) {
             delete inflight[wc.id];
-            if (typeof text === "string" && text.length > 0) appendSample(wc.id, text);
+            if (typeof text === "string" && text.length > 0) {
+              var d = appendSample(wc.id, text);
+              // 手动「检查更新」：渲染端只置一个内存标记，真正的网络请求在主进程发。
+              // dead 样本不带请求，避免已自禁用窗口反复触发。
+              if (d && !d.dead && d.updateCheck === 1) checkUpdate(wc, d.ver);
+            }
           })
           .catch(function (e) {
             delete inflight[wc.id];
@@ -318,9 +326,9 @@
           total -= files[i].size;
           removed++;
         } catch (e) {
-          // 提权工具写的 elevated-finalize.log 普通权限删不掉；跳过它继续删
-          // 其它文件，否则预算永远降不下来（三审 P2）。
-          total -= files[i].size;
+          // 文件还在磁盘上，不能从 total 里扣掉；否则「不可删文件 > 预算」时
+          // 循环会误以为已经达标，后面的可删文件一个都不会动。
+          // 只记录一次（按文件名去重），然后继续尝试后面的文件。
           if (!deniedLogs[files[i].name]) {
             deniedLogs[files[i].name] = true;
             log("无法删除日志（权限/占用），已跳过：" + files[i].name);
@@ -375,7 +383,7 @@
     // 设置面板可能在用户拖动前后多次改采集间隔：重建定时器即可
     ELECTRON = electron;
 
-    log("v0.3 加载器已启动（观测 + 订阅节流 + 大会话保护 + 日志预算；__lagfixOff 一键还原）");
+    log("v0.3.1 加载器已启动（观测 + 渲染节流 + 大历史保护 + 日志预算 + 检查更新；__lagfixOff 一键还原）");
   }
 
   var ELECTRON = null;
@@ -490,6 +498,182 @@
       log("重启失败：", e && e.message);
       restartHandled = false;
     }
+  }
+
+  // ---- 检查更新（手动触发，只在主进程发一次 GitHub Releases 请求） ----
+  // 渲染端把 updateCheck=1 塞进样本；主进程查完把结果注入 window.__lagfixUpdate。
+  // 不带 token、不自动下载、不自动安装；失败只影响面板那一行提示。
+  var UPDATE_API = "https://api.github.com/repos/ck-ys/zcode-lagfix/releases";
+  var UPDATE_HOST = "api.github.com";
+  var UPDATE_HOME = "https://github.com/ck-ys/zcode-lagfix/releases";
+  var UPDATE_MAX_BYTES = 2 * 1024 * 1024;
+  var UPDATE_TIMEOUT_MS = 10000;
+  var lastUpdateAt = 0;
+  var updateInflight = false;
+
+  function parseSemver(s) {
+    var m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(String(s || ""));
+    if (!m) return null;
+    return { major: +m[1], minor: +m[2], patch: +m[3], pre: m[4] || "" };
+  }
+
+  function cmpSemver(a, b) {
+    var d = (a.major - b.major) || (a.minor - b.minor) || (a.patch - b.patch);
+    if (d) return d < 0 ? -1 : 1;
+    if (a.pre === b.pre) return 0;
+    if (!a.pre) return 1;   // 正式版 > 同号预发布
+    if (!b.pre) return -1;
+    return a.pre < b.pre ? -1 : 1;
+  }
+
+  function sendUpdate(wc, info) {
+    try {
+      if (!wc || wc.isDestroyed()) return;
+      wc.executeJavaScript("window.__lagfixUpdate=" + JSON.stringify(info) + ";", false)
+        .catch(function () {});
+    } catch (e) {}
+  }
+
+  function checkUpdate(wc, current) {
+    var now = Date.now();
+    if (updateInflight || now - lastUpdateAt < 5000) {
+      sendUpdate(wc, { status: "error", message: "请求过于频繁，请稍后再试", at: now });
+      return;
+    }
+    updateInflight = true;
+    lastUpdateAt = now;
+    var cur = parseSemver(current) || parseSemver("0.0.0");
+    // 总时限覆盖连接、重定向与慢速滴流；每跳不再单独重置 10s。
+    var deadline = Date.now() + UPDATE_TIMEOUT_MS;
+    getJson(UPDATE_API, 2, deadline, function (e, data) {
+      updateInflight = false;
+      if (e) {
+        log("检查更新失败：" + e.message);
+        sendUpdate(wc, { status: "error", message: e.message, at: Date.now() });
+        return;
+      }
+      var best = null;
+      try {
+        (Array.isArray(data) ? data : []).forEach(function (r) {
+          if (!r || r.draft || r.prerelease) return;
+          var v = parseSemver(r.tag_name);
+          if (!v) return;
+          if (!best || cmpSemver(v, best.v) > 0) {
+            best = { v: v, tag: String(r.tag_name), url: r.html_url };
+          }
+        });
+      } catch (e2) {}
+      var newer = !!(best && cmpSemver(best.v, cur) > 0);
+      if (!best) {
+        log("检查更新：当前 " + current + "，仓库还没有正式发布版本");
+        sendUpdate(wc, {
+          status: "error",
+          message: "仓库还没有正式发布版本（只有 tag 不算 Release）",
+          at: Date.now(),
+        });
+        return;
+      }
+      log("检查更新：当前 " + current + "，最新 " + best.tag
+        + (newer ? "（有新版本）" : "（已是最新）"));
+      sendUpdate(wc, {
+        status: "ok",
+        current: current || "",
+        latest: best ? best.tag.replace(/^v/, "") : "",
+        newer: newer,
+        url: (best && best.url) || UPDATE_HOME,
+        at: Date.now(),
+      });
+    });
+  }
+
+  // 只允许 https + api.github.com + 443；重定向逐跳重新校验，最多 2 跳。
+  // deadline 是整个请求链的绝对截止时间（含连接/重定向/慢速滴流）。
+  function getJson(url, redirects, deadline, cb) {
+    var u;
+    try { u = new URL(url); } catch (e) { cb(new Error("地址无效")); return; }
+    if (u.protocol !== "https:" || u.hostname !== UPDATE_HOST
+      || (u.port && u.port !== "443")) {
+      cb(new Error("拒绝非 GitHub API 地址"));
+      return;
+    }
+    var done = false;
+    var hardTimer = null;
+    function finish(e, data) {
+      if (done) return;
+      done = true;
+      if (hardTimer) { clearTimeout(hardTimer); hardTimer = null; }
+      cb(e, data);
+    }
+    var req = null;
+    // 硬截止：覆盖 DNS/TCP 连接、重定向等待与慢速滴流（socket 空闲超时兜不住）。
+    // 在发请求前挂上，重定向时由当前跳负责清掉再递归。
+    hardTimer = setTimeout(function () {
+      try { if (req) req.destroy(); } catch (e2) {}
+      finish(new Error("请求超时"));
+    }, Math.max(1, deadline - Date.now()));
+    hardTimer.unref && hardTimer.unref();
+    try {
+      req = https.get({
+        protocol: u.protocol,
+        hostname: u.hostname,
+        path: u.pathname + u.search,
+        headers: {
+          "User-Agent": "zcode-lagfix",
+          "Accept": "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      }, function (res) {
+        var code = res.statusCode || 0;
+        if (code >= 300 && code < 400) {
+          var loc = res.headers && res.headers.location;
+          res.resume();
+          if (!loc) { finish(new Error("重定向缺少地址")); return; }
+          if (redirects <= 0) { finish(new Error("重定向次数过多")); return; }
+          var next;
+          try { next = new URL(loc, url).toString(); } catch (e2) {
+            finish(new Error("重定向地址无效"));
+            return;
+          }
+          if (done) return;
+          done = true;
+          if (hardTimer) { clearTimeout(hardTimer); hardTimer = null; }
+          getJson(next, redirects - 1, deadline, cb);
+          return;
+        }
+        var total = 0;
+        var chunks = [];
+        res.on("data", function (c) {
+          total += c.length;
+          if (total > UPDATE_MAX_BYTES) {
+            try { req.destroy(); } catch (e3) {}
+            finish(new Error("响应超过 2MB"));
+            return;
+          }
+          chunks.push(c);
+        });
+        res.on("end", function () {
+          if (code !== 200) {
+            finish(new Error(code === 403 ? "GitHub 限流，请稍后再试" : "HTTP " + code));
+            return;
+          }
+          var data = null;
+          try { data = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch (e4) {
+            finish(new Error("返回内容不是有效 JSON"));
+            return;
+          }
+          finish(null, data);
+        });
+        res.on("error", function (e5) { finish(e5); });
+      });
+    } catch (e) {
+      finish(e);
+      return;
+    }
+    req.setTimeout(UPDATE_TIMEOUT_MS, function () {
+      try { req.destroy(); } catch (e2) {}
+      finish(new Error("请求超时"));
+    });
+    req.on("error", function (e) { finish(e); });
   }
 
   try { start(); } catch (e) { log("启动失败：", e && e.message); }

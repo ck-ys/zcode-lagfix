@@ -1,6 +1,6 @@
 {
   "name": "lagfix-marketplace",
-  "description": "zcode-lagfix 插件市场：ZCode 超长会话卡顿观测与修复（v0.3.0 主页面状态条 + 档位统计浮层 + 订阅通知节流 + 四项可关闭性能增强 + 日志 50MB 预算，可在面板里重启 ZCode；修改 app.asar，成功后需完全退出并重开）。",
+  "description": "zcode-lagfix 插件市场：ZCode 超长会话卡顿观测与缓解（v0.3.1 滚动/输入诊断 + 滚动期遮罩抑制 + 渲染节流 + 大历史会话保护 + 日志 50MB 预算，面板内可重启 ZCode 与手动检查更新；修改 app.asar，成功后需完全退出并重开）。",
   "owner": {
     "name": "ck-ys",
     "url": "https://github.com/ck-ys"
@@ -9,8 +9,8 @@
     {
       "name": "zcode-lagfix",
       "source": "./plugins/zcode-lagfix",
-      "description": "ZCode 超长会话卡顿观测与修复插件（v0.3.0：状态条只在主页面显示，判定结论与帧 P95，悬停/点击看档位与最近 18 轮柱状图；修复=订阅通知节流 + 自适应窗口/切会话冷静期/后台降频/大会话保护，四项可逐项关闭；维护页显示日志路径与 50MB 上限；面板内含重启 ZCode，检查更新暂置灰）。安装会修改 app.asar，成功后需完全退出并重开 ZCode。",
-      "version": "0.3.0",
+      "description": "ZCode 超长会话卡顿观测与缓解插件（v0.3.1：帧 P95 + 滚动窗口/loadOlder/输入延迟诊断；渲染=通知节流 + 自适应窗口/切会话冷静期/后台降频，历史=大历史会话保护，滚动=滚动期隐藏遮罩，全部可逐项关闭；角标常驻，面板分 状态条/观测/性能/维护；维护页可看日志上限、重启 ZCode、手动检查更新）。安装会修改 app.asar，成功后需完全退出并重开 ZCode。",
+      "version": "0.3.1",
       "category": "monitoring",
       "keywords": [
         "lagfix",
