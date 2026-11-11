@@ -41,6 +41,13 @@ def run_print(rows: list[dict]) -> str:
     return buf.getvalue()
 
 
+def run_pane(rows: list[dict]) -> str:
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        lr.print_pane_diag(rows)
+    return buf.getvalue()
+
+
 def main() -> int:
     print("-- _fmt_ts --")
     check("None/0/负数都显示 -",
@@ -120,6 +127,98 @@ def main() -> int:
     check("空 rows 不崩", "无多会话归因数据" in out and "无补页明细" in out)
     out = run_print([{"sessions": ["x"], "loadOlderDetail": []}])
     check("空明细 + 无旧数据给出尚未调用", "尚未调用 loadOlder" in out)
+
+    print("-- v0.3.3 侧栏开合 / 回前台 --")
+    pane_closed = {
+        "settings": {"paneDiagOn": True},
+        "frameP95": 40, "longTasks": 2, "dom": 1000, "hidden": False, "miss": False,
+        "pane": {"detected": True, "open": False, "panelPx": 0, "switches": 1,
+                 "switchP95": 60, "switchMax": 90, "guardHits": 1},
+        "refocus": {"hiddenMs": None, "sinceVisibleMs": None, "p95": None,
+                    "max": None, "flushes": 0, "guardHits": 0},
+    }
+    pane_open = {
+        "settings": {"paneDiagOn": True},
+        "frameP95": 120, "longTasks": 20, "dom": 5000, "hidden": False, "miss": False,
+        "pane": {"detected": True, "open": True, "panelPx": 720, "switches": 3,
+                 "switchP95": 84, "switchMax": 190, "guardHits": 3},
+        "refocus": {"hiddenMs": 8200, "sinceVisibleMs": 240, "p95": 96,
+                    "max": 210, "flushes": 2, "guardHits": 1},
+    }
+    out = run_pane([pane_closed, pane_open])
+    check("侧栏最近一次 open/宽度/开合次数",
+          "open=true" in out and "宽度=720px" in out and "开合 3 次" in out, out)
+    check("最近一次开合 P95/最长", "帧 P95=84ms" in out and "最长=190ms" in out)
+    check("open/closed 分组帧 P95 中位数",
+          "open 样本 1 条：帧 P95 中位 120" in out
+          and "closed 样本 1 条：帧 P95 中位 40" in out, out)
+    check("open/closed 分组长任务与 DOM",
+          "长任务中位 20" in out and "DOM 中位 5000" in out)
+    check("回前台 hiddenMs/p95/max/flushes",
+          "上次后台 8200ms" in out and "帧 P95=96ms" in out
+          and "合并补发 2 个" in out, out)
+
+    missing = {"settings": {"paneDiagOn": True},
+               "pane": {"detected": False, "open": False, "panelPx": None,
+                        "switches": 0, "switchP95": None, "switchMax": None,
+                        "guardHits": 0},
+               "refocus": {"hiddenMs": None, "sinceVisibleMs": None, "p95": None,
+                           "max": None, "flushes": 0, "guardHits": 0}}
+    out = run_pane([missing])
+    check("detected=false 明确提示宿主标记缺失",
+          "detected=false" in out and "无法归因" in out, out)
+
+    disabled = {"settings": {"paneDiagOn": False}, "pane": None, "refocus": None}
+    out = run_pane([pane_open, disabled])
+    check("paneDiagOn=false 明确提示已关闭",
+          "侧栏 + 回前台归因已关闭" in out, out)
+    check("关闭边界阻断旧 pane/refocus 回退",
+          "720px" not in out and "8200ms" not in out, out)
+
+    paused = {"settings": {"paneDiagOn": True}, "pane": None, "refocus": None}
+    out = run_pane([pane_open, paused])
+    check("暂停时 pane 回退到最近有效样本",
+          "（最近一次有效样本）" in out and "720px" in out, out)
+    check("暂停时 refocus 回退到最近有效样本",
+          "8200ms" in out and "（最近一次有效样本）" in out)
+
+    old = {"frameP95": 30, "longTasks": 0, "dom": 100}
+    out = run_pane([old])
+    check("旧样本没有 pane/refocus 字段时提示，不报错",
+          "无侧栏 + 回前台归因数据" in out, out)
+    out = run_pane([])
+    check("空 rows 不崩", "无侧栏 + 回前台归因数据" in out, out)
+
+    bucket_rows = []
+    for ms in (500, 5000, 30000, 90000):
+        bucket_rows.append({
+            "settings": {"paneDiagOn": True},
+            "pane": {"detected": True, "open": True, "panelPx": 600,
+                     "switches": 1, "switchP95": 50, "switchMax": 60, "guardHits": 1},
+            "refocus": {"hiddenMs": ms, "sinceVisibleMs": 100, "p95": 70,
+                        "max": 120, "flushes": 1, "guardHits": 1},
+        })
+    out = run_pane(bucket_rows)
+    check("回前台按 hiddenMs 四档分桶",
+          "<1s 1 / 1–10s 1 / 10–60s 1 / >60s 1" in out, out)
+
+    # hiddenMs 是持久字段：同一次回前台会在后续每个样本重复出现，不能按行计数。
+    repeat_rows = [dict(bucket_rows[1], refocus=dict(bucket_rows[1]["refocus"],
+                                                     hiddenMs=8200, sinceVisibleMs=s))
+                   for s in (100, 5000, 10000)]
+    out = run_pane(repeat_rows)
+    check("同一次回前台重复样本只计一次",
+          "1–10s 1 /" in out and "1–10s 3" not in out, out)
+    # 两次回前台恰好都是 8.2s：sinceVisibleMs 回退要能识别成新事件。
+    out = run_pane([repeat_rows[0], repeat_rows[2], dict(repeat_rows[0],
+                                                         refocus=dict(repeat_rows[0]["refocus"],
+                                                                      hiddenMs=8200,
+                                                                      sinceVisibleMs=100))])
+    check("相同后台时长的新回前台仍计一次",
+          "1–10s 2" in out, out)
+    check("缺 refocus 字段时明确提示而不是静默",
+          "无回前台数据" in run_pane([{"settings": {"paneDiagOn": True},
+                                        "pane": pane_open["pane"]}]), out)
 
     print("-- load_lines 坏行 --")
     with tempfile.TemporaryDirectory(prefix="lagfix-report-") as td:

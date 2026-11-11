@@ -1,13 +1,32 @@
-# zcode-lagfix
+<p align="center">
+  <img src="docs/assets/icon.png" width="84" height="84" alt="zcode-lagfix 图标">
+</p>
 
-[![version](https://img.shields.io/badge/version-0.3.2-blue.svg)](https://github.com/ck-ys/zcode-lagfix/tree/plugin-releases)
-[![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey.svg)](#兼容性)
-[![python](https://img.shields.io/badge/python-3.8%2B-3776ab.svg)](https://www.python.org/)
+<h1 align="center">zcode-lagfix</h1>
 
-ZCode 桌面版**超长会话卡顿**的观测与缓解插件。
+<p align="center">
+  <strong>ZCode 超长会话的卡顿观测与缓解插件</strong><br>
+  把“卡不卡”变成可读的数字，在不改会话数据的前提下减少卡顿。
+</p>
 
-它做两件事：
+<p align="center">
+  <a href="https://github.com/ck-ys/zcode-lagfix/tree/plugin-releases"><img src="https://img.shields.io/badge/version-0.3.3-blue.svg" alt="version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license"></a>
+  <a href="#兼容性"><img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey.svg" alt="platform"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.8%2B-3776ab.svg" alt="python"></a>
+</p>
+
+<p align="center">
+  <sub>不读写 db.sqlite · 不读会话正文 · 不开 CDP · 不联网上报 · 一键还原</sub>
+</p>
+
+下面是在演示页面运行真实 observer 的截图：数据来自模拟卡顿，不含任何真实会话内容。
+
+<p align="center">
+  <img src="docs/assets/preview-status.png" width="360" alt="状态条与统计浮层">
+</p>
+
+ZCode 桌面版**超长会话卡顿**的观测与缓解插件。它做两件事：
 
 1. 把"卡不卡"变成可读的数字——帧间隔、投影提交速率、主线程长任务；
 2. 在不修改会话数据的前提下，合并高频渲染通知，并拦住进入大历史会话时的一次性全量补拉。
@@ -32,7 +51,8 @@ ZCode 桌面版**超长会话卡顿**的观测与缓解插件。
 - **v0.2**：投影订阅通知节流，解决流式期间高频重渲染。
 - **v0.3.0**：状态条移到输入框上方且只在主页面显示；新增四项可逐项关闭的性能增强；日志预算与当前日志量展示；市场安装支持一键卸载。
 - **v0.3.1**：新增滚动窗口、`loadOlder` 与输入延迟三项只读观测；滚动期临时隐藏消息层遮罩；角标改为常驻（删除隐藏开关）；设置面板重排为 状态条 / 观测 / 性能 / 维护；「检查更新」可用（手动请求一次 GitHub Releases）。
-- **v0.3.2（当前）**：新增多会话归因（按 `sid` 分桶记录提交/帧、DOM、挂载 turn、滚动 P95，最多 5 个）与 `loadOlder` 最近 10 次明细（耗时/行数/触发来源）；只读、默认开，不改宿主行为；`/lagfix report` 新增对应两段。
+- **v0.3.2**：新增多会话归因（按 `sid` 分桶记录提交/帧、DOM、挂载 turn、滚动 P95，最多 5 个）与 `loadOlder` 最近 10 次明细（耗时/行数/触发来源）；只读、默认开，不改宿主行为；`/lagfix report` 新增对应两段。
+- **v0.3.3（当前）**：新增侧栏开合 420ms 保护、面板常开期保护与回前台 700ms 保护，默认开、可单独关；新增 `pane`/`refocus` 只读归因（开合帧 P95、面板宽度、后台时长、回前台帧 P95/合并补发数）；`/lagfix report` 新增「侧栏开合」「回前台」两段；设置面板的「!」说明统一改成「会做什么 / 不会做什么 / 代价」的大白话。
 
 ## 安装
 
@@ -96,11 +116,17 @@ ZCode 桌面版**超长会话卡顿**的观测与缓解插件。
 | 分类 | 内容 |
 | --- | --- |
 | 状态条 | 显示文字、信息量（简洁/详细）、警告/严重阈值 |
-| 观测 | 观测开关、采集间隔 1 / 3 / 5 / 10 / 30 秒、滚动诊断、输入延迟、多会话归因 |
-| 性能 | 渲染节流与最短刷新间隔、四项渲染增强、大历史会话保护、滚动期隐藏遮罩（可逐项关闭） |
+| 观测 | 观测开关、采集间隔 1 / 3 / 5 / 10 / 30 秒、滚动诊断、输入延迟、多会话分别统计 |
+| 性能 | 合并刷新与最短刷新间隔、卡顿时自动放慢、切换会话时放慢、后台时减少刷新、大历史会话保护、滚动时去掉渐隐、侧栏与回前台保护（可逐项关闭） |
 | 维护 | 日志路径与上限、当前日志量、重启 ZCode、检查更新、恢复默认 |
 
-性能页每一项标题后都有圆圈「!」，点开写明"影响什么 / 不影响什么"。
+性能页每一项标题后都有圆圈「!」，点开用「会做什么 / 不会做什么 / 代价」三段说明，不写内部字段名。
+
+设置面板的「性能」页：
+
+<p align="center">
+  <img src="docs/assets/preview-settings.png" width="720" alt="设置面板：侧栏与回前台保护">
+</p>
 
 **角标常驻显示**（v0.3.1 起删除了隐藏开关）：在设置页/弹窗内、被浮层遮挡、没有可用输入框时仍会自动隐藏，这是布局避让，不是用户开关。设置入口始终可用：
 
@@ -191,13 +217,32 @@ v0.3.1 能证明"有尖峰"，但分不清尖峰来自当前会话、隐藏会�
 - `loadOlderDetail` 只在变化时携带完整数组，未变化样本发 `[]`；多会话归因每个样本约增加 0.4–0.6KB。默认 50MB 日志预算下如需要更长历史，可在面板调大 `logMaxMB`。
 - 本版不改变任何渲染/补页行为，不应期待帧率变化；它的价值是让 v0.3.3 的缓解项有数据依据。
 
+### v0.3.3 侧栏开合、面板常开期与回前台
+
+右侧面板不只是"打开那一拍"贵：面板常开时仍有遮罩与重绘成本，从别的应用切回 ZCode 还会同步补发后台通知。v0.3.3 把它拆成三段，每段独立开关：
+
+| 项 | 默认 | 行为 | 关掉后 |
+| --- | --- | --- | --- |
+| 侧栏与回前台统计 | 开 | 只读记录 `pane.detected/open/panelPx/switches/switchP95/switchMax/guardHits` 与 `refocus.hiddenMs/sinceVisibleMs/p95/max/flushes/guardHits`；回前台同时听 `visibilitychange` 与 `window.focus/blur` | `collect` 的 `pane`/`refocus` 为 `null`；若保护项仍开，只保留最小开合检测 |
+| 侧栏开合保护 | 开 | 开合后 420ms 内给 `documentElement` 加 `data-lagfix-pane-switch="1"`：停掉 `[data-panel]` 的过渡、临时关消息层 mask、暂停角标定位 | 不加属性，宿主原过渡与遮罩完全不变 |
+| 面板常开保护 | 开 | 面板打开期间加 `data-lagfix-pane-open="1"`：关消息层 mask、通知窗口至少 300ms、角标定位最多 1 次/1.8s | 不加属性，节流与角标回到原规则 |
+| 回前台保护 | 开 | `hidden→visible` 或 `blur→focus` 后，把后台挂起的通知合并到一个 120ms 定时器；700ms 内通知窗口至少 400ms；前 300ms 不定位角标 | 恢复同步补发，不抬下限、不跳过角标 |
+
+边界与取舍：
+
+- 开合保护只覆盖 420ms（200ms flex 过渡 + 220ms 重内容 settle）；代价是开合从滑动变成瞬开/瞬收，不想要就关 P1。
+- 面板常开期停 mask、把通知窗口抬到 300ms，聊天文字最多晚 300ms 刷新；Agent 收流、工具执行、消息落盘不受影响。
+- 回前台最多晚 120ms 补状态；只延迟插件自己挂起的通知，宿主自己的首帧重绘不被拦截。
+- `pane.detected=false` 表示宿主改版或当前布局没有桌面侧栏（如移动端 overlay），插件不猜选择器、也不加保护属性；先跑 `/lagfix report` 判断。
+- 三段都只改通知时机、绘制层属性与角标定位；不改消息、会话数据、补页返回值，不写 store。若卡顿来自预览 HTML 自身绘制或宿主其它长任务，这三段仍可能不够。
+
 ## 日志、体积与隐私
 
 运行时目录：`~/.zcode/zcode-lagfix/`
 
 | 文件 | 内容 |
 | --- | --- |
-| `observe-YYYYMMDD.jsonl` | 每个采集周期的指标（帧、提交、长任务、堆内存、DOM 数量、滚动/输入诊断、多会话归因、loadOlder 明细、设置快照） |
+| `observe-YYYYMMDD.jsonl` | 每个采集周期的指标（帧、提交、长任务、堆内存、DOM 数量、滚动/输入诊断、多会话归因、loadOlder 明细、侧栏/回前台归因、设置快照） |
 | `main.log` | 主进程加载器（注入、采集泵、自禁用原因） |
 | `inject.log` | 每个窗口的注入结果 |
 | `monitor.log` | 值守进程（何时等到、为何收不了尾） |
@@ -306,7 +351,7 @@ python "$HOME/.zcode/zcode-lagfix/lagfix_report.py"
 
 - **与 zusage 等注入插件共存**：注入行标记 `[lagfix] load failed`、loader 名 `lagfix-main.cjs`，与 zusage 的 `inject-main.cjs` / `[zusage] load failed` 互不匹配；锁、TMP、sidecar 文件名全部错开。
 - **多插件收尾错峰**：检测到其它待收尾包时主动让对方先落地（累计上限 120 秒），等不到就放弃本轮，避免让别人的补丁永久失效。
-- **宿主改版**：状态条依赖 `.chat-composer-input-surface`、`[data-v4-back-to-bottom-anchor="composer-dock"]` 与投影 store 的内部形状。ZCode 大版本改版后若状态条消失，先执行 `/lagfix report` 判断是注入丢了还是选择器不匹配。
+- **宿主改版**：状态条依赖 `.chat-composer-input-surface`、`[data-v4-back-to-bottom-anchor="composer-dock"]` 与投影 store 的内部形状；侧栏保护依赖 `[data-workspace-side-frame="true"]` 的 `aria-hidden` 和外层 `[data-panel]`。ZCode 大版本改版后若状态条消失或 `pane.detected=false`，先执行 `/lagfix report` 判断是注入丢了还是选择器不匹配。
 - **平台**：Windows 与 macOS 桌面版；Linux 桌面版未验证。
 
 ## 安全设计
@@ -315,7 +360,7 @@ python "$HOME/.zcode/zcode-lagfix/lagfix_report.py"
 - 替换失败挂 pending，由值守进程在 ZCode 全退后收尾；收尾遇他人替换时基于当前文件重打。
 - 注册表读失败一律中止，绝不回退空结构覆盖用户插件列表；写回采用 tmp + 原子替换，并保留当日备份。
 - 改后入口用 `ZCode.exe --check`（`ELECTRON_RUN_AS_NODE`）做语法自检，30 秒超时。
-- 运行时改动只有三处：包装 store 的 `subscribe`（只合并通知）、`loadAllOlder`（只在大会话且未全载时拦截）、`loadOlder`（只观测量耗时，不改参数与返回值）。三处都在开关关闭、观测器自禁用或 `__lagfixOff()` 时立即还原。
+- 运行时宿主包装只有三处：`subscribe`（只合并通知）、`loadAllOlder`（只在大会话且未全载时拦截）、`loadOlder`（只观测量耗时，不改参数与返回值）。v0.3.3 另加两个临时 `documentElement` 属性（`data-lagfix-pane-switch` / `data-lagfix-pane-open`）和对应 CSS，只在保护窗口/面板常开期存在；三条路径（关开关、自禁用、`__lagfixOff()`）都会立即移除。
 
 ## 测试
 
@@ -330,9 +375,9 @@ python tests/line_regex.py      # 注入行正则与 zusage 互不误伤（11 �
 python tests/peer_gate.py       # 多插件收尾礼让与上限（5 项）
 python tests/smoke_asar.py      # 合成 asar 夹具，byte 级验证重打包、busy 与卸载竞态（46 项，不碰真实安装目录）
 python tests/install_remove.py  # install.py 卸载异常边界：Ctrl+C / 占用 / 插件态写入失败（8 项）
-python tests/report_session_diag.py # 报告：会话桶/补页明细/暂停回退/关闭边界/坏行（24 项）
+python tests/report_session_diag.py # 报告：会话桶/补页明细/侧栏与回前台/暂停回退/关闭边界/坏行（40 项）
 python tests/probe_latency.py   # 外部探针方法有效性：空闲 vs UI 线程占死
-node tests/observe_smoke.mjs    # 渲染端：可见性/角标/横幅让位/阈值配色/节流/滚动诊断/遮罩/输入延迟/多会话归因/loadOlder 明细/日志/一键还原（258 项）
+node tests/observe_smoke.mjs    # 渲染端：可见性/角标/节流/滚动诊断/输入延迟/多会话/loadOlder/侧栏与回前台/日志/一键还原（326 项）
 node tests/update_check.mjs     # 主进程检查更新：白名单/重定向/过滤/版本比较/体积上限/注入（19 项，不联网）
 node tests/log_budget.mjs      # 主进程日志预算：超限删最旧/保留活动文件/14 天清理/符号链接与目录跳过/权限失败（24 项，假 fs 不写盘）
 ```
@@ -341,8 +386,8 @@ node tests/log_budget.mjs      # 主进程日志预算：超限删最旧/保留�
 
 ## 路线图
 
-- **v0.3.3**：按 v0.3.2 证据二选一——补页合并（O3）或 turn 内部行级 `content-visibility`（O4）；默认关闭的实验开关先上，A/B 通过再考虑默认开。
-- **v0.3.4**：多会话策略（O7）——如果 v0.3.2 证明是隐藏 pane 的提交/DOM 拖累，再评估"跨 store 共享调度器 / 全局通知预算 / 按可见性分级"，不提前合并全局调度器。
+- **v0.3.4**：按 v0.3.3 数据从历史 backlog 里选 1–2 项——补页合并（O3）或 turn 内部行级 `content-visibility`（O4）；默认关闭的实验开关先上，A/B 通过再考虑默认开。
+- **v0.3.5**：多会话策略（O7）——如果 v0.3.2/v0.3.3 证明是隐藏 pane 的提交/DOM 拖累，再评估"跨 store 共享调度器 / 全局通知预算 / 按可见性分级"，不提前合并全局调度器。
 - **v0.4**：轻量模式（O5）与 turn 内再虚拟化（O6），需要宿主配合或更大的渲染端改造。
 - **候选**：打开子智能体（Subagent）面板或多级任务时的卡顿：先量清是 DOM 规模、订阅通知还是面板挂载，再决定是否做成默认关闭的独立开关。
 - **长期**：宿主改版后的选择器适配；自动更新（当前只做手动检查，不自动下载/安装）。

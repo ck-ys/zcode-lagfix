@@ -339,6 +339,134 @@ def print_session_diag(rows: list[dict]) -> None:
         print(f"  {INFO} 无补页明细（旧样本，或滚动诊断已关闭）")
 
 
+def print_pane_diag(rows: list[dict]) -> None:
+    """v0.3.3 侧栏开合 + 回前台归因。
+
+    - pane/refocus 取最近一条 dict；暂停/dead 的 null 向前回退。
+    - paneDiagOn=false 时明确打印“已关闭”，不拿旧数据冒充当前。
+    - 旧样本没有字段时只提示，不报错。
+    """
+    prow = None
+    p_older = False
+    p_disabled = False
+    for idx, r in enumerate(reversed(rows)):
+        val = r.get("pane")
+        if isinstance(val, dict):
+            prow = val
+            p_older = idx > 0
+            break
+        if val is None and _settings_of(r).get("paneDiagOn") is False:
+            p_disabled = True
+            break
+
+    if prow is not None:
+        suffix = "（最近一次有效样本）" if p_older else ""
+        detected = prow.get("detected") is True
+        if detected:
+            print(f"  侧栏开合：detected=true  open={str(bool(prow.get('open'))).lower()}"
+                  f"  宽度={fmt(prow.get('panelPx'), 'px')}"
+                  f"  开合 {fmt(prow.get('switches'))} 次"
+                  f"  保护命中 {fmt(prow.get('guardHits'))} 次{suffix}")
+            print(f"    最近一次开合：帧 P95={fmt(prow.get('switchP95'), 'ms')}"
+                  f"  最长={fmt(prow.get('switchMax'), 'ms')}")
+        else:
+            print(f"  {WARN} 侧栏标记缺失（detected=false）：宿主改版或当前布局无桌面侧栏，"
+                  f"本段无法归因{suffix}")
+
+        # open/closed 分组的帧 P95、长任务、DOM 中位数。
+        # 用所有可见、未丢锚点的样本：面板常开但没提交（frames=0）正是要看的场景。
+        groups = {True: {"frame": [], "lt": [], "dom": []},
+                  False: {"frame": [], "lt": [], "dom": []}}
+        for r in rows:
+            p = r.get("pane")
+            if not isinstance(p, dict) or p.get("detected") is not True:
+                continue
+            if r.get("hidden") or r.get("miss"):
+                continue
+            key = bool(p.get("open"))
+            if num(r.get("frameP95")):
+                groups[key]["frame"].append(r["frameP95"])
+            if num(r.get("longTasks")):
+                groups[key]["lt"].append(r["longTasks"])
+            if num(r.get("dom")):
+                groups[key]["dom"].append(r["dom"])
+        for key, label in ((True, "open"), (False, "closed")):
+            g = groups[key]
+            n = max(len(g["frame"]), len(g["lt"]), len(g["dom"]))
+            if n <= 0:
+                print(f"    {label}：本文件内没有可用样本")
+                continue
+            print(f"    {label} 样本 {n} 条：帧 P95 中位 "
+                  f"{fmt(round(pct(g['frame'], 0.5), 1) if g['frame'] else None, 'ms')}"
+                  f" / 长任务中位 {fmt(pct(g['lt'], 0.5))}"
+                  f" / DOM 中位 {fmt(pct(g['dom'], 0.5))}")
+    elif p_disabled:
+        print(f"  {INFO} 侧栏 + 回前台归因已关闭")
+    else:
+        print(f"  {INFO} 无侧栏 + 回前台归因数据（旧样本，或开关已关闭）")
+
+    rrow = None
+    r_older = False
+    r_disabled = False
+    for idx, r in enumerate(reversed(rows)):
+        val = r.get("refocus")
+        if isinstance(val, dict):
+            rrow = val
+            r_older = idx > 0
+            break
+        if val is None and _settings_of(r).get("paneDiagOn") is False:
+            r_disabled = True
+            break
+
+    if rrow is not None:
+        suffix = "（最近一次有效样本）" if r_older else ""
+        if rrow.get("hiddenMs") is None and rrow.get("sinceVisibleMs") is None:
+            print(f"  {INFO} 本文件内未记录到回前台样本{suffix}")
+        else:
+            print(f"  回前台：上次后台 {fmt(rrow.get('hiddenMs'), 'ms')}"
+                  f"  回前台已 {fmt(rrow.get('sinceVisibleMs'), 'ms')}"
+                  f"  帧 P95={fmt(rrow.get('p95'), 'ms')}"
+                  f"  最长={fmt(rrow.get('max'), 'ms')}"
+                  f"  合并补发 {fmt(rrow.get('flushes'))} 个"
+                  f"  保护命中 {fmt(rrow.get('guardHits'))} 次{suffix}")
+        buckets = {"<1s": 0, "1–10s": 0, "10–60s": 0, ">60s": 0}
+        # hiddenMs 是“最近一次”的持久字段，回前台后每个采集样本都会重复携带。
+        # 只在 sinceVisibleMs 回退（新一次回前台）或 hiddenMs 变化时计一次事件，
+        # 否则一次 8 秒的 Alt-Tab 会被每个 5 秒样本重复计数几十次。
+        prev_since = None
+        prev_hidden = None
+        for r in rows:
+            if r.get("hidden") or r.get("miss"):
+                continue
+            rf = r.get("refocus")
+            if not isinstance(rf, dict) or not num(rf.get("hiddenMs")):
+                continue
+            since = rf.get("sinceVisibleMs")
+            if not num(since):
+                continue
+            ms = rf["hiddenMs"]
+            fresh = (prev_since is None or since < prev_since or ms != prev_hidden)
+            prev_since = since
+            prev_hidden = ms
+            if not fresh:
+                continue
+            if ms < 1000:
+                buckets["<1s"] += 1
+            elif ms < 10000:
+                buckets["1–10s"] += 1
+            elif ms < 60000:
+                buckets["10–60s"] += 1
+            else:
+                buckets[">60s"] += 1
+        if any(buckets.values()):
+            print("    后台时长分布（按回前台次数）："
+                  + " / ".join(f"{k} {v}" for k, v in buckets.items()))
+    elif r_disabled:
+        print(f"  {INFO} 回前台归因已关闭")
+    else:
+        print(f"  {INFO} 无回前台数据（旧样本，或开关已关闭）")
+
+
 def main() -> int:
     # 必须在任何 print 之前：中文 Windows 默认 GBK，符号会抛 UnicodeEncodeError
     try:
@@ -443,6 +571,8 @@ def main() -> int:
     print_scroll_diag(rows)
     # v0.3.2：多会话归因与 loadOlder 明细也独立于 active 判断。
     print_session_diag(rows)
+    # v0.3.3：侧栏开合与回前台同样独立，面板常开但 0 提交的样本也要纳入。
+    print_pane_diag(rows)
 
     if rows:
         print(f"  静止占比：{len(idle) * 100 // len(rows)}%")
@@ -524,7 +654,7 @@ def main() -> int:
     print("  · 真实帧间隔 P95 > 50ms 或 单帧最长 > 200ms  → 用户能感知到卡")
     print("  · 长任务次数 > 0 → 主线程被单次阻塞，与卡顿直接相关")
     print("  · 投影提交率高但帧间隔正常 → 宿主在勤快重渲染，暂未卡死")
-    print("[lagfix] v0.3.2：观测页新增多会话归因（按 sid 记录提交/帧、DOM、挂载轮数、滚动 P95，只读、最多 5 个桶）；滚动诊断新增 loadOlder 最近 10 次明细（耗时/行数/触发来源）；报告新增对应两段。大历史会话保护与渲染四项增强均可逐项关闭；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置；维护页可手动检查更新（只查 GitHub Releases，不自动安装）。")
+    print("[lagfix] v0.3.3：新增侧栏开合 420ms 保护、面板常开期保护与回前台 700ms 保护（四项独立开关，默认开）；collect 新增 pane/refocus 字段，报告新增「侧栏开合」「回前台」两段。仍不读消息正文、不写 store、不联网上报；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
     print()
     print_logs()
     return 0

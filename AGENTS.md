@@ -112,6 +112,9 @@ ZCode app.asar 入口尾部
 | 虚拟历史层 | `[data-v4-timeline-virtual-history="true"]` |
 | 输入框 | `.chat-composer-input-surface` |
 | 回到底部锚点 | `[data-v4-back-to-bottom-anchor="composer-dock"]` |
+| 右侧面板外框 | `[data-workspace-side-frame="true"]`，`aria-hidden="true"` 表示收起 |
+| 外层可调整面板 | `frame.closest('[data-panel]')` |
+| 显式开合信号 | panel class 新增 `transition-[flex-grow]`（拖拽改宽不加） |
 
 已知宿主事实（v0.3.1 相关）：
 
@@ -122,6 +125,8 @@ ZCode app.asar 入口尾部
 - `ConversationTimeline` 的 `loadOlder` 触发阈值约为 2 个视口；prepend 锚点在触发时捕获。
 - 宿主已有 `content-visibility:auto` 先例（分享只读时间线），但只能加在 turn 内部行级块，不能加在被 virtualizer 测高的 turn wrapper 上。
 - 多会话场景下，隐藏 pane 可能仍挂载或已被卸载；`[data-session-id]` 是唯一可靠的分桶键；宿主未分配会话 id 时写 `"draft"`（`sessionId ?? "draft"`），过渡态也可能是空字符串，两者都按占位 sid 处理。`data-projection-seq` 在隐藏 pane 上不一定继续变化，`frames=0` 只代表“没观察到提交”，不代表“不耗资源”。
+- v0.3.3 相关：桌面侧栏外框常驻挂载，`isVisible` 只改 `aria-hidden` 与几何；`useAnimatedResizablePanel` 只在显式展开/收起时给外层 `[data-panel]` 加 `transition-[flex-grow] duration-200 ease-out`，`transitionend`/240ms 后移除；拖拽改宽不加。移动端 overlay 不写 `data-workspace-side-frame`，按 `detected=false` 处理。
+- `AnimatedSidePanePanel` 的预览内容在 220ms resize settle 后才挂载；`ConversationTimeline` 的 ResizeObserver 会在面板动画期间每帧调用 `syncMessageLayerMask`。这两段是宿主行为，插件只临时停过渡/遮罩，不改布局。
 
 ZCode 大版本改版后，先跑 `/lagfix report` 判断是注入丢失还是选择器不匹配；不要靠猜。
 
@@ -146,7 +151,17 @@ v0.3.2 已拍板范围（Route A，只读归因）：
 - S1 多会话归因：按 `[data-session-id]` 分桶（最多 5 个），记录 `sid/visible/lastActive/frames/commitRate/mountedTurns/dom/scrollP95`；`sessionDiagOn` 默认开，关闭后 `sessions=null` 且不遍历 pane；`frames` 只统计 seq 值真的变化。
 - S2 `loadOlder` 明细：最近 10 次 `t/ms/ok/rowsBefore/rowsAfter/trigger`；随 `scrollDiagOn`，不改变原 promise、返回值与 `this`。
 - 验收目标见 `docs/decisions/v0.3.2-multi-session-and-loadolder.html` 第 06 节；本版不改宿主行为，不把“观测到尖峰”当成“已改善”。
-- O3 补页合并、O4 turn 内 `content-visibility` 留到 v0.3.3，按 v0.3.2 数据二选一；O7 多会话策略留到 v0.3.4。
+- O3 补页合并、O4 turn 内 `content-visibility` 与 O7 多会话策略不在 v0.3.2；按本版数据在 v0.3.4 再选。
+
+v0.3.3 已拍板范围（Route A，侧栏与回前台）：
+
+- P0 侧栏/回前台归因：`pane`（`detected/open/panelPx/switches/switchP95/switchMax/guardHits`）与 `refocus`（`hiddenMs/sinceVisibleMs/p95/max/flushes/guardHits`）；随 `paneDiagOn`，关闭后两段为 `null` 且不挂对应探针。
+- P1 侧栏开合 420ms 保护：显式开合时给 `documentElement` 加 `data-lagfix-pane-switch="1"`，临时 `transition-duration:0s`、关闭消息层 mask、`positionBadge()` 直接返回；420ms 后移除。拖拽改宽不触发。
+- P2 面板常开期保护：外框 `aria-hidden !== "true"` 时保持 `data-lagfix-pane-open="1"`，期间 mask 关闭、通知节流下限 300ms、角标定位最多每 1.8s 一次。
+- P3 回前台保护：`visibilitychange` 或 `blur→focus` 回前台后 700ms 内通知节流下限 400ms、前 300ms 跳过角标定位；后台积压的通知合并成一次 120ms 后的补发（`refocusGuardOn` 关闭时恢复同步补发）。
+- 全部开关默认开、可独立关闭；关闭后行为回到 v0.3.2（`visibilitychange` 基线监听保留，继续重置帧基线并立即补发；P3 只额外挂 `blur/focus` 并接管补发时机）。`__lagfixOff()` 必须清掉两个 DOM 属性、P3 的 `blur/focus` 监听、两个 MutationObserver 与所有定时器；`visibilitychange` 基线与 v0.3.2 一样保留。暂停/自禁用仍移除全部监听。
+- 验收目标见 `docs/decisions/v0.3.3-pane-lag.html` 第 06 节；本版只处理侧栏开合、面板常开、回前台三段，不改宿主布局、不折叠内容。
+- 历史 backlog（O3 补页合并、O4 turn 内 `content-visibility`、O7 多会话策略、预览 HTML 自身绘制成本）留到 v0.3.4，按 v0.3.3 三段 A/B 数据再选 1–2 项。
 
 ## 7. 版本与发布
 
@@ -233,3 +248,12 @@ node tests/log_budget.mjs       # 主进程日志预算：超限删最旧/保留
 - 注入行必须与 zusage 的 `inject-main.cjs` / `[zusage] load failed` 错开；loader 名 `lagfix-main.cjs` 不要改。
 - Windows 下 `.cmd` 文件编码敏感（GBK/UTF-8 与 `chcp` 的顺序会影响中文显示）；改启动器时保留现有注释里的编码约定。
 - 任何新增的全局监听器/属性都要在 `__lagfixOff()`、关闭开关、observer 自禁用三条路径清理。
+
+## 13. 对外介绍页与视觉
+
+- README 首屏只做四件事：图标 → 一句话定位 → 三条硬边界 → 一张真实界面截图；不堆版本号、功能清单和内部字段名。
+- 界面截图放 `docs/assets/`，必须来自真实 observer；演示环境截图要在图前写明“模拟数据、不含真实会话内容”，不得使用真实会话截图。
+- 设置面板与对外文案用用户语言：不写 P95、DOM、loadOlder、mask、pane、store、turn 等内部词；每项说明按「会做什么 / 不会做什么 / 代价」组织。
+- 截图只放在对应章节，一屏一个重点；不给图片加说明性 caption，事实、边界和代价用正文写清。
+- 新增或替换截图后同步 `marketplace.json` 的 `icon` / `heroImage`（只接受 HTTPS，用 jsdelivr `@main`），并检查 GitHub 渲染与窄屏不横向溢出。
+- 视觉优化参考 taste skill；美化不得改事实、删边界或隐藏代价。

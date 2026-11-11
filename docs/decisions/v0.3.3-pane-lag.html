@@ -1,0 +1,708 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>zcode-lagfix 下一版本拍板 · v0.3.3 侧栏与回前台卡顿</title>
+<style>
+  :root {
+    --bg: #0b1017;
+    --bg-2: #101824;
+    --card: #141d2b;
+    --card-2: #182334;
+    --line: #263449;
+    --text: #e6edf7;
+    --muted: #93a4bb;
+    --dim: #6e8098;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --radius: 14px;
+    --shadow: 0 18px 50px rgba(0, 0, 0, .28);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    color: var(--text);
+    background:
+      radial-gradient(900px 500px at 18% -8%, rgba(88, 166, 255, .14), transparent 60%),
+      radial-gradient(800px 420px at 92% 4%, rgba(188, 140, 255, .10), transparent 60%),
+      var(--bg);
+    font: 15px/1.72 "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+  code { overflow-wrap: anywhere; word-break: break-word; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 44px 22px 120px; }
+
+  /* ── header ── */
+  .hero {
+    display: grid;
+    grid-template-columns: 1.35fr .65fr;
+    gap: 24px;
+    align-items: stretch;
+    margin-bottom: 30px;
+  }
+  .hero-main, .hero-side {
+    background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,0));
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .hero-main { padding: 30px 30px 26px; }
+  .hero-side { padding: 22px; display: flex; flex-direction: column; justify-content: space-between; gap: 16px; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--blue); font-size: 12.5px; font-weight: 700;
+    letter-spacing: .12em; text-transform: uppercase;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); box-shadow: 0 0 0 5px rgba(248,81,73,.12); }
+  h1 { margin: 12px 0 10px; font-size: clamp(28px, 4vw, 42px); line-height: 1.18; letter-spacing: -.02em; }
+  h1 span { color: var(--muted); font-weight: 500; }
+  .lede { margin: 0; color: var(--muted); max-width: 760px; font-size: 16px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border-radius: 999px;
+    border: 1px solid var(--line); background: rgba(255,255,255,.025);
+    color: var(--muted); font-size: 12.5px;
+  }
+  .chip b { color: var(--text); font-weight: 650; }
+  .verdict-box { padding: 16px; border-radius: 12px; background: rgba(88,166,255,.07); border: 1px solid rgba(88,166,255,.25); }
+  .verdict-box .big { font-size: 20px; font-weight: 750; line-height: 1.35; }
+  .verdict-box p { margin: 8px 0 0; color: var(--muted); font-size: 13.5px; }
+  .version-line { color: var(--dim); font-size: 12.5px; }
+
+  /* ── sections ── */
+  section { margin-top: 38px; }
+  .sec-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+  h2 { margin: 0; font-size: 21px; letter-spacing: -.01em; }
+  .sec-head p { margin: 0; color: var(--dim); font-size: 13px; max-width: 580px; text-align: right; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .grid-2 > *, .grid-3 > * { min-width: 0; }
+  .card {
+    min-width: 0;
+    background: linear-gradient(180deg, rgba(255,255,255,.028), rgba(255,255,255,.008));
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 18px;
+  }
+  pre { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+  .card h3 { margin: 0 0 8px; font-size: 15.5px; }
+  .card p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12.5px; }
+  .dim { color: var(--dim); }
+  .tag {
+    display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 650; border: 1px solid var(--line); color: var(--muted);
+    background: rgba(255,255,255,.03); white-space: nowrap;
+  }
+  .tag.green { color: #7ee787; border-color: rgba(63,185,80,.35); background: rgba(63,185,80,.08); }
+  .tag.yellow { color: #e3b341; border-color: rgba(210,153,34,.35); background: rgba(210,153,34,.08); }
+  .tag.red { color: #ff7b72; border-color: rgba(248,81,73,.35); background: rgba(248,81,73,.08); }
+  .tag.blue { color: #79c0ff; border-color: rgba(88,166,255,.35); background: rgba(88,166,255,.08); }
+  .tag.purple { color: #d2a8ff; border-color: rgba(188,140,255,.35); background: rgba(188,140,255,.08); }
+
+  /* ── evidence ── */
+  .metric { display: flex; flex-direction: column; gap: 10px; }
+  .metric .label { display: flex; justify-content: space-between; color: var(--muted); font-size: 12.5px; }
+  .metric .label b { color: var(--text); font-size: 13px; }
+  .bar { height: 8px; border-radius: 999px; background: #1b2638; overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 999px; background: var(--green); }
+  .bar.yellow > i { background: var(--yellow); }
+  .bar.red > i { background: var(--red); }
+  .bar.blue > i { background: var(--blue); }
+  .phase { position: relative; }
+  .phase .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .phase .name { font-weight: 700; }
+  .phase .when { color: var(--dim); font-size: 12px; }
+  .phase .rows { display: flex; flex-direction: column; gap: 11px; }
+  .phase .foot { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--dim); font-size: 12px; }
+  .hot-card { border-color: rgba(248,81,73,.35); background: linear-gradient(180deg, rgba(248,81,73,.055), rgba(248,81,73,.015)); }
+
+  .callout {
+    display: grid; grid-template-columns: 36px 1fr; gap: 12px;
+    border: 1px solid rgba(88,166,255,.28); background: rgba(88,166,255,.055);
+    border-radius: var(--radius); padding: 16px 18px; margin-top: 14px;
+  }
+  .callout .icon {
+    width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+    background: rgba(88,166,255,.14); color: var(--blue); font-weight: 800;
+  }
+  .callout p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .callout b { color: var(--text); }
+
+  /* ── options ── */
+  .option {
+    position: relative; display: grid; grid-template-columns: 22px 1fr; gap: 12px;
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 16px;
+    background: linear-gradient(180deg, rgba(255,255,255,.024), rgba(255,255,255,.006));
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .option:hover { border-color: #3a4d68; }
+  .option.checked { border-color: rgba(88,166,255,.6); background: rgba(88,166,255,.06); }
+  .option input[type="checkbox"] { appearance: none; width: 19px; height: 19px; margin-top: 2px; border: 1.5px solid #40536e; border-radius: 6px; background: transparent; cursor: pointer; }
+  .option input[type="checkbox"]:checked { background: var(--blue); border-color: var(--blue); box-shadow: inset 0 0 0 3px var(--bg-2); }
+  .option .head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 6px; }
+  .option h4 { margin: 0; font-size: 14.5px; }
+  .option p { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+  .option ul { margin: 6px 0 0; padding-left: 18px; color: var(--dim); font-size: 12.5px; }
+  .option li { margin: 3px 0; }
+  .option .kv { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font-size: 12px; color: var(--dim); }
+  .option .kv b { color: var(--muted); font-weight: 650; }
+  .recommend { box-shadow: 0 0 0 1px rgba(63,185,80,.18) inset; }
+
+  /* ── acceptance table ── */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 12px; letter-spacing: .03em; text-transform: uppercase; }
+  td { color: var(--muted); }
+  td b { color: var(--text); font-weight: 650; }
+  .check { color: var(--green); font-weight: 800; }
+
+  /* ── summary ── */
+  .summary {
+    position: static; z-index: 20; margin-top: 34px;
+    display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: center;
+    padding: 14px 16px; border-radius: 14px; border: 1px solid rgba(88,166,255,.34);
+    background: rgba(16, 24, 36, .94); backdrop-filter: blur(12px);
+    box-shadow: 0 16px 40px rgba(0,0,0,.45);
+  }
+  .summary .line { color: var(--muted); font-size: 13px; }
+  .summary .line b { color: var(--text); }
+  .summary .picks { margin-top: 4px; color: var(--dim); font-size: 12px; }
+  .summary .actions { display: flex; gap: 8px; }
+  button {
+    border: 1px solid #365072; background: rgba(88,166,255,.13); color: #cfe6ff;
+    padding: 9px 13px; border-radius: 9px; font: inherit; font-size: 13px; font-weight: 650; cursor: pointer;
+  }
+  button:hover { background: rgba(88,166,255,.2); }
+  .toast { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%) translateY(10px); opacity: 0; pointer-events: none; background: #1b293b; border: 1px solid var(--line); color: var(--text); padding: 9px 14px; border-radius: 9px; font-size: 13px; transition: .18s ease; z-index: 50; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .footnote { margin-top: 32px; color: var(--dim); font-size: 12px; line-height: 1.8; }
+  .footnote code { color: var(--muted); background: rgba(255,255,255,.04); padding: 1px 5px; border-radius: 4px; }
+
+  .research-list { margin: 8px 0 0; padding-left: 17px; color: var(--muted); font-size: 12.5px; }
+  .research-list li { margin: 4px 0; }
+
+  @media (max-width: 900px) {
+    .hero { grid-template-columns: 1fr; }
+    .grid-3 { grid-template-columns: 1fr; }
+    .grid-2 { grid-template-columns: 1fr; }
+    .sec-head { display: block; }
+    .sec-head p { text-align: left; margin-top: 6px; }
+    .summary { grid-template-columns: 1fr; position: static; }
+    .summary .actions { justify-content: flex-start; }
+  }
+
+  @media (max-width: 720px) {
+    .accept-table thead { display: none; }
+    .accept-table, .accept-table tbody, .accept-table tr, .accept-table td { display: block; width: 100%; }
+    .accept-table tr { border-bottom: 1px solid var(--line); padding: 10px 0; }
+    .accept-table tr:last-child { border-bottom: 0; }
+    .accept-table td { border: 0; padding: 3px 0 3px 84px; position: relative; }
+    .accept-table td::before {
+      content: attr(data-label); position: absolute; left: 0; top: 3px; width: 76px;
+      color: var(--dim); font-size: 11.5px; font-weight: 600;
+    }
+  }
+
+  @media print {
+    body { background: #fff; color: #111; }
+    .wrap { padding: 0; max-width: none; }
+    .card, .hero-main, .hero-side, .option, .summary { box-shadow: none; background: #fff; border-color: #ddd; }
+    .summary { position: static; }
+    .toast, .actions { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="hero-main">
+      <div class="eyebrow"><span class="dot"></span> 下一版本拍板 · v0.3.3</div>
+      <h1>右侧面板一开就卡<br><span>开合、常开、回前台，三段都要管</span></h1>
+      <p class="lede">
+        当前运行时还是 <b>v0.3.1</b>（样本 <code>ver=0.3.1</code>）。同一窗口 1,346 个样本里，
+        面板关闭时帧 P95 中位数 <b>27ms</b>；16:36–16:45 的重内容窗口升到 <b>107ms</b>、DOM 峰值 <b>5,715</b>；
+        16:47:07 面板打开的那一拍，DOM 从 3,762 跳到 5,228，帧 P95 到 <b>160ms</b>；
+        面板收起后 DOM 回落到 3,791，P95 回到 <b>14–27ms</b>。
+        用户补充：<b>面板不打开时“不怎么卡”，打开后“非常卡”</b>，右侧只是“新标签页”启动页也会卡；
+        另外<b>从别的软件切回 ZCode 会卡一下</b>。
+      </p>
+      <div class="meta">
+        <span class="chip">证据 <b>observe-20261111.jsonl</b></span>
+        <span class="chip">样本 <b>1,346 个采集周期</b></span>
+        <span class="chip">当前运行时 <b>v0.3.1</b></span>
+        <span class="chip">状态 <b style="color:#3fb950">已拍板 · 路线 A</b></span>
+      </div>
+    </div>
+    <aside class="hero-side">
+      <div class="verdict-box">
+        <div class="big">推荐 A · 三段保护：420ms 开合 + 面板常开期 + 回前台 700ms，默认开、可单独关。</div>
+        <p>v0.3.3 不只保开合那一拍：常开期停掉消息层遮罩、把重绘窗口抬到 300ms 下限、角标定位降到 ≤1/1.8s；回前台时合并后台挂起的通知，先让窗口完成重绘，再补一次最新状态。同时把 <code>pane.open</code> 与 <code>refocus.p95</code> 写进样本，给下一轮 A/B 留证据。不改会话数据、不写 store、不隐藏任何内容。</p>
+      </div>
+      <div class="version-line">上一版：v0.3.2（多会话归因，尚未安装）<br>文档：docs/decisions/v0.3.3-pane-lag.html</div>
+    </aside>
+  </header>
+
+  <section>
+    <div class="sec-head">
+      <h2>01 · 先看证据：卡顿和侧栏开合同拍</h2>
+      <p>同一窗口、同一会话；v0.3.1 没有 <code>pane</code> 字段，所以这是强相关，不是因果证明。</p>
+    </div>
+    <div class="grid-3">
+      <article class="card phase">
+        <div class="top"><span class="name">面板关闭 · 基线</span><span class="when">15:41–16:35</span></div>
+        <div class="rows">
+          <div class="metric"><div class="label"><span>帧 P95 中位数</span><b>27ms</b></div><div class="bar"><i style="width:22%"></i></div></div>
+          <div class="metric"><div class="label"><span>长任务 / 3s 中位数</span><b>0</b></div><div class="bar"><i style="width:4%"></i></div></div>
+          <div class="metric"><div class="label"><span>DOM 中位数 / 峰值</span><b>3,387 / 3,933</b></div><div class="bar blue"><i style="width:48%"></i></div></div>
+          <div class="metric"><div class="label"><span>样本数</span><b>1,068</b></div><div class="bar blue"><i style="width:80%"></i></div></div>
+        </div>
+        <div class="foot">这 54 分钟里也有流式输出，但帧 P95 中位数仍只有 27ms；说明“长会话 + 流式”本身不是 160ms 级尖峰的充分解释。</div>
+      </article>
+
+      <article class="card phase hot-card">
+        <div class="top"><span class="name">重内容窗口</span><span class="when">16:36–16:45</span></div>
+        <div class="rows">
+          <div class="metric"><div class="label"><span>帧 P95 中位数 / 峰值</span><b>107 / 320ms</b></div><div class="bar red"><i style="width:86%"></i></div></div>
+          <div class="metric"><div class="label"><span>长任务 / 3s 中位数</span><b>15</b></div><div class="bar red"><i style="width:74%"></i></div></div>
+          <div class="metric"><div class="label"><span>DOM 中位数 / 峰值</span><b>3,861 / 5,715</b></div><div class="bar red"><i style="width:92%"></i></div></div>
+          <div class="metric"><div class="label"><span>样本数</span><b>179</b></div><div class="bar yellow"><i style="width:34%"></i></div></div>
+        </div>
+        <div class="foot">与用户报告“打开右侧面板、看生成 HTML 时特别卡”同一时段；但 v0.3.1 不记录面板状态，不能确认这几百个样本里面板是开还是关。</div>
+      </article>
+
+      <article class="card phase">
+        <div class="top"><span class="name">开合瞬间 · 直接观测</span><span class="when">16:46:50–16:49</span></div>
+        <div class="rows">
+          <div class="metric"><div class="label"><span>打开前 P95</span><b>93–107ms</b></div><div class="bar yellow"><i style="width:52%"></i></div></div>
+          <div class="metric"><div class="label"><span>打开那一拍 P95</span><b>160–173ms</b></div><div class="bar red"><i style="width:82%"></i></div></div>
+          <div class="metric"><div class="label"><span>打开后空闲 P95</span><b>14–27ms</b></div><div class="bar"><i style="width:14%"></i></div></div>
+          <div class="metric"><div class="label"><span>DOM 3,762 → 5,228 → 3,791</span><b>+1,466 / −1,437</b></div><div class="bar blue"><i style="width:64%"></i></div></div>
+        </div>
+        <div class="foot">打开瞬间 DOM 增加约 1.4k，P95 翻倍；随后空闲降到 14ms，说明“常驻重内容”不是每一秒都贵，最贵的是开合那一小段。</div>
+      </article>
+
+      <article class="card phase hot-card">
+        <div class="top"><span class="name">面板常开 · 新标签页也卡</span><span class="when">用户截图 · 16:56 左右</span></div>
+        <div class="rows">
+          <div class="metric"><div class="label"><span>面板打开 · 截图 A</span><b>53ms / 卡顿 4 次</b></div><div class="bar yellow"><i style="width:44%"></i></div></div>
+          <div class="metric"><div class="label"><span>面板打开 · 截图 B</span><b>147ms / 卡顿 23 次</b></div><div class="bar red"><i style="width:88%"></i></div></div>
+          <div class="metric"><div class="label"><span>截图 B 的重绘速率</span><b>0 次/秒</b></div><div class="bar"><i style="width:3%"></i></div></div>
+          <div class="metric"><div class="label"><span>内存</span><b>179MB</b></div><div class="bar blue"><i style="width:62%"></i></div></div>
+        </div>
+        <div class="foot">右侧只是“新标签页”启动页，不是重 HTML，仍然出现 147ms 帧与 23 次长任务；且“重绘 0 次/秒”说明这不只是 React 提交次数的问题，布局/绘制/观测器自身的成本都要算进来。</div>
+      </article>
+
+      <article class="card phase">
+        <div class="top"><span class="name">从别的软件切回 · 卡一下</span><span class="when">用户补充</span></div>
+        <div class="rows">
+          <div class="metric"><div class="label"><span>触发方式</span><b>Alt-Tab / 点回 ZCode</b></div><div class="bar blue"><i style="width:35%"></i></div></div>
+          <div class="metric"><div class="label"><span>体感</span><b>首帧明显停顿一下</b></div><div class="bar yellow"><i style="width:55%"></i></div></div>
+          <div class="metric"><div class="label"><span>现有日志</span><b>只有 hidden 布尔，没有 focus 细节</b></div><div class="bar red"><i style="width:78%"></i></div></div>
+          <div class="metric"><div class="label"><span>插件侧候选</span><b>回前台同步 flush 全部后台通知</b></div><div class="bar red"><i style="width:70%"></i></div></div>
+        </div>
+        <div class="foot">v0.3.1 的 <code>hiddenSkipOn</code> 把后台通知挂起，回前台时同步遍历全部 flusher 立即补发；多个订阅/会话会在同一拍触发多次 React commit，和宿主自己的回前台重绘叠加。日志里只找到 2 次 hidden→visible，样本不够，必须单独打点。</div>
+      </article>
+    </div>
+    <div class="callout">
+      <div class="icon">!</div>
+      <p><b>用户的补充把范围从“420ms 开合”扩大成三段。</b>截图 B 是“面板常开 + 0 次重绘”仍有 147ms 帧，说明只做开合保护不够；回前台又是另一条独立链路。v0.3.3 的 P0 必须同时写 <code>pane.open</code>、<code>switchP95</code>、<code>refocus.p95/hiddenMs</code>，否则下一版仍然只能猜。当前运行时是 v0.3.1，v0.3.2 的会话归因也还没装，所以本页不把旧样本当多会话证据。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>02 · 宿主源码里，开合到底做了什么</h2>
+      <p>以下均在本机 ZCode 源码仓核对过；不是按记忆写的。</p>
+    </div>
+    <div class="grid-2">
+      <article class="card">
+        <h3>① 200ms 的 flex-grow 过渡</h3>
+        <p><code>useAnimatedResizablePanel.ts</code> 在显式展开/收起时给 panel 元素加 <code>transition-[flex-grow] duration-200 ease-out</code>，下一帧再调用 <code>panel.resize()</code> / <code>panel.collapse()</code>；<code>transitionend</code> 或 240ms 兜底后移除。也就是说，开合不是一次布局，而是连续 200ms 的中间尺寸。</p>
+      </article>
+      <article class="card">
+        <h3>② 会话列从 100% 收到 52%</h3>
+        <p><code>WorkspaceShellLayout.tsx</code> 的 <code>conversation-column</code> 在侧栏可见时默认 <code>52%</code>，侧栏 <code>browser</code> 默认 <code>45%</code>。会话列每一帧变窄，虚拟列表就要重新测量、重新排版；5.7k DOM 时这不是免费的。</p>
+      </article>
+      <article class="card">
+        <h3>③ 每帧都在读写消息层遮罩</h3>
+        <p><code>ConversationTimeline.tsx</code> 对滚动容器和消息层挂了 <code>ResizeObserver</code>，回调里 <code>syncMessageLayerMask()</code> 会读 <code>clientHeight/scrollHeight/scrollTop/offsetTop</code>，再写 6 个内联 mask 样式。开合动画期间尺寸每帧变化，这个回调就每帧跑一次。</p>
+      </article>
+      <article class="card">
+        <h3>④ 220ms 后才挂重内容</h3>
+        <p><code>AnimatedSidePanePanel.tsx</code> 的 <code>PREVIEW_PANE_RESIZE_SETTLE_DELAY_MS = 220</code>：窗口/面板尺寸停止抖动前，预览重内容先不渲染；侧栏宽度还要 ≥96px。也就是说，最难的那一下（HTML/Shadow DOM 挂载）大约落在开合动作的 220ms 之后，正好在 200ms 过渡结束附近。</p>
+      </article>
+
+      <article class="card">
+        <h3>⑤ 角标自己每帧强制布局</h3>
+        <p><code>lagfix-observe.js</code> 里 <code>surfaceRO</code> 观察 composer，回调直接调用 <code>positionBadge()</code>；<code>positionBadge()</code> 又会走 <code>composerSurface()</code>、<code>elementsFromPoint()</code> 和多次 <code>getBoundingClientRect()</code>。面板开合时 composer 每帧变宽/变窄，这个回调就每帧跑一次——在 5.7k DOM 上形成每帧强制布局。这是插件自己造成的，必须先在 420ms 保护窗口里 early-return。</p>
+      </article>
+
+      <article class="card">
+        <h3>⑥ 回前台同步补发所有通知</h3>
+        <p><code>bgFlushers</code> 在每个节流订阅里注册一个 <code>flushOnVisible</code>；<code>visibilitychange</code> 回前台时用一个 <code>for</code> 循环<b>同步</b>调用全部 flusher。React 19 每次 commit 会重新订阅，挂起的 flusher 可能不止一个；多个会话/订阅就会在同一拍触发多次 commit。注意 Alt-Tab 不一定触发 <code>visibilitychange</code>，还要用 <code>window.focus/blur</code> 兜住。</p>
+      </article>
+    </div>
+    <div class="callout">
+      <div class="icon">i</div>
+      <p><b>结论：</b>一次“打开右侧面板”串起了六件事——200ms 的 flex 动画、会话列每帧重排、消息层每帧 mask 读写、220ms 后预览重内容挂载，以及插件自己的每帧角标强制布局；回前台则是第七条独立链路。v0.3.2 只记录这些，不干预；v0.3.3 要动的是其中可控的三段：开合 420ms、面板常开期、回前台 700ms。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>03 · 四条路线，选一条</h2>
+      <p>推荐 A；B 只补证据，C 更激进，D 只做最小行为改动。四条都不改会话数据。</p>
+    </div>
+    <div class="grid-2" id="options">
+      <label class="option recommend checked" data-choice="A" data-title="A · 三段保护（420ms 开合 + 面板常开期 + 回前台 700ms）">
+        <input type="checkbox" checked />
+        <div>
+          <div class="head"><h4>路线 A · 三段保护</h4><span class="tag green">推荐</span><span class="tag blue">默认开</span><span class="tag yellow">行为窄</span></div>
+          <p>P0 把侧栏与回前台状态写进样本；P1 在显式开合时给 <code>documentElement</code> 加 420ms 的 <code>data-lagfix-pane-switch</code>，停掉 <code>[data-panel]</code> 过渡、临时关消息层 mask、暂停角标定位；P2 面板常开期停 mask、把通知窗口抬到 300ms 下限、角标定位降到 ≤1/1.8s；P3 回前台 700ms 内合并后台通知、400ms 下限、前 300ms 不定位角标。</p>
+          <ul>
+            <li>同时对准开合 160–294ms、常开期 147ms/23 次、回前台停顿三条链路</li>
+            <li>不动消息、不写 store、不隐藏内容；每项独立开关</li>
+            <li>代价：开合动画变瞬开/瞬收；面板常开时聊天刷新稍慢、mask 渐隐消失；回前台补状态最多晚 120ms</li>
+          </ul>
+          <div class="kv"><span><b>P0</b> 只读</span><span><b>P1</b> 420ms</span><span><b>P2</b> 常开期</span><span><b>P3</b> 700ms</span><span><b>回滚</b> 关开关</span></div>
+        </div>
+      </label>
+
+      <label class="option" data-choice="B" data-title="B · 只做侧栏与回前台归因（P0，只读）">
+        <input type="checkbox" />
+        <div>
+          <div class="head"><h4>路线 B · 只做归因</h4><span class="tag blue">只读</span><span class="tag yellow">本版无体感</span></div>
+          <p>只加 <code>pane.open / panelPx / switches / switchP95 / switchMax</code> 与 <code>refocus.hiddenMs / p95 / max / flushes</code>，不改任何宿主行为。等一周样本后再决定 P1/P2/P3 是否值得开。</p>
+          <ul>
+            <li>风险最低，和 v0.3.2 同一套“先补证据”思路</li>
+            <li>这一版不会让开合或回前台变快，用户还要再等一版</li>
+            <li>适合“先确认是不是这两条链路”而不是“先止痛”</li>
+          </ul>
+          <div class="kv"><span><b>默认</b> 开</span><span><b>改动</b> 只加字段</span><span><b>验收</b> 报告能分 open/closed 与 focus</span></div>
+        </div>
+      </label>
+
+      <label class="option" data-choice="C" data-title="C · 三段保护 + O4 turn 内 content-visibility（O4 默认关）">
+        <input type="checkbox" />
+        <div>
+          <div class="head"><h4>路线 C · 三段保护 + O4</h4><span class="tag red">高风险</span><span class="tag purple">实验</span></div>
+          <p>在 A 的基础上，给 turn 内部行块加 <code>content-visibility:auto</code>，降低超长 turn 在面板常开期的布局/绘制成本。不能加在被 virtualizer 测高的 turn wrapper 上，只能加在 turn 内部行级块。</p>
+          <ul>
+            <li>可能进一步压低 5.7k DOM 会话的常开成本</li>
+            <li>影响查找、复制、锚点与高度测量，回归面明显更大</li>
+            <li>O4 默认关，先做 A/B；不放进 v0.3.3 默认路径</li>
+          </ul>
+          <div class="kv"><span><b>O4 默认</b> 关</span><span><b>前置</b> A 的 A/B 数据</span><span><b>验收</b> 锚点 / 查找 / 复制</span></div>
+        </div>
+      </label>
+
+      <label class="option" data-choice="D" data-title="D · 只做 P1 开合保护（最小行为改动）">
+        <input type="checkbox" />
+        <div>
+          <div class="head"><h4>路线 D · 只做 P1</h4><span class="tag green">最小改动</span><span class="tag yellow">不治常开/回前台</span></div>
+          <p>只停 420ms 的 flex 过渡与 mask，不加常开期与回前台保护。适合担心“面板常开时聊天刷新变慢”的用户，但截图 B 的常开 147ms 不会解决。</p>
+          <ul>
+            <li>行为改动最小，最容易回滚</li>
+            <li>如果常开期与回前台才是主因，改善可能不够</li>
+            <li>P0 仍然保留，方便下一版再决定 P2/P3</li>
+          </ul>
+          <div class="kv"><span><b>默认</b> P1 开</span><span><b>P2/P3</b> 不做</span><span><b>验收</b> 只看 switchP95</span></div>
+        </div>
+      </label>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>04 · 推荐 A 的具体范围</h2>
+      <p>先写 spec 和红基线测试，再动代码；每项都能单独关。</p>
+    </div>
+
+    <div class="grid-2">
+      <article class="card">
+        <h3>P0 · 侧栏 + 回前台归因（<code>paneDiagOn</code>，默认开）</h3>
+        <p class="small" style="margin-top:8px">只读，不改宿主。用宿主已有的两个标记定位：</p>
+        <pre class="mono small" style="white-space:pre-wrap;color:#c9d6e8;background:#0d1520;border:1px solid var(--line);border-radius:10px;padding:12px;margin:10px 0 0">frame = document.querySelector('[data-workspace-side-frame="true"]')
+panel = frame.closest('[data-panel]')
+open  = frame.getAttribute('aria-hidden') !== 'true'</pre>
+        <ul class="research-list">
+          <li>观察 <code>frame</code> 的 <code>aria-hidden</code> 与 <code>panel</code> 的 <code>class</code>；宿主显式开合会加 <code>transition-[flex-grow]</code>，这是最早信号</li>
+          <li>每次开合记 <code>switches++</code>，并开一个 800ms 的帧窗口；采集时算 <code>switchP95/switchMax</code></li>
+          <li>回前台同时监听 <code>visibilitychange</code> 与 <code>window.focus/blur</code>（Alt-Tab 不一定改 <code>document.hidden</code>）；记 <code>hiddenMs / refocus.p95 / refocus.max / flushes</code></li>
+          <li><code>panelPx</code> 每次采集读一次宽度；<code>detected=false</code> 表示宿主改版/标记缺失，不猜</li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <h3>P1 · 开合过渡保护（<code>paneSwitchGuardOn</code>，默认开）</h3>
+        <p class="small" style="margin-top:8px">只影响 420ms（200ms 过渡 + 220ms 重内容 settle）：</p>
+        <pre class="mono small" style="white-space:pre-wrap;color:#c9d6e8;background:#0d1520;border:1px solid var(--line);border-radius:10px;padding:12px;margin:10px 0 0">[data-lagfix-pane-switch="1"] [data-panel] {
+  transition-duration: 0s !important;
+}
+[data-lagfix-pane-switch="1"] [data-v4-timeline-message-layer="true"] {
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+}</pre>
+        <ul class="research-list">
+          <li>开合时把 flex 动画变成一次跳变，避免 12 帧连续重排</li>
+          <li><code>positionBadge()</code> 顶部先 early-return：不能再让 <code>surfaceRO</code> 在动画中间每帧跑 <code>elementsFromPoint()</code> 强制布局；角标位置最多旧 0.4 秒</li>
+          <li>420ms 后移除属性，宿主下一轮开合恢复原过渡；关开关立即移除</li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <h3>P2 · 面板常开期保护（<code>paneHoldOn</code>，默认开）</h3>
+        <p><code>pane.open=true</code> 期间给 <code>documentElement</code> 加 <code>data-lagfix-pane-open="1"</code>：消息层 mask 关闭；<code>effectiveThrottleMs</code> 至少 <b>300ms</b>；角标定位降到 ≤1/1.8s。面板关闭立即移除属性并恢复原规则。</p>
+        <ul class="research-list">
+          <li>对准截图 B“面板常开、0 次重绘仍有 147ms 帧”的绘制/合成成本</li>
+          <li>mask 只在面板打开期间关，面板关闭后恢复；不是永久关闭</li>
+          <li>只延迟重绘，不拦 Agent 收流、消息落盘、工具执行</li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <h3>P3 · 回前台保护（<code>refocusGuardOn</code>，默认开）</h3>
+        <p>检测到 <code>hidden→visible</code> 或 <code>blur→focus</code> 后：把待补发的后台通知合并到一个 <b>120ms</b> 定时器（不再同步遍历全部 flusher）；<b>700ms</b> 内通知窗口至少 <b>400ms</b>；前 <b>300ms</b> 不定位角标。</p>
+        <ul class="research-list">
+          <li>先让窗口完成恢复/首帧，再补 React 状态，避免同一拍多次 commit</li>
+          <li>只延迟插件挂起的通知；宿主自己的回前台重绘不被拦截</li>
+          <li><code>window.focus</code> 首次加载也会触发，必须有 <code>lastBlurAt</code> 去重</li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <h3>不做什么</h3>
+        <ul class="research-list">
+          <li>不隐藏、不折叠、不卸载对话或预览内容</li>
+          <li>不改 <code>loadOlder</code>/补页/返回值，不写 store，不碰 <code>db.sqlite</code></li>
+          <li>不拦截或替换宿主的 <code>ResizeObserver</code>，不开 CDP</li>
+          <li>不把 <code>content-visibility</code> 加到 turn wrapper（virtualizer 要测高）</li>
+          <li>不在面板关闭时关 mask；P2 只在面板打开期间关</li>
+        </ul>
+      </article>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h3>payload 新增 <code>pane</code> 与 <code>refocus</code></h3>
+      <pre class="mono small" style="white-space:pre-wrap;color:#c9d6e8;background:#0d1520;border:1px solid var(--line);border-radius:10px;padding:12px;margin:10px 0 0">pane: {
+  detected: true,          // false = 宿主标记缺失，不猜
+  open: true,
+  panelPx: 720,
+  switches: 3,
+  switchP95: 84,           // 最近一次开合后 800ms 的帧 P95
+  switchMax: 190,
+  guardHits: 3             // P1 实际生效次数
+},
+refocus: {
+  hiddenMs: 8200,          // 上次后台时长；只用时长，不记内容
+  sinceVisibleMs: 240,
+  p95: 96,                 // 回前台后 800ms 内的帧 P95
+  max: 210,
+  flushes: 2,              // 合并补发的 flusher 数
+  guardHits: 1
+}</pre>
+      <ul class="research-list">
+        <li><code>paneDiagOn=false</code>、暂停、dead：<code>pane/refocus=null</code>，与其他诊断字段同口径</li>
+        <li>只记布尔、宽度、时长、计数与帧统计；不记面板内容、标题、HTML、消息 id</li>
+        <li>报告新增“侧栏开合”与“回前台”两段：open/closed 分组的帧 P95 中位数、长任务中位数、DOM 中位数；回前台按 <code>hiddenMs</code> 分桶，打印最近一次 <code>refocus.p95/max</code></li>
+      </ul>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h3>状态、开关与清理</h3>
+      <table class="accept-table" style="margin-top:8px">
+        <thead><tr><th>项</th><th>规则</th><th>验收</th></tr></thead>
+        <tbody>
+          <tr><td data-label="开关"><b>侧栏 + 回前台归因</b></td><td><code>paneDiagOn</code>，默认 <code>true</code></td><td>关闭后 <code>pane/refocus=null</code>，不再观察 frame/panel/focus</td></tr>
+          <tr><td data-label="开关"><b>开合保护</b></td><td><code>paneSwitchGuardOn</code>，默认 <code>true</code></td><td>关闭后不加 <code>data-lagfix-pane-switch</code>，宿主过渡恢复</td></tr>
+          <tr><td data-label="开关"><b>面板常开期保护</b></td><td><code>paneHoldOn</code>，默认 <code>true</code></td><td>关闭后移除 <code>data-lagfix-pane-open</code>，<code>eff</code> 回到原规则</td></tr>
+          <tr><td data-label="开关"><b>回前台保护</b></td><td><code>refocusGuardOn</code>，默认 <code>true</code></td><td>关闭后恢复同步 flush，<code>eff</code> 不抬升</td></tr>
+          <tr><td data-label="状态"><b>侧栏/焦点</b></td><td>observer 内存：<code>paneOpen</code>、<code>paneSwitches</code>、<code>paneSwitchRing</code>、<code>refocusRing</code>、<code>lastBlurAt</code></td><td>不写 localStorage 以外的宿主状态；不写 store</td></tr>
+          <tr><td data-label="清理"><b>__lagfixOff / 自禁用</b></td><td>移除两个 DOM 属性、断开观察与 focus 监听、清空环；四个开关落盘为关</td><td>DOM 无残留属性，重新开启只挂一份</td></tr>
+          <tr><td data-label="隐私"><b>只读</b></td><td>不读消息正文、工具参数、面板 HTML、db.sqlite</td><td>日志抽查无正文</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>05 · A/B 怎么测</h2>
+      <p>同一会话、同一份 HTML、同样开合 5 次、Alt-Tab 5 次；一次只改一个变量。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>轮次</th><th>设置</th><th>看什么</th><th>通过线</th></tr></thead>
+      <tbody>
+        <tr><td data-label="轮次"><b>1 · 基线</b></td><td>P1/P2/P3 关、P0 开</td><td>开合 <code>switchP95/switchMax</code>；面板常开 30s 的 <code>frameP95</code>/长任务；Alt-Tab 回前台 800ms 的 <code>refocus.p95/max</code></td><td>记录三段基线；不要求达标</td></tr>
+        <tr><td data-label="轮次"><b>2 · 只 P1</b></td><td>P1 开，P2/P3 关</td><td>连续开合 5 次；是否瞬开/瞬收、有无布局跳动；<code>switchP95</code></td><td>switchP95 ≤80ms；1s 长任务 ≤6；无 &gt;250ms</td></tr>
+        <tr><td data-label="轮次"><b>3 · 只 P2</b></td><td>P1 关，P2 开，P3 关</td><td>面板常开 30s：空闲、流式、滚动各一段；mask 视觉是否可接受</td><td>frameP95 中位数 ≤80ms；长任务/3s ≤6；无内容缺失</td></tr>
+        <tr><td data-label="轮次"><b>4 · 只 P3</b></td><td>P1/P2 关，P3 开</td><td>Alt-Tab 离开 10s 再回来 5 次；首帧是否还停顿；状态是否在 150ms 内追上</td><td>refocus.p95 ≤80ms；max ≤250ms；无空白/旧状态卡住</td></tr>
+        <tr><td data-label="轮次"><b>5 · 全开</b></td><td>P1+P2+P3 全开</td><td>完整体感：开合、看 HTML、常开滚动、切回聊天、连续 Alt-Tab</td><td>三段都达到；角标不遮内容；无空白/错位/锚点漂移</td></tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <div class="icon">i</div>
+      <p><b>验收目标：</b>开合 <code>switchP95 ≤80ms</code>（当前 160–294ms）；面板常开 <code>frameP95</code> 中位数 ≤80ms（截图 B 为 147ms）；回前台 800ms 内 <code>refocus.p95 ≤80ms</code>、<code>max ≤250ms</code>，状态 150ms 内追上。任一段达不到就关掉对应开关，只保留有效项；三段都不达标就只保留 P0，不把“观测到尖峰”写成“已改善”。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>06 · 已知边界与风险</h2>
+      <p>先说清做不到什么，避免下一版又变成“看起来修了”。</p>
+    </div>
+    <div class="grid-2">
+      <article class="card">
+        <h3>三段各管一段，不保证全治</h3>
+        <p>P1 管开合 420ms，P2 管面板常开期，P3 管回前台 700ms；如果卡顿来自预览 HTML 自身的持续绘制，或者宿主侧的其它长任务，这三段仍可能不够。那属于 O4/预览侧方案，v0.3.3 不把它算进验收。</p>
+      </article>
+      <article class="card">
+        <h3>依赖宿主三个标记</h3>
+        <p><code>[data-workspace-side-frame="true"]</code>、<code>aria-hidden</code>、<code>[data-panel]</code> 和 <code>transition-[flex-grow]</code> 任一改动，检测会降级为 <code>detected=false</code> 或不再触发保护；报告会提示，不静默假装生效。</p>
+      </article>
+      <article class="card">
+        <h3>P1 会让开合动画消失</h3>
+        <p>P1 生效时面板是瞬开/瞬收，不再有 200ms 的滑动感。这是用视觉换主线程；不喜欢可以只关 P1，P0/P2/P3 仍可用。</p>
+      </article>
+      <article class="card">
+        <h3>P2 有视觉与刷新代价</h3>
+        <p>面板常开期间消息层不再做渐变遮罩，聊天文字最多晚 300ms 刷新；Agent 收流、工具执行、消息落盘都不受影响。若觉得“字变迟”或遮罩不能少，关 P2 即可。</p>
+      </article>
+      <article class="card">
+        <h3>P3 只延迟插件的补发</h3>
+        <p>回前台后最多 120ms 才补发挂起的通知，状态可能比宿主晚一拍；宿主自己的首帧重绘不被拦截。Alt-Tab 首次回到窗口时 <code>window.focus</code> 也会触发，靠 <code>lastBlurAt</code> 去重，不会把普通点击当回前台。</p>
+      </article>
+      <article class="card">
+        <h3>不保证所有机器都变快</h3>
+        <p>当前证据来自一台 Windows 机器、一个超长会话和两张用户截图；5.7k DOM 是一个样本，不是所有会话。没有实机 A/B 前，不写“已修复卡顿”。</p>
+      </article>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>07 · 实施顺序</h2>
+      <p>v0.3.3 代码排在 v0.3.2 发布/安装之后；按这个顺序做，每步可回滚。</p>
+    </div>
+    <div class="card">
+      <ol class="research-list" style="font-size:13px">
+        <li>写 <code>docs/specs/v0.3.3-pane-lag.md</code>：P0/P1/P2/P3 的字段、状态所有者、清理路径、验收场景。</li>
+        <li>先扩 <code>tests/observe_smoke.mjs</code>：开合检测、420ms 属性生命周期、常开期 mask/降频、回前台合并补发、关闭与 <code>__lagfixOff()</code> 清理、payload 字段。</li>
+        <li>实现 observer：侧栏观察器、switch/refocus 帧窗口、guard CSS/属性、<code>positionBadge</code> early-return、常开期与回前台降频。</li>
+        <li>扩 <code>lagfix_report.py</code> 与报告测试：open/closed 分组、回前台分桶、最近开合/回前台明细、旧样本/缺标记提示。</li>
+        <li>设置面板新增“侧栏与回前台”组四行；版本号、marketplace、hooks、README、release 文档同步。</li>
+        <li>跑全量测试并如实报告；默认值先按本页，实机 A/B 后再决定是否调整。不 push、不打 tag、不发 Release，除非你明确要求。</li>
+      </ol>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>08 · 你只需要回一句</h2>
+      <p>推荐 A；想先只看证据选 B，愿意承担更大回归面选 C，只想最小改动选 D。</p>
+    </div>
+    <div class="card">
+      <p style="margin:0 0 10px"><b>推荐：A</b> · P0 侧栏 + 回前台归因 + P1 420ms 开合保护 + P2 面板常开期保护 + P3 回前台 700ms 保护。四项默认开、可单独关；先压开合 160–294ms，再处理常开 147ms/23 次与回前台停顿。</p>
+      <p style="margin:0 0 10px" class="muted"><b>备选：</b>B 只做 P0（本版无体感）；C 加 O4（高风险实验，默认关）；D 只做 P1（最小行为改动）。</p>
+      <p style="margin:0" class="dim small">本页按推荐 A 定稿（2026-11-11）；v0.3.3 代码排在 v0.3.2 发布/本地安装之后。真要改范围随时说，未动代码前都能改。</p>
+    </div>
+  </section>
+
+  <div class="summary" id="summary">
+    <div>
+      <div class="line">当前选择：<b id="pickLine">A · 三段保护（P0 + P1 + P2 + P3）</b></div>
+      <div class="picks" id="pickHint">已按推荐 A 定稿；点上方卡片可改选。</div>
+    </div>
+    <div class="actions">
+      <button type="button" id="copyBtn">复制结论</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast">已复制</div>
+
+  <div class="footnote">
+    数据来源：<code>~/.zcode/zcode-lagfix/observe-20261111.jsonl</code>，2026-11-11 15:41–16:49，1,346 个采集周期；当前样本 <code>ver=0.3.1</code>；另含用户 2026-11-11 提供的两张侧栏打开截图（53ms/4 次、147ms/23 次、179MB）。
+    宿主机制核对：<code>ZCode/packages/ui/src/app-shell/useAnimatedResizablePanel.ts</code>、<code>WorkspaceShellLayout.tsx</code>、<code>AnimatedSidePanePanel.tsx</code>、<code>animatedSidePanePanelModel.ts</code>、<code>packages/ui/src/v4/ConversationTimeline.tsx</code>。
+    插件自造成本核对：<code>lagfix-observe.js</code> 的 <code>surfaceRO → positionBadge()</code> 与 <code>bgFlushers → visibilitychange</code>。
+    本页是拍板材料，不是性能结论；没有 v0.3.3 实机 A/B 前，不承诺帧率改善。
+  </div>
+</div>
+
+<script>
+  (function () {
+    var options = Array.prototype.slice.call(document.querySelectorAll(".option"));
+    var pickLine = document.getElementById("pickLine");
+    var pickHint = document.getElementById("pickHint");
+    var copyBtn = document.getElementById("copyBtn");
+    var toast = document.getElementById("toast");
+
+    function selected() {
+      return options.filter(function (o) { return o.classList.contains("checked"); });
+    }
+
+    function render() {
+      var picks = selected();
+      if (!picks.length) {
+        pickLine.textContent = "未选择（默认推荐 A）";
+        pickHint.textContent = "点上方卡片选择；不做选择时按 A 执行。";
+        return;
+      }
+      pickLine.textContent = picks.map(function (o) { return o.getAttribute("data-title"); }).join("；");
+      pickHint.textContent = picks.length > 1
+        ? "选了多项：建议只保留一个主路线，其余排到后续版本。"
+        : (picks[0].getAttribute("data-choice") === "A"
+            ? "已拍板 A：P0 归因 + P1 420ms 开合 + P2 面板常开期 + P3 回前台 700ms，四项默认开。"
+            : "已改选非推荐路线；实现前会先补对应 spec 与回滚方案。");
+    }
+
+    options.forEach(function (opt) {
+      var box = opt.querySelector("input[type=checkbox]");
+      opt.addEventListener("click", function (ev) {
+        if (ev.target === box) return;
+        ev.preventDefault();
+        box.checked = !box.checked;
+        opt.classList.toggle("checked", box.checked);
+        render();
+      });
+      box.addEventListener("change", function () {
+        opt.classList.toggle("checked", box.checked);
+        render();
+      });
+    });
+
+    copyBtn.addEventListener("click", function () {
+      var text = "zcode-lagfix v0.3.3 拍板：" + pickLine.textContent;
+      var done = function () {
+        toast.classList.add("show");
+        setTimeout(function () { toast.classList.remove("show"); }, 1400);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, done);
+      } else {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); } catch (e) {}
+        document.body.removeChild(ta);
+        done();
+      }
+    });
+
+    render();
+  })();
+</script>
+
+</body>
+</html>

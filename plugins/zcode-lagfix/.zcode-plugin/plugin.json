@@ -1,7 +1,7 @@
 {
   "name": "zcode-lagfix",
-  "version": "0.3.2",
-  "description": "ZCode 超长会话卡顿观测与缓解插件（v0.3.2：帧间隔/提交速率/长任务 + 滚动窗口/loadOlder/输入延迟只读诊断；新增按会话归因（多会话桶的提交/帧、DOM、挂载 turn、滚动 P95）与 loadOlder 最近 10 次明细；渲染通知节流 + 四项渲染增强 + 大历史会话保护 + 滚动期隐藏消息层遮罩，全部可逐项关闭；角标常驻，面板分 状态条/观测/性能/维护；维护页可看日志上限、重启 ZCode、手动检查更新（只查 GitHub Releases，不自动下载/安装）；__lagfixOff 一键还原。另有零安装外部探针 tools/lagfix-probe.py）。安装会修改 app.asar，成功后需完全退出并重开 ZCode。",
+  "version": "0.3.3",
+  "description": "ZCode 超长会话卡顿观测与缓解插件（v0.3.3：记录每帧耗时/刷新次数/卡顿、滚动、上翻补页、输入延迟、多会话、侧栏开合与回前台；侧栏开合 420ms 保护、面板常开保护、回前台 700ms 保护；合并刷新 + 卡顿时自动放慢/切换会话时放慢/后台时减少刷新；大历史会话保护；滚动时去掉渐隐，全部可逐项关闭；角标常驻，面板分 状态条/观测/性能/维护；维护页可看日志上限、重启 ZCode、手动检查更新（只查 GitHub Releases，不自动下载/安装）；__lagfixOff 一键还原。另有零安装外部探针 tools/lagfix-probe.py）。安装会修改 app.asar，成功后需完全退出并重开 ZCode。",
   "author": {
     "name": "ck-ys",
     "url": "https://github.com/ck-ys"
