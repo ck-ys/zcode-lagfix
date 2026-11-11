@@ -70,7 +70,7 @@
   var RING_MAX = 300;
   var WINDOW_MS = 30000;            // P95 只看最近 30 秒
   var SCROLL_HOLD_MS = 200;         // 滚动后 200ms 内的帧才算「滚动帧」
-  var SCROLL_RING_MAX = 600;
+  var SCROLL_RING_MAX = 1800;       // 30s × 60fps：与 30s 窗口口径一致
   var MASK_IDLE_MS = 180;           // 停滚后多久恢复消息层遮罩
   var VERSION = "0.3.1";
   var ERR_LIMIT = 50;
@@ -206,6 +206,7 @@
   var inputPendingAt = 0;    // 0 表示没有待处理按键
   var domPeak = 0;           // 最近 30s 内采样到的最大 DOM 数
   var domPeakAt = 0;         // 峰值窗口起点
+  var domProbeAt = 0;        // 上次 domPeak 采样时间（独立于旧 domAt，避免降频后被冻结）
   var domCostMs = 0;         // 最近一次全量计数耗时（>5ms 自动退回 60s 降频）
   var lafCount = 0;          // long-animation-frame 次数（本周期）
   var lafMax = 0;
@@ -224,7 +225,11 @@
   // 回到前台必须立刻补一次，否则流式刚结束时界面可能停在旧状态。
   try {
     document.addEventListener("visibilitychange", function () {
-      if (document.hidden) return;
+      if (document.hidden) {
+        // 后台 rAF 基本不跑；不清掉会把整段后台时长记成一次按键延迟。
+        inputPendingAt = 0;
+        return;
+      }
       // 后台 overlay 定时器会被降到 1/min；回前台的第一个 tick 不能拿几十秒的
       // dt 去算 stallMs，否则角标会闪一下"卡死"。
       lastTickAt = 0;
@@ -269,8 +274,25 @@
     try { releaseLoadOlderProbe(); } catch (e) {}
     try { setScrollMaskActive(false); } catch (e) {}
     try { if (lafObserver) lafObserver.disconnect(); } catch (e) {}
-    try { document.removeEventListener("scroll", onTimelineScroll, true); } catch (e) {}
+    try { setScrollListener(false); } catch (e) {}
+    try { setInputListener(false); } catch (e) {}
     try { inputPendingAt = 0; } catch (e) {}
+    // 自禁用后不再有下一次 collect，环形窗口与周期计数一并清掉。
+    scrollRing.length = 0;
+    loadOlderRing.length = 0;
+    inputRing.length = 0;
+    scrollEvents = 0;
+    anyScrollEvents = 0;
+    loadOlderCalls = 0;
+    loadOlderErrors = 0;
+    loadOlderMax = 0;
+    lafCount = 0;
+    lafMax = 0;
+    lastScrollAt = 0;
+    domPeak = 0;
+    domPeakAt = 0;
+    domProbeAt = 0;
+    domCostMs = 0;
     fixState.reason = "已自禁用";
     try { if (mo) mo.disconnect(); } catch (e) {}
     try { if (acquireTimer) clearInterval(acquireTimer); } catch (e) {}
@@ -426,7 +448,11 @@
       var root = document.documentElement;
       if (!root) return;
       if (active && settings.maskOffOnScroll && !state.dead) {
-        root.setAttribute("data-lagfix-scroll", "1");
+        // 只在第一次滚动时写属性；后续 scroll 只刷新 deadline，避免热路径反复
+        // 触发同值属性写入。属性被宿主/别的脚本删掉时会重新补上。
+        if (root.getAttribute("data-lagfix-scroll") !== "1") {
+          root.setAttribute("data-lagfix-scroll", "1");
+        }
         // 用 deadline + 单定时器自重排：滚动事件每秒可达 60 次，
         // 每个事件都 clearTimeout+setTimeout 会白白制造 60 次/秒的定时器抖动。
         scrollMaskDeadline = performance.now() + MASK_IDLE_MS;
@@ -460,35 +486,66 @@
       var el = ev && ev.target;
       // 滚动事件的 target 就是滚动容器本身，不向上 closest()；target 没有
       // matches（合成事件/测试 stub）时直接放行，不能因此报错。
-      if (!el || typeof el.matches !== "function") return;
-      if (!el.matches('[data-v4-timeline-scroll="true"]')) {
+      // Document 本身没有 matches：宿主若把滚动改到 document，仍要计入 anyEvents。
+      if (!el) return;
+      var countDiag = settings.scrollDiagOn && settings.observe;
+      var isDoc = el === document;
+      if (!isDoc && typeof el.matches !== "function") return;
+      if (isDoc || !el.matches('[data-v4-timeline-scroll="true"]')) {
         // 非时间线的滚动也计数：用来区分「没人滚」与「选择器失配」（宿主改版）。
-        if (settings.scrollDiagOn) anyScrollEvents++;
+        // 但要排除本插件自己的面板/浮层，否则在设置面板里滚动会伪造 mismatch。
+        if (countDiag && !isOwnUiScroll(el)) anyScrollEvents++;
         return;
       }
-      lastScrollAt = performance.now();
-      if (settings.scrollDiagOn) {
+      if (countDiag) {
+        lastScrollAt = performance.now();
         scrollEvents++;
         anyScrollEvents++;
       }
       if (settings.maskOffOnScroll) setScrollMaskActive(true);
     } catch (e) {}
   }
-  try { document.addEventListener("scroll", onTimelineScroll, true); } catch (e) {}
+
+  function isOwnUiScroll(el) {
+    try {
+      if (el === document || el === document.documentElement || el === document.body) {
+        return false;   // document 级滚动可能就是宿主改版，照常计数
+      }
+      if (typeof el.closest !== "function") return true;
+      return !!(el.closest("#" + PANEL_ID) || el.closest("#" + STATS_ID));
+    } catch (e) { return true; }
+  }
+
+  // 监听器按开关装卸：__lagfixOff / 暂停 / 自禁用时真正移除，重新开启时再挂。
+  // addEventListener 对同一函数+capture 是幂等的，重复调用不会叠加。
+  function setScrollListener(on) {
+    try {
+      if (on) document.addEventListener("scroll", onTimelineScroll, true);
+      else document.removeEventListener("scroll", onTimelineScroll, true);
+    } catch (e) {}
+  }
 
   // ---- v0.3.1 输入延迟：只采输入框内的按键，一次 closest，不拦截事件 ----
-  try {
-    document.addEventListener("keydown", function (ev) {
-      try {
-        if (state.dead || !settings.inputLagOn || !settings.observe) return;
-        if (inputPendingAt) return;   // 连按时只记第一个待处理按键（最坏等待）
-        var t = ev && ev.target;
-        if (!t || typeof t.closest !== "function") return;
-        if (!t.closest(".chat-composer-input-surface")) return;
-        inputPendingAt = performance.now();
-      } catch (e) {}
-    }, true);
-  } catch (e) {}
+  function onComposerKeydown(ev) {
+    try {
+      if (state.dead || !settings.inputLagOn || !settings.observe) return;
+      if (inputPendingAt) return;   // 连按时只记第一个待处理按键（最坏等待）
+      var t = ev && ev.target;
+      if (!t || typeof t.closest !== "function") return;
+      if (!t.closest(".chat-composer-input-surface")) return;
+      inputPendingAt = performance.now();
+    } catch (e) {}
+  }
+
+  function setInputListener(on) {
+    try {
+      if (on) document.addEventListener("keydown", onComposerKeydown, true);
+      else document.removeEventListener("keydown", onComposerKeydown, true);
+    } catch (e) {}
+  }
+
+  setScrollListener(settings.scrollDiagOn || settings.maskOffOnScroll);
+  setInputListener(settings.inputLagOn && settings.observe);
 
   // 页面卸载时别把属性留在 DOM 上（多窗口/热重载会保留 documentElement）
   function onPageUnload() {
@@ -505,6 +562,10 @@
   } catch (e) {}
 
   // ---- v0.3.1 loadOlder 观测包装（只观测，不拦截） ----
+  // generation：释放/关闭后递增；在途 promise 的回调据此丢弃，
+  // 避免「关掉又打开」后 calls=0 但 p95/max 有值。
+  var loadOlderGen = 0;
+
   function recordLoadOlder(t0) {
     var now = performance.now();
     var ms = Math.round(now - t0);
@@ -514,6 +575,7 @@
   }
 
   function makeProbedLoadOlder(orig) {
+    var gen = loadOlderGen;
     // 显式严格模式：宿主的类方法是严格函数，解构调用（无 this）时应拿到 undefined
     // 而不是被 sloppy 规则换成 globalThis。保持与原方法完全一致的 this 语义。
     return function () {
@@ -530,11 +592,17 @@
       if (ret && typeof ret.then === "function") {
         // 返回**原 promise**：调用方拿到的必须和未包装时同一个引用，
         // 否则 await/链式 .then 的时序与身份判断都会变。
-        ret.then(function () { recordLoadOlder(t0); },
-                 function () { loadOlderErrors++; recordLoadOlder(t0); });
+        ret.then(function () {
+          if (gen === loadOlderGen) recordLoadOlder(t0);
+        }, function () {
+          if (gen === loadOlderGen) {
+            loadOlderErrors++;
+            recordLoadOlder(t0);
+          }
+        });
         return ret;
       }
-      recordLoadOlder(t0);
+      if (gen === loadOlderGen) recordLoadOlder(t0);
       return ret;
     };
   }
@@ -560,6 +628,7 @@
   function releaseLoadOlderProbe() {
     var target = loadOlderTarget;
     loadOlderTarget = null;
+    loadOlderGen++;   // 在途回调作废：不向已清空的环形窗口写回
     if (!target) return;
     try {
       var rec = target.__lagfixLoadOlder;
@@ -2602,6 +2671,10 @@
       lafCount = 0;
       lafMax = 0;
       lastScrollAt = 0;
+      domPeak = 0;
+      domPeakAt = 0;
+      domProbeAt = 0;
+      domCostMs = 0;
     } else {
       // 诊断刚打开：立即尝试装到当前 store（不必等 5s 看门狗）
       try { applyThrottle(); } catch (e) {}
@@ -2613,6 +2686,9 @@
     if (!settings.maskOffOnScroll || state.dead) setScrollMaskActive(false);
     // long-animation-frame 属于滚动诊断：诊断关掉就断开观察器。
     setLafObserving(settings.scrollDiagOn && settings.observe && !state.dead);
+    // 监听器按当前开关装卸；关闭后不再空转，重新开启时这里会挂回来。
+    setScrollListener((settings.scrollDiagOn || settings.maskOffOnScroll) && !state.dead);
+    setInputListener(settings.inputLagOn && settings.observe && !state.dead);
   }
 
   // 一键还原（控制台 / 出问题时）
@@ -2633,6 +2709,8 @@
       releaseLoadOlderProbe();
       setScrollMaskActive(false);
       try { if (lafObserver) lafObserver.disconnect(); } catch (e) {}
+      setScrollListener(false);
+      setInputListener(false);
       scrollRing.length = 0;
       loadOlderRing.length = 0;
       inputRing.length = 0;
@@ -2645,6 +2723,10 @@
       lafCount = 0;
       lafMax = 0;
       lastScrollAt = 0;
+      domPeak = 0;
+      domPeakAt = 0;
+      domProbeAt = 0;
+      domCostMs = 0;
       if (wasBig && bigBlocked !== bigBlockedMark) resumeFullHistory();
       fixState.reason = "已手动关闭";
       renderPanelStatus();
@@ -2699,6 +2781,11 @@
       try { if (mo) { mo.disconnect(); mo = null; } } catch (e) {}
       try { if (ltObserver) ltObserver.disconnect(); } catch (e) {}
       rafRunning = false;
+      // 暂停后不再采样：清掉待处理按键，避免恢复后把整段暂停时长记成一次延迟。
+      inputPendingAt = 0;
+      scrollEvents = 0;
+      anyScrollEvents = 0;
+      lafCount = 0;
       // 暂停后不再需要锚点轮询/看门狗：它们每 2s/5s 还在跑，
       // 既白耗 CPU，又会在恢复时和 attach 抢着挂载。
       try { if (acquireTimer) { clearInterval(acquireTimer); acquireTimer = null; } } catch (e) {}
@@ -2706,6 +2793,7 @@
       try { if (slowRetryTimer) { clearTimeout(slowRetryTimer); slowRetryTimer = null; } } catch (e) {}
     }
     setLafObserving(settings.observe && settings.scrollDiagOn);
+    setInputListener(settings.inputLagOn && settings.observe && !state.dead);
     renderOverlay();
     renderPanelStatus();
   }
@@ -2800,13 +2888,20 @@
     var loVals = windowValues(loadOlderRing, now);
     // DOM 每周期采样一次；单次全量计数 >5ms 就退回 60s 降频 ——
     // 观测器不能成为新的长任务源（9k 节点下全量计数本身就是可观测成本）。
+    // 用独立的 domProbeAt 计时：旧 DOM 块（60s 一次）也会写 domAt，
+    // 共用时间戳会让这里的降频分支永远进不去，峰值被永久冻结。
     var gap = domCostMs > 5 ? 60000 : 0;
-    if (!domAt || now - domAt > gap) {
-      var t0 = performance.now();
+    if (!domProbeAt || now - domProbeAt > gap) {
       var n = null;
-      try { n = document.getElementsByTagName("*").length; } catch (e) {}
-      domCostMs = performance.now() - t0;
-      domAt = now;
+      if (domAt && now - domAt <= 1 && domCount !== null) {
+        n = domCount;   // 本周期旧块刚数过：复用，避免同一周期遍历两遍
+      } else {
+        var t0 = performance.now();
+        try { n = document.getElementsByTagName("*").length; } catch (e) {}
+        domCostMs = performance.now() - t0;
+        domAt = now;
+      }
+      domProbeAt = now;
       if (n !== null) {
         if (!domPeakAt || now - domPeakAt > WINDOW_MS) { domPeak = n; domPeakAt = now; }
         else if (n > domPeak) domPeak = n;
@@ -2824,7 +2919,7 @@
       mismatch: anyScrollEvents > 0 && scrollEvents === 0,
       loadOlderCalls: loadOlderCalls,
       loadOlderP95: pctOf(loVals, 0.95),
-      loadOlderMax: loadOlderMax || null,
+      loadOlderMax: loVals.length ? loadOlderMax : null,
       loadOlderErrors: loadOlderErrors,
       mountedTurns: turns,
       domPeak: domPeak || null,
@@ -2872,6 +2967,11 @@
     if (!settings.observe) {
       state.frames = 0;
       longTaskCount = 0;
+      // 暂停期间不累计周期计数；恢复后的首个样本从 0 开始。
+      scrollEvents = 0;
+      anyScrollEvents = 0;
+      lafCount = 0;
+      inputPendingAt = 0;
       // 暂停不影响手动「检查更新」：标记随本样本回传一次后立即清掉，
       // 否则暂停期间每个周期都会重复请求。
       var pausedAsk = state.updateCheckRequested ? 1 : 0;
@@ -2945,7 +3045,9 @@
     } catch (e) {
       err();
       return JSON.stringify({ sid: state.sid, frames: 0, dt: 0, dead: false, errs: state.errCount,
+        settings: cfg, fix: fixSnapshot(),
         scroll: null, input: null, ver: VERSION,
+        updateCheck: state.updateCheckRequested ? 1 : 0,
         restart: state.restartRequested ? 1 : 0 });
     } finally {
       state.frames = 0;   // 异常路径也要清零，否则下次会跨窗口累计上报

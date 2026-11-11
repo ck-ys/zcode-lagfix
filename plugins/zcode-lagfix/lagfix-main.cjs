@@ -543,7 +543,9 @@
     updateInflight = true;
     lastUpdateAt = now;
     var cur = parseSemver(current) || parseSemver("0.0.0");
-    getJson(UPDATE_API, 2, function (e, data) {
+    // 总时限覆盖连接、重定向与慢速滴流；每跳不再单独重置 10s。
+    var deadline = Date.now() + UPDATE_TIMEOUT_MS;
+    getJson(UPDATE_API, 2, deadline, function (e, data) {
       updateInflight = false;
       if (e) {
         log("检查更新失败：" + e.message);
@@ -584,21 +586,32 @@
     });
   }
 
-  // 只允许 https + api.github.com；重定向逐跳重新校验，最多 2 跳。
-  function getJson(url, redirects, cb) {
+  // 只允许 https + api.github.com + 443；重定向逐跳重新校验，最多 2 跳。
+  // deadline 是整个请求链的绝对截止时间（含连接/重定向/慢速滴流）。
+  function getJson(url, redirects, deadline, cb) {
     var u;
     try { u = new URL(url); } catch (e) { cb(new Error("地址无效")); return; }
-    if (u.protocol !== "https:" || u.hostname !== UPDATE_HOST) {
+    if (u.protocol !== "https:" || u.hostname !== UPDATE_HOST
+      || (u.port && u.port !== "443")) {
       cb(new Error("拒绝非 GitHub API 地址"));
       return;
     }
     var done = false;
+    var hardTimer = null;
     function finish(e, data) {
       if (done) return;
       done = true;
+      if (hardTimer) { clearTimeout(hardTimer); hardTimer = null; }
       cb(e, data);
     }
-    var req;
+    var req = null;
+    // 硬截止：覆盖 DNS/TCP 连接、重定向等待与慢速滴流（socket 空闲超时兜不住）。
+    // 在发请求前挂上，重定向时由当前跳负责清掉再递归。
+    hardTimer = setTimeout(function () {
+      try { if (req) req.destroy(); } catch (e2) {}
+      finish(new Error("请求超时"));
+    }, Math.max(1, deadline - Date.now()));
+    hardTimer.unref && hardTimer.unref();
     try {
       req = https.get({
         protocol: u.protocol,
@@ -623,7 +636,8 @@
           }
           if (done) return;
           done = true;
-          getJson(next, redirects - 1, cb);
+          if (hardTimer) { clearTimeout(hardTimer); hardTimer = null; }
+          getJson(next, redirects - 1, deadline, cb);
           return;
         }
         var total = 0;
