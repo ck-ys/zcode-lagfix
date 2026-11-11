@@ -33,7 +33,12 @@ const nodes = new Map();
 
 function listenBag(el) {
   el._listeners = {};
-  el.addEventListener = (t, fn) => { (el._listeners[t] = el._listeners[t] || []).push(fn); };
+  // 与浏览器一致：同一 (type, fn, capture) 重复 add 不叠加，否则开关反复
+  // 应用会让滚动/按键回调被调用多次、计数翻倍。
+  el.addEventListener = (t, fn) => {
+    const a = (el._listeners[t] = el._listeners[t] || []);
+    if (a.indexOf(fn) < 0) a.push(fn);
+  };
   el.removeEventListener = (t, fn) => {
     const a = el._listeners[t] || [];
     const i = a.indexOf(fn);
@@ -432,6 +437,11 @@ const dispatchScroll = (target) => scrollListeners.forEach((fn) => fn({ target }
 const timelineEl = makeEl("div");
 timelineEl.setAttribute("data-v4-timeline-scroll", "true");
 const otherEl = makeEl("div");
+// 非时间线滚动只有落在会话 pane 内才算「可能失配」；
+// 面板/浮层/未知元素的滚动不计入 anyEvents。
+const sessionPane = makeEl("div");
+sessionPane.setAttribute("data-session-id", "sess-1");
+otherEl.closest = (sel) => (String(sel).includes("data-session-id") ? sessionPane : null);
 
 dispatchScroll(otherEl);
 check("普通元素滚动不加属性", docEl.getAttribute("data-lagfix-scroll") === null,
@@ -490,6 +500,21 @@ const mm = scrollOf();
 check("只在非时间线元素上滚动时标 mismatch（区分「没人滚」与「选择器失配」）",
   mm.mismatch === true && mm.events === 0 && mm.anyEvents === 1,
   `mismatch=${mm.mismatch} events=${mm.events} any=${mm.anyEvents}`);
+
+// 设置面板自己的滚动不能伪造 mismatch（否则用户在面板里滚一下就误报宿主改版）。
+const panelScrollEl = makeEl("div");
+panelScrollEl.closest = (sel) => (String(sel).includes("lagfix-settings-panel") ? {} : null);
+dispatchScroll(panelScrollEl);
+const mmPanel = scrollOf();
+check("设置面板内滚动不计入 anyEvents", mmPanel.anyEvents === 0 && mmPanel.mismatch === false,
+  `any=${mmPanel.anyEvents} mismatch=${mmPanel.mismatch}`);
+
+// 宿主若把滚动改到 document，target 没有 matches，也必须计入 anyEvents。
+dispatchScroll(documentStub);
+const mmDoc = scrollOf();
+check("document 级滚动计入 anyEvents（宿主改版信号）",
+  mmDoc.anyEvents === 1 && mmDoc.mismatch === true,
+  `any=${mmDoc.anyEvents} mismatch=${mmDoc.mismatch}`);
 
 const baseQS = documentStub.querySelectorAll;
 documentStub.querySelectorAll = (sel) => {
@@ -572,10 +597,17 @@ const samplesAfterOutside = inputOf().samples;
 check("输入框外按键不计入", samplesAfterOutside === samplesBeforeOutside,
   `before=${samplesBeforeOutside} after=${samplesAfterOutside}`);
 
+const kdBeforeInputOff = (documentStub._listeners.keydown || []).length;
 writeSettings({ inputLagOn: false });
 check("inputLagOn=false 时 input 为 null",
   JSON.parse(window.__lagfixCollect()).input === null);
+check("关闭输入延迟后移除 document keydown 监听",
+  (documentStub._listeners.keydown || []).length === kdBeforeInputOff - 1,
+  `before=${kdBeforeInputOff} after=${(documentStub._listeners.keydown || []).length}`);
 writeSettings({ inputLagOn: true });
+check("重新开启后 keydown 监听挂回来",
+  (documentStub._listeners.keydown || []).length === kdBeforeInputOff,
+  `now=${(documentStub._listeners.keydown || []).length}`);
 
 console.log("-- 暂停观测：廉价 payload 的 scroll/input 为 null --");
 writeSettings({ observe: false });
@@ -901,6 +933,9 @@ check("还原前滚动属性存在（前置条件）",
 const perfDiscBeforeOff = perfCalls.disconnect;
 const offResult = window.__lagfixOff();
 check("__lagfixOff 返回 fix off", offResult === "fix off", String(offResult));
+check("__lagfixOff 移除了 document 级 scroll 监听",
+  (documentStub._listeners.scroll || []).length === 0,
+  `left=${(documentStub._listeners.scroll || []).length}`);
 check("__lagfixOff 会断开 long-animation-frame 观察器",
   perfCalls.disconnect > perfDiscBeforeOff,
   `before=${perfDiscBeforeOff} after=${perfCalls.disconnect}`);
@@ -935,6 +970,15 @@ onStorage({ key: "lagfix.settings.v1" });
 await wait(50);
 check("重新开启后大会话保护装到当前原型", !!s3.proto.__lagfixLoadAll);
 check("重新开启后 loadOlder 观测装到当前原型", !!s3.proto.__lagfixLoadOlder);
+check("重新开启后 scroll 监听只挂一份",
+  (documentStub._listeners.scroll || []).length === 1,
+  `count=${(documentStub._listeners.scroll || []).length}`);
+const callsBeforeReenable = JSON.parse(window.__lagfixCollect()).scroll.loadOlderCalls;
+await s3.store.loadOlder();
+const reenabledPayload = JSON.parse(window.__lagfixCollect());
+check("重新开启后 loadOlder 只包一层（+1 不是 +2）",
+  reenabledPayload.scroll.loadOlderCalls === callsBeforeReenable + 1,
+  `before=${callsBeforeReenable} after=${reenabledPayload.scroll.loadOlderCalls}`);
 const callsBeforeOff = s3.store.loadAllCalls || 0;
 const blockedAgain = await s3.store.loadAllOlder();
 check("重新开启后再次拦下全量补拉",

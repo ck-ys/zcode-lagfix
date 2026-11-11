@@ -209,6 +209,14 @@ const base = (over) => Object.assign({ ver: "0.3.1", updateCheck: 1,
   }
   {
     const r = await runOnce([
+      { status: 302, headers: { location: "https://api.github.com:8443/x" } },
+    ], base());
+    check("同主机但非 443 端口：拒绝",
+      r.info && r.info.status === "error" && /拒绝非 GitHub API 地址/.test(r.info.message)
+      && r.requests.length === 1, `${JSON.stringify(r.info)} req=${r.requests.length}`);
+  }
+  {
+    const r = await runOnce([
       { status: 302, headers: { location: "https://api.github.com/repositories/1/releases" } },
       releases([rel("v0.3.2")]),
     ], base());
