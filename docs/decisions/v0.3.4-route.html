@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>zcode-lagfix 下一版本拍板 · v0.3.4 路线与数据门槛</title>
+<style>
+  :root {
+    --bg: #0b1017;
+    --bg-2: #101824;
+    --card: #141d2b;
+    --card-2: #182334;
+    --line: #263449;
+    --text: #e6edf7;
+    --muted: #93a4bb;
+    --dim: #6e8098;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --radius: 14px;
+    --shadow: 0 18px 50px rgba(0, 0, 0, .28);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    color: var(--text);
+    background:
+      radial-gradient(900px 500px at 18% -8%, rgba(88, 166, 255, .14), transparent 60%),
+      radial-gradient(800px 420px at 92% 4%, rgba(188, 140, 255, .10), transparent 60%),
+      var(--bg);
+    font: 15px/1.72 "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+  code { overflow-wrap: anywhere; word-break: break-word; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 44px 22px 120px; }
+
+  /* ── header ── */
+  .hero {
+    display: grid;
+    grid-template-columns: 1.35fr .65fr;
+    gap: 24px;
+    align-items: stretch;
+    margin-bottom: 30px;
+  }
+  .hero-main, .hero-side {
+    background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,0));
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .hero-main { padding: 30px 30px 26px; }
+  .hero-side { padding: 22px; display: flex; flex-direction: column; justify-content: space-between; gap: 16px; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--blue); font-size: 12.5px; font-weight: 700;
+    letter-spacing: .12em; text-transform: uppercase;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); box-shadow: 0 0 0 5px rgba(248,81,73,.12); }
+  h1 { margin: 12px 0 10px; font-size: clamp(28px, 4vw, 42px); line-height: 1.18; letter-spacing: -.02em; }
+  h1 span { color: var(--muted); font-weight: 500; }
+  .lede { margin: 0; color: var(--muted); max-width: 760px; font-size: 16px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border-radius: 999px;
+    border: 1px solid var(--line); background: rgba(255,255,255,.025);
+    color: var(--muted); font-size: 12.5px;
+  }
+  .chip b { color: var(--text); font-weight: 650; }
+  .verdict-box { padding: 16px; border-radius: 12px; background: rgba(88,166,255,.07); border: 1px solid rgba(88,166,255,.25); }
+  .verdict-box .big { font-size: 20px; font-weight: 750; line-height: 1.35; }
+  .verdict-box p { margin: 8px 0 0; color: var(--muted); font-size: 13.5px; }
+  .version-line { color: var(--dim); font-size: 12.5px; }
+
+  /* ── sections ── */
+  section { margin-top: 38px; }
+  .sec-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+  h2 { margin: 0; font-size: 21px; letter-spacing: -.01em; }
+  .sec-head p { margin: 0; color: var(--dim); font-size: 13px; max-width: 580px; text-align: right; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .grid-2 > *, .grid-3 > * { min-width: 0; }
+  .card {
+    min-width: 0;
+    background: linear-gradient(180deg, rgba(255,255,255,.028), rgba(255,255,255,.008));
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 18px;
+  }
+  pre { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+  .card h3 { margin: 0 0 8px; font-size: 15.5px; }
+  .card p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12.5px; }
+  .dim { color: var(--dim); }
+  .tag {
+    display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 650; border: 1px solid var(--line); color: var(--muted);
+    background: rgba(255,255,255,.03); white-space: nowrap;
+  }
+  .tag.green { color: #7ee787; border-color: rgba(63,185,80,.35); background: rgba(63,185,80,.08); }
+  .tag.yellow { color: #e3b341; border-color: rgba(210,153,34,.35); background: rgba(210,153,34,.08); }
+  .tag.red { color: #ff7b72; border-color: rgba(248,81,73,.35); background: rgba(248,81,73,.08); }
+  .tag.blue { color: #79c0ff; border-color: rgba(88,166,255,.35); background: rgba(88,166,255,.08); }
+  .tag.purple { color: #d2a8ff; border-color: rgba(188,140,255,.35); background: rgba(188,140,255,.08); }
+
+  /* ── evidence ── */
+  .metric { display: flex; flex-direction: column; gap: 10px; }
+  .metric .label { display: flex; justify-content: space-between; color: var(--muted); font-size: 12.5px; }
+  .metric .label b { color: var(--text); font-size: 13px; }
+  .bar { height: 8px; border-radius: 999px; background: #1b2638; overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 999px; background: var(--green); }
+  .bar.yellow > i { background: var(--yellow); }
+  .bar.red > i { background: var(--red); }
+  .bar.blue > i { background: var(--blue); }
+  .phase { position: relative; }
+  .phase .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .phase .name { font-weight: 700; }
+  .phase .when { color: var(--dim); font-size: 12px; }
+  .phase .rows { display: flex; flex-direction: column; gap: 11px; }
+  .phase .foot { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--dim); font-size: 12px; }
+  .hot-card { border-color: rgba(248,81,73,.35); background: linear-gradient(180deg, rgba(248,81,73,.055), rgba(248,81,73,.015)); }
+
+  .callout {
+    display: grid; grid-template-columns: 36px 1fr; gap: 12px;
+    border: 1px solid rgba(88,166,255,.28); background: rgba(88,166,255,.055);
+    border-radius: var(--radius); padding: 16px 18px; margin-top: 14px;
+  }
+  .callout .icon {
+    width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+    background: rgba(88,166,255,.14); color: var(--blue); font-weight: 800;
+  }
+  .callout p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .callout b { color: var(--text); }
+
+  /* ── options ── */
+  .option {
+    position: relative; display: grid; grid-template-columns: 22px 1fr; gap: 12px;
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 16px;
+    background: linear-gradient(180deg, rgba(255,255,255,.024), rgba(255,255,255,.006));
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .option:hover { border-color: #3a4d68; }
+  .option.checked { border-color: rgba(88,166,255,.6); background: rgba(88,166,255,.06); }
+  .option input[type="checkbox"] { appearance: none; width: 19px; height: 19px; margin-top: 2px; border: 1.5px solid #40536e; border-radius: 6px; background: transparent; cursor: pointer; }
+  .option input[type="checkbox"]:checked { background: var(--blue); border-color: var(--blue); box-shadow: inset 0 0 0 3px var(--bg-2); }
+  .option .head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 6px; }
+  .option h4 { margin: 0; font-size: 14.5px; }
+  .option p { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+  .option ul { margin: 6px 0 0; padding-left: 18px; color: var(--dim); font-size: 12.5px; }
+  .option li { margin: 3px 0; }
+  .option .kv { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font-size: 12px; color: var(--dim); }
+  .option .kv b { color: var(--muted); font-weight: 650; }
+  .recommend { box-shadow: 0 0 0 1px rgba(63,185,80,.18) inset; }
+
+  /* ── acceptance table ── */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 12px; letter-spacing: .03em; text-transform: uppercase; }
+  td { color: var(--muted); }
+  td b { color: var(--text); font-weight: 650; }
+  .check { color: var(--green); font-weight: 800; }
+
+  /* ── summary ── */
+  .summary {
+    position: static; z-index: 20; margin-top: 34px;
+    display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: center;
+    padding: 14px 16px; border-radius: 14px; border: 1px solid rgba(88,166,255,.34);
+    background: rgba(16, 24, 36, .94); backdrop-filter: blur(12px);
+    box-shadow: 0 16px 40px rgba(0,0,0,.45);
+  }
+  .summary .line { color: var(--muted); font-size: 13px; }
+  .summary .line b { color: var(--text); }
+  .summary .picks { margin-top: 4px; color: var(--dim); font-size: 12px; }
+  .summary .actions { display: flex; gap: 8px; }
+  button {
+    border: 1px solid #365072; background: rgba(88,166,255,.13); color: #cfe6ff;
+    padding: 9px 13px; border-radius: 9px; font: inherit; font-size: 13px; font-weight: 650; cursor: pointer;
+  }
+  button:hover { background: rgba(88,166,255,.2); }
+  .toast { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%) translateY(10px); opacity: 0; pointer-events: none; background: #1b293b; border: 1px solid var(--line); color: var(--text); padding: 9px 14px; border-radius: 9px; font-size: 13px; transition: .18s ease; z-index: 50; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .footnote { margin-top: 32px; color: var(--dim); font-size: 12px; line-height: 1.8; }
+  .footnote code { color: var(--muted); background: rgba(255,255,255,.04); padding: 1px 5px; border-radius: 4px; }
+
+  .research-list { margin: 8px 0 0; padding-left: 17px; color: var(--muted); font-size: 12.5px; }
+  .research-list li { margin: 4px 0; }
+
+  @media (max-width: 900px) {
+    .hero { grid-template-columns: 1fr; }
+    .grid-3 { grid-template-columns: 1fr; }
+    .grid-2 { grid-template-columns: 1fr; }
+    .sec-head { display: block; }
+    .sec-head p { text-align: left; margin-top: 6px; }
+    .summary { grid-template-columns: 1fr; position: static; }
+    .summary .actions { justify-content: flex-start; }
+  }
+
+  @media (max-width: 720px) {
+    .accept-table thead { display: none; }
+    .accept-table, .accept-table tbody, .accept-table tr, .accept-table td { display: block; width: 100%; }
+    .accept-table tr { border-bottom: 1px solid var(--line); padding: 10px 0; }
+    .accept-table tr:last-child { border-bottom: 0; }
+    .accept-table td { border: 0; padding: 3px 0 3px 84px; position: relative; }
+    .accept-table td::before {
+      content: attr(data-label); position: absolute; left: 0; top: 3px; width: 76px;
+      color: var(--dim); font-size: 11.5px; font-weight: 600;
+    }
+  }
+
+  @media print {
+    body { background: #fff; color: #111; }
+    .wrap { padding: 0; max-width: none; }
+    .card, .hero-main, .hero-side, .option, .summary { box-shadow: none; background: #fff; border-color: #ddd; }
+    .summary { position: static; }
+    .toast, .actions { display: none; }
+  }
+  .option.no-check { grid-template-columns: 1fr; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="hero-main">
+      <div class="eyebrow"><span class="dot" style="background:var(--blue);box-shadow:0 0 0 5px rgba(88,166,255,.12)"></span>NEXT RELEASE · v0.3.4</div>
+      <h1>下一版本拍板 <span>先收数据，再选 1–2 项</span></h1>
+      <p class="lede">v0.3.3 已经上线，侧栏开合、面板常开、回前台三段保护都在跑。这一版不再凭猜测堆优化，而是用你正在做的长会话 / 多切换实机数据，决定 O3 补页合并、O4 turn 内 <code>content-visibility</code>、O7 多会话策略和预览 HTML 绘制成本里，哪 1–2 项真正值得做。</p>
+      <div class="meta">
+        <span class="chip">状态 <b>数据回收中</b></span>
+        <span class="chip">候选 <b>4 项</b></span>
+        <span class="chip">本版目标 <b>选 1–2 项</b></span>
+        <span class="chip">边界 <b>不改会话数据</b></span>
+      </div>
+    </div>
+    <aside class="hero-side">
+      <div class="verdict-box">
+        <div class="big">暂不锁定单一方案</div>
+        <p>先把多会话切换、面板常开、长历史上翻、回前台四类数据收齐。未达到数据门槛的项，这一版不做。</p>
+      </div>
+      <div class="version-line">基于 v0.3.3 已发布版本 · 2026-11-11</div>
+    </aside>
+  </header>
+
+  <section>
+    <div class="sec-head">
+      <h2>01 · 已经确认的事实</h2>
+      <p>只写运行日志能证明的事；首批样本只证明链路通，不作为性能结论。</p>
+    </div>
+    <div class="grid-3">
+      <div class="card">
+        <h3>v0.3.3 已真正加载</h3>
+        <p>重启后主进程日志出现 <code>v0.3.3 加载器已启动</code>，样本字段 <code>ver=0.3.3</code>。不是只换了缓存目录。</p>
+      </div>
+      <div class="card">
+        <h3>侧栏与回前台链路已通</h3>
+        <p>样本里 <code>pane.detected=true</code>，<code>refocus.hiddenMs</code> 有值，<code>guardHits</code> 已计数。说明宿主标记和回前台信号都接上了。</p>
+      </div>
+      <div class="card">
+        <h3>首批样本不代表长会话</h3>
+        <p>当前只看到 <code>frameP95=6</code>、<code>longTasks=0</code>、<code>dom=2394</code> 的初始化样本。没有长会话、多切换、面板常开和快速上翻，不能拿它下结论。</p>
+      </div>
+    </div>
+    <div class="callout">
+      <div class="icon">i</div>
+      <p><b>链路通 ≠ 卡顿已解决。</b>v0.3.3 的目标是“保护窗口和归因正确”，不是“证明帧率改善”。v0.3.4 要不要做、做什么，取决于接下来这轮实机数据。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>02 · 这轮要收的四类数据</h2>
+      <p>同一台机器、同一批长会话、同一段操作路径；每类至少 3 轮，再看中位数。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>场景</th><th>怎么操作</th><th>重点看什么</th><th>用来判断</th></tr></thead>
+      <tbody>
+        <tr>
+          <td data-label="场景"><b>A 多会话切换</b></td>
+          <td data-label="操作">准备 3–5 个长会话，在会话之间来回切换 10 次以上；每次停 2–3 秒再切下一个。</td>
+          <td data-label="指标"><code>pane.switches</code>、<code>switchP95/max</code>、<code>refocus.p95/max</code>、<code>sessions[].dom/commitRate</code>、<code>longTasks</code>。</td>
+          <td data-label="判断">切换卡顿主要来自当前会话重绘，还是隐藏会话仍在工作（O7 的门槛）。</td>
+        </tr>
+        <tr>
+          <td data-label="场景"><b>B 面板常开</b></td>
+          <td data-label="操作">打开右侧面板停留 60 秒，期间滚动聊天区、打开一个预览 HTML，再关闭面板。</td>
+          <td data-label="指标"><code>pane.open</code>、<code>guardHits</code>、<code>frameP95</code>、<code>longTasks</code>、<code>dom</code>、<code>sessions[].dom</code>。</td>
+          <td data-label="判断">面板常开期的卡顿是否与预览 HTML 自身绘制相关，还是聊天区 DOM 太大（O4 的门槛）。</td>
+        </tr>
+        <tr>
+          <td data-label="场景"><b>C 长历史上翻</b></td>
+          <td data-label="操作">在超长会话里快速向上滚到很早的历史，连续触发多页补拉；再滚回底部。</td>
+          <td data-label="指标"><code>scroll.p95</code>、<code>loadOlderCalls</code>、<code>loadOlderP95/max</code>、<code>mountedTurns</code>、<code>domPeak</code>、顶部空白时间。</td>
+          <td data-label="判断">补页次数 / 单页耗时是否值得做 O3；顶部空白和 DOM 峰值是否值得做 O4。</td>
+        </tr>
+        <tr>
+          <td data-label="场景"><b>D 回前台</b></td>
+          <td data-label="操作">Alt-Tab 离开 10 秒、60 秒、5 分钟各一次，再切回 ZCode；每次回来停 3 秒。</td>
+          <td data-label="指标"><code>refocus.hiddenMs</code>、<code>refocus.p95/max</code>、<code>flushes</code>、<code>guardHits</code>、<code>longTasks</code>。</td>
+          <td data-label="判断">P3 的 700ms 保护是否够；回前台卡顿是否来自宿主首帧重绘，插件还能不能帮上忙。</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <div class="icon">!</div>
+      <p><b>记录设置快照。</b>至少记下 P1/P2/P3 是开还是关、采集间隔、是否开了多会话统计。没有设置快照的样本，不能拿来做 A/B。能接受的话，每类场景各跑一轮“三段全开”和“对应开关关闭”，否则只做归因，不声称改善。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>03 · 四个候选，先看门槛</h2>
+      <p>不是“能做就做”；每项都要有数据门槛、可还原开关和明确代价。</p>
+    </div>
+    <div class="grid-2">
+      <div class="option recommend no-check">
+        <div>
+          <div class="head"><h4>O4 · turn 内 content-visibility</h4><span class="tag green">优先候选</span><span class="tag">默认关闭实验</span></div>
+          <p>只给 turn 内部的行级块加 <code>content-visibility:auto</code>，不动被 virtualizer 测高的 turn wrapper。目标是减少超长 turn 的布局 / 绘制成本。</p>
+          <ul>
+            <li>可能改善：长历史上翻、面板常开、回前台首帧。</li>
+            <li>风险：锚点漂移、搜索/选中、预览内容高度、宿主测高。</li>
+            <li>数据门槛：<code>dom &gt; 4000</code> 或 3 秒内 <code>longTasks &gt; 6</code>，且 A/B 后滚动 P95 或长任务下降 ≥20%。</li>
+          </ul>
+        </div>
+      </div>
+      <div class="option recommend no-check">
+        <div>
+          <div class="head"><h4>O3 · 补页合并</h4><span class="tag green">优先候选</span><span class="tag">默认关闭实验</span></div>
+          <p>快速上翻时把短时间内的多次 <code>loadOlder</code> 合并成一次，保留最后一页和滚动锚点；不伪造数据、不改消息顺序。</p>
+          <ul>
+            <li>可能改善：补页次数、单页耗时、顶部空白。</li>
+            <li>风险：锚点、分页顺序、宿主重试、<code>not-enough-queries</code> 终态。</li>
+            <li>数据门槛：3 秒内 <code>loadOlderCalls ≥3</code> 或 <code>loadOlderP95 &gt; 200ms</code>，且顶部空白 &gt;300ms。</li>
+          </ul>
+        </div>
+      </div>
+      <div class="option no-check">
+        <div>
+          <div class="head"><h4>O7 · 多会话调度</h4><span class="tag yellow">高风险管理</span><span class="tag">先只归因</span></div>
+          <p>隐藏 pane 仍可能挂载并继续工作。插件只能在宿主允许的范围内减少通知 / 观测，不能安全卸载宿主内容。</p>
+          <ul>
+            <li>可能改善：多会话切换、隐藏会话的资源占用。</li>
+            <li>风险：隐藏内容、切回时重新挂载、宿主生命周期；必须用户明确同意。</li>
+            <li>数据门槛：<code>sessions[].dom</code> 或 <code>commitRate</code> 在非当前会话持续偏高，且 <code>switchP95 &gt; 120ms</code>。</li>
+          </ul>
+        </div>
+      </div>
+      <div class="option no-check">
+        <div>
+          <div class="head"><h4>预览 HTML 自身绘制</h4><span class="tag red">大概率不做</span><span class="tag">证据不足</span></div>
+          <p>预览内容的绘制发生在宿主 / 预览自身，插件没有安全的暂停接口。除非数据明确指向它，否则不碰。</p>
+          <ul>
+            <li>可能改善：面板常开时的持续卡顿。</li>
+            <li>风险：暂停预览会改变用户看到的内容，属于“隐藏内容”范畴。</li>
+            <li>数据门槛：面板常开 + 预览可见时 <code>longTasks</code> 明显高于预览关闭，且排除聊天区 DOM 因素。</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>04 · 推荐路线（暂定）</h2>
+      <p>数据没回来前只定顺序，不锁定实现；每项都要能一键关回 v0.3.3。</p>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <h3>先做 O4，再做 O3</h3>
+        <p>两项都在 turn 内部或补页时序上，能本地开关、默认关闭、A/B 可回滚，且不改变消息数据。O4 先看 DOM/长任务，O3 再看补页次数/顶部空白；两项都达不到门槛就只保留观测。</p>
+      </div>
+      <div class="card">
+        <h3>O7 与预览只做归因</h3>
+        <p>除非数据明确显示隐藏 pane 或预览绘制是主因，否则 v0.3.4 不卸载 pane、不暂停预览、不隐藏内容。要动这两项，必须先单独拍板。</p>
+      </div>
+    </div>
+    <div class="callout">
+      <div class="icon">✓</div>
+      <p><b>拍板规则：</b>最多选 2 项；每项默认关闭；A/B 改善 ≥20% 或长任务下降 ≥30% 才保留默认路径；否则删掉或永久保持关闭。任何一项都不能改消息、会话、工具结果，也不能把“隐藏内容”当优化。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>05 · 验收目标</h2>
+      <p>沿用 v0.3.1 / v0.3.3 的口径，不因为换了版本就放宽。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>项目</th><th>目标</th><th>底线</th></tr></thead>
+      <tbody>
+        <tr><td data-label="项目">侧栏开合帧 P95</td><td data-label="目标">≤80ms</td><td data-label="底线">≤120ms，单次最长 ≤250ms</td></tr>
+        <tr><td data-label="项目">回前台帧 P95</td><td data-label="目标">≤80ms</td><td data-label="底线">≤120ms，不出现 &gt;250ms 长任务</td></tr>
+        <tr><td data-label="项目">滚动帧 P95</td><td data-label="目标">≤80ms</td><td data-label="底线">≤120ms，顶部空白 &lt;300ms</td></tr>
+        <tr><td data-label="项目">3 秒长任务</td><td data-label="目标">≤6 次</td><td data-label="底线">单次最长 ≤250ms</td></tr>
+        <tr><td data-label="项目">DOM 峰值</td><td data-label="目标">&lt;6000</td><td data-label="底线">不得比 v0.3.3 同场景更高</td></tr>
+        <tr><td data-label="项目">数据边界</td><td data-label="目标">不改消息 / 会话 / 工具结果</td><td data-label="底线"><code>__lagfixOff()</code> 后完全还原</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>06 · 数据回填</h2>
+      <p>这一区先留空；你测完把数字贴回来，我再把结论写进同一页，不另开新页。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>场景</th><th>轮次</th><th>开关 P95</th><th>frameP95</th><th>longTasks</th><th>DOM 峰值</th><th>结论</th></tr></thead>
+      <tbody>
+        <tr><td data-label="场景">A 多会话切换</td><td data-label="轮次">待测</td><td data-label="开关">待测</td><td data-label="帧">待测</td><td data-label="长任务">待测</td><td data-label="DOM">待测</td><td data-label="结论">待定</td></tr>
+        <tr><td data-label="场景">B 面板常开</td><td data-label="轮次">待测</td><td data-label="开关">待测</td><td data-label="帧">待测</td><td data-label="长任务">待测</td><td data-label="DOM">待测</td><td data-label="结论">待定</td></tr>
+        <tr><td data-label="场景">C 长历史上翻</td><td data-label="轮次">待测</td><td data-label="开关">待测</td><td data-label="帧">待测</td><td data-label="长任务">待测</td><td data-label="DOM">待测</td><td data-label="结论">待定</td></tr>
+        <tr><td data-label="场景">D 回前台</td><td data-label="轮次">待测</td><td data-label="开关">待测</td><td data-label="帧">待测</td><td data-label="长任务">待测</td><td data-label="DOM">待测</td><td data-label="结论">待定</td></tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <div class="icon">→</div>
+      <p><b>下一步：</b>你继续按 A–D 测，把 <code>observe-*.jsonl</code> 的时间和场景告诉我即可；我会用 <code>/lagfix report</code> 汇总，不读会话正文。四类各 3 轮后，这一页从“暂定”改成“已拍板”，再开 v0.3.4 实现分支。</p>
+    </div>
+  </section>
+
+  <div class="footnote">
+    本页只定路线与验收，不写实现代码。所有结论以实际日志、测试和实机 A/B 为准；没有数据的项不写成“已改善”。相关文件：<code>docs/specs/v0.3.3-pane-lag.md</code>、<code>docs/releases/v0.3.3.md</code>、<code>docs/decisions/v0.3.3-pane-lag.html</code>。
+  </div>
+</div>
+
+</body>
+</html>
