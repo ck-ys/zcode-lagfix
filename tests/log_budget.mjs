@@ -30,11 +30,16 @@ function todayName() {
   return `observe-${d.getFullYear()}${mm}${dd}.jsonl`;
 }
 
-// files: [{name, mb, ageMs}]；deny: 删除会抛错的文件名集合
+// files: [{name, mb, ageMs, symlink?, dir?}]；deny: 删除会抛错的文件名集合
 function createInstance(files, deny) {
   const map = new Map();
   for (const f of files) {
-    map.set(f.name, { size: Math.round(f.mb * MB), mtimeMs: Date.now() - (f.ageMs || 0) });
+    map.set(f.name, {
+      size: Math.round(f.mb * MB),
+      mtimeMs: Date.now() - (f.ageMs || 0),
+      symlink: !!f.symlink,
+      dir: !!f.dir,
+    });
   }
   const unlinked = [];
   const renamed = [];
@@ -50,7 +55,18 @@ function createInstance(files, deny) {
     statSync(p) {
       const f = map.get(base(p));
       if (!f) throw new Error("ENOENT " + p);
-      return { size: f.size, mtimeMs: f.mtimeMs, isFile: () => true };
+      return { size: f.size, mtimeMs: f.mtimeMs, isFile: () => !f.dir };
+    },
+    // 清理逻辑用 lstat + isFile/isSymbolicLink 做最后一道闸：符号链接、目录必须跳过。
+    lstatSync(p) {
+      const f = map.get(base(p));
+      if (!f) throw new Error("ENOENT " + p);
+      return {
+        size: f.size,
+        mtimeMs: f.mtimeMs,
+        isFile: () => !f.dir && !f.symlink,
+        isSymbolicLink: () => !!f.symlink,
+      };
     },
     readFileSync() { throw new Error("not needed"); },
     renameSync(from, to) {
@@ -155,14 +171,14 @@ const old = 3 * 86400000;              // 3 天前
     const today = todayName();
     const inst = createInstance([
       { name: "observe-20261101.jsonl", mb: 30, ageMs: old },
-      { name: "observe-20261001.jsonl.1", mb: 6, ageMs: old - 1000 },
+      { name: "observe-20261001.jsonl.1", mb: 25, ageMs: old - 1000 },
       { name: "main.log", mb: 10, ageMs: recent },
       { name: today, mb: 5, ageMs: 1000 },
       { name: "notes.txt", mb: 100, ageMs: old },   // 非白名单，永不动
     ]);
     inst.collect({ collectSec: 5, logMaxMB: 20 });
     await wait(20);
-    check("预算 20MB：删掉最旧的两个（30MB + 6MB 归档）",
+    check("预算 20MB：删掉最旧的两个（30MB + 25MB 归档）",
       inst.unlinked.length === 2
       && inst.unlinked[0] === "observe-20261101.jsonl"
       && inst.unlinked[1] === "observe-20261001.jsonl.1",
@@ -226,14 +242,14 @@ const old = 3 * 86400000;              // 3 天前
 
   console.log("-- 删除失败（权限/占用）：跳过并继续删其它 --");
   {
-    const deny = new Set(["elevated-finalize.log"]);
+    const deny = new Set(["elevated-finalize.log.1"]);
     const inst = createInstance([
-      { name: "elevated-finalize.log", mb: 10, ageMs: old },
+      { name: "elevated-finalize.log.1", mb: 10, ageMs: old },
       { name: "observe-20261101.jsonl", mb: 8, ageMs: old - 1000 },
     ], deny);
     inst.collect({ collectSec: 5, logMaxMB: 5 });
     await wait(20);
-    check("权限不足的文件没删掉", inst.files.has("elevated-finalize.log"));
+    check("权限不足的文件没删掉", inst.files.has("elevated-finalize.log.1"));
     check("跳过后仍继续删其它文件", inst.unlinked.includes("observe-20261101.jsonl"),
       JSON.stringify(inst.unlinked));
     check("记录了一次无法删除的日志",
@@ -251,9 +267,9 @@ const old = 3 * 86400000;              // 3 天前
   console.log("-- 不可删文件本身大于预算：后面的可删文件仍要删 --");
   {
     const inst = createInstance([
-      { name: "elevated-finalize.log", mb: 10, ageMs: old },
+      { name: "elevated-finalize.log.1", mb: 10, ageMs: old },
       { name: "observe-20261101.jsonl", mb: 1, ageMs: old - 1000 },
-    ], new Set(["elevated-finalize.log"]));
+    ], new Set(["elevated-finalize.log.1"]));
     inst.collect({ collectSec: 5, logMaxMB: 5 });
     await wait(20);
     check("不可删文件大于预算时仍继续删后面的小文件",
@@ -261,6 +277,36 @@ const old = 3 * 86400000;              // 3 天前
       JSON.stringify(inst.unlinked));
     check("剩余量按磁盘真实占用记录（10MB，不是 1MB）",
       inst.logs.some((l) => /剩余 10MB/.test(l)), inst.logs.join(" | "));
+  }
+
+  console.log("-- 清理安全闸：只删本插件自己的普通文件 --");
+  {
+    const today = todayName();
+    const inst = createInstance([
+      { name: "observe-20200101.jsonl", mb: 5, ageMs: old, symlink: true },
+      { name: "observe-20200102.jsonl", mb: 5, ageMs: old, dir: true },
+      { name: "main.log", mb: 30, ageMs: old },          // 活动日志，受保护
+      { name: "observe-20200103.jsonl", mb: 30, ageMs: old },
+      { name: "user-data.txt", mb: 100, ageMs: old },    // 非本插件文件
+      { name: "settings.json", mb: 100, ageMs: old },    // 设置文件
+      { name: today, mb: 5, ageMs: 1000 },               // 今天活动 observe
+    ]);
+    inst.collect({ collectSec: 5, logMaxMB: 5 });
+    await wait(20);
+    check("符号链接不删", inst.files.has("observe-20200101.jsonl"));
+    check("目录不删", inst.files.has("observe-20200102.jsonl"));
+    check("活动 main.log 不删", inst.files.has("main.log"));
+    check("今天活动 observe 不删", inst.files.has(today));
+    check("白名单里的旧 observe 才删", !inst.files.has("observe-20200103.jsonl"));
+    check("用户文件 / 设置文件不动",
+      inst.files.has("user-data.txt") && inst.files.has("settings.json"));
+    check("只删白名单旧文件（旧 observe / 轮转归档），不误删其它",
+      inst.unlinked.includes("observe-20200103.jsonl")
+      && inst.unlinked.every((n) => n === "observe-20200103.jsonl" || n === "main.log.1")
+      && !inst.unlinked.includes("main.log")
+      && inst.files.has(today)
+      && inst.files.has("user-data.txt") && inst.files.has("settings.json"),
+      JSON.stringify(inst.unlinked));
   }
 
   console.log("-- 默认预算 50MB --");

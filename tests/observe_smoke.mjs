@@ -86,7 +86,13 @@ function makeEl(tag) {
       return el.children.some((c) => c && typeof c.contains === "function" && c.contains(x));
     },
     getBoundingClientRect() { return { ...el._rect }; },
-    querySelectorAll() { return []; },
+    // v0.3.2：按会话统计子树节点/挂载 turn 时用；真实 DOM 是 HTMLCollection，
+    // 这里只要 length 与逐项 getAttribute 可用即可。
+    getElementsByTagName() { return el._all || []; },
+    querySelectorAll(sel) {
+      return String(sel).includes("data-v4-turn-unit") ? (el._turns || []) : [];
+    },
+    checkVisibility() { return el._visible !== false; },
     focus() {},
     click() { (el._listeners.click || []).forEach((fn) => fn({ target: el })); },
   };
@@ -150,6 +156,14 @@ function makeStore() {
     loadOlder() {
       this.loadOlderHits = (this.loadOlderHits || 0) + 1;
       if (this.loadOlderThrow) throw new Error("sync-boom");
+      // v0.3.2：模拟宿主 loadOlder 往 rows.window 追加一页，用于验证
+      // rowsBefore/rowsAfter 只读长度、不读内容。
+      if (this.loadOlderGrow) {
+        const w = this.state.snapshot.rows.window;
+        const n = this.loadOlderGrow;
+        this.loadOlderGrow = 0;
+        for (let i = 0; i < n; i++) w.push({ rowId: "g" + i });
+      }
       const p = this.loadOlderFail
         ? Promise.reject(new Error("async-boom"))
         : Promise.resolve({ status: "hydrated", who: this.marker || "", n: this.loadOlderHits });
@@ -178,6 +192,24 @@ const anchor = makeEl("div");
 anchor.setAttribute("data-projection-seq", "1");
 anchor.setAttribute("data-session-id", "sess_test_123");
 anchor.setAttribute("data-testid", "workspace-main");
+
+// ---------- v0.3.2：第二个会话 pane（默认不挂进 DOM 列表，测试中再 push） ----------
+function makeSubtree(n, turns) {
+  return Array.from({ length: n }, (_, i) => {
+    const e = makeEl("span");
+    if (i < turns) e.setAttribute("data-v4-turn-unit", "true");
+    return e;
+  });
+}
+anchor._all = makeSubtree(80, 2);
+anchor._visible = true;
+const paneB = makeEl("div");
+paneB.setAttribute("data-session-id", "sess_b");
+paneB._rect = { left: 0, top: 0, right: 1440, bottom: 900, width: 1440, height: 900 };
+paneB._all = makeSubtree(120, 3);
+paneB._visible = true;
+const sessionPaneList = [anchor];
+let sessionQueryCount = 0;
 // 模拟真实宿主形状：store 不在 memoizedProps 顶层，而是在 hook 链表的
 // memoizedState.binding.lease.store 上（三审 P0-1 的现场）。
 anchor["__reactFiber$test"] = {
@@ -188,7 +220,11 @@ anchor["__reactFiber$test"] = {
   },
   return: null,
 };
-documentStub.querySelectorAll = (sel) => (String(sel).includes("data-projection-seq") ? [anchor] : []);
+documentStub.querySelectorAll = (sel) => {
+  if (String(sel).includes("data-projection-seq")) return [anchor];
+  if (String(sel).includes("data-session-id")) { sessionQueryCount++; return sessionPaneList; }
+  return [];
+};
 
 // ---------- 其它全局 ----------
 globalThis.window = globalThis;
@@ -210,7 +246,34 @@ function driveFrame(t) {
   const cb = rafCb;
   if (typeof cb === "function") cb(t === undefined ? performance.now() : t);
 }
-globalThis.MutationObserver = class { observe() {} disconnect() {} };
+// v0.3.2：MutationObserver 要能手动触发，验证按 sid 的提交归因。
+// 同一 target 重复 observe 只保留一份（与浏览器语义一致），避免测试把
+// "重复观察"误判成两次提交。
+const moInstances = [];
+globalThis.MutationObserver = class {
+  constructor(cb) { this.cb = cb; this.targets = []; moInstances.push(this); }
+  observe(target, opts) {
+    const hit = this.targets.find((t) => t.target === target);
+    if (hit) hit.opts = opts || {};
+    else this.targets.push({ target, opts: opts || {} });
+  }
+  disconnect() { this.targets = []; }
+};
+function fireMutation(target, name, oldValue) {
+  for (const inst of moInstances) {
+    if (!inst.targets.some((t) => t.target === target)) continue;
+    inst.cb([{ type: "attributes", target, attributeName: name, oldValue }], inst);
+  }
+}
+// 真实宿主的 seq 每次提交都会变成新值；测试默认模拟“真的变化”，
+// 另留 fireMutation 给“同值重写”这类回归用例。
+function fireAttr(target, name) {
+  if (name === "data-projection-seq") {
+    const cur = Number(target.getAttribute(name) || 0);
+    target.setAttribute(name, String((Number.isFinite(cur) ? cur : 0) + 1));
+  }
+  fireMutation(target, name);
+}
 // long-animation-frame 也是 PerformanceObserver：记录 observe/disconnect 次数，
 // 验证「关掉滚动诊断 / 一键还原」真的断开了观察器，而不是只把输出字段置 null。
 const perfCalls = { observe: 0, disconnect: 0 };
@@ -282,6 +345,7 @@ documentStub.querySelector = (sel) =>
   (String(sel).includes("chat-composer-input-surface") ? surface : null);
 documentStub.querySelectorAll = (sel) => {
   if (String(sel).includes("data-projection-seq")) return [anchor];
+  if (String(sel).includes("data-session-id")) { sessionQueryCount++; return sessionPaneList; }
   if (String(sel).includes("chat-composer-input-surface")) return [surface];
   return [];
 };
@@ -371,13 +435,15 @@ check("分享流程放行全量补拉", passRes && passRes.status === "hydrated"
   `status=${passRes && passRes.status} calls=${store.loadAllCalls}`);
 
 console.log("-- O1 滚动诊断：loadOlder 只观测，不改语义 --");
-check("loadOlder 已被包装（原型上有 __lagfixLoadOlder）", !!proto.__lagfixLoadOlder);
+check("loadOlder 已被包装（主 store 实例上有 __lagfixLoadOlder）", !!store.__lagfixLoadOlder);
 check("包装保存了原始 loadOlder",
-  typeof (proto.__lagfixLoadOlder || {}).orig === "function");
+  (store.__lagfixLoadOlder || {}).orig === origLoadOlderRef);
+check("共享原型没有被改动（隐藏会话的 loadOlder 不受影响）",
+  proto.__lagfixLoadOlder === undefined && proto.loadOlder === origLoadOlderRef);
 
 const callsBefore = scrollOf().loadOlderCalls;
 store.marker = "A";
-const pRet = proto.loadOlder.call(store);
+const pRet = store.loadOlder();
 check("返回的是原 promise（不是 .then 包出来的新 promise）",
   pRet === store.lastLoadOlderPromise, `same=${pRet === store.lastLoadOlderPromise}`);
 const okRes = await pRet;
@@ -392,7 +458,7 @@ check("成功调用记下了耗时（P95 为数值）",
 
 store.loadOlderFail = true;
 let rejected = false;
-try { await proto.loadOlder.call(store); } catch (e) { rejected = true; }
+try { await store.loadOlder(); } catch (e) { rejected = true; }
 store.loadOlderFail = false;
 const afterFail = scrollOf();
 check("reject 原样抛给调用方（没被吞掉）", rejected);
@@ -400,7 +466,7 @@ check("失败计数 +1", afterFail.loadOlderErrors === 1, `errors=${afterFail.lo
 
 store.loadOlderThrow = true;
 let threw = false;
-try { proto.loadOlder.call(store); } catch (e) { threw = true; }
+try { store.loadOlder(); } catch (e) { threw = true; }
 store.loadOlderThrow = false;
 const afterThrow = scrollOf();
 check("同步异常原样抛出", threw);
@@ -411,8 +477,8 @@ check("同步异常也计入失败", afterThrow.loadOlderErrors === 2, `errors=$
 (window._listeners.storage || []).forEach((fn) => fn({ key: "lagfix.settings.v1" }));
 const beforeDbl = scrollOf().loadOlderCalls;
 const hitsBeforeDbl = store.loadOlderHits || 0;
-await proto.loadOlder.call(store);
-await proto.loadOlder.call(store);
+await store.loadOlder();
+await store.loadOlder();
 const afterDbl = scrollOf();
 check("重复 attach 不套两层（2 次调用 = 观测 +2 = 真实执行 +2）",
   afterDbl.loadOlderCalls === beforeDbl + 2 && (store.loadOlderHits || 0) === hitsBeforeDbl + 2,
@@ -421,7 +487,7 @@ check("重复 attach 不套两层（2 次调用 = 观测 +2 = 真实执行 +2）
 // 解构调用会丢 this：wrapper 必须让原实现的行为原样发生（不吞、不换成自己的错误）。
 // 原方法是严格函数，`this === undefined` 时读 this.loadOlderHits 会抛 TypeError；
 // 关键是 wrapper 与未包装时的**结果一致**——同样抛、同样的错误文案。
-const detached = proto.loadOlder;
+const detached = store.loadOlder;
 let detachedErr = null;
 try { await detached(); } catch (e) { detachedErr = e; }
 let origDetachedErr = null;
@@ -563,7 +629,9 @@ const perfDisconnectsBeforeDiagOff = perfCalls.disconnect;
 writeSettings({ scrollDiagOn: false });
 const offDiag = JSON.parse(window.__lagfixCollect());
 check("scrollDiagOn=false 时 scroll 为 null", offDiag.scroll === null);
-check("关闭后 loadOlder 恢复原方法", proto.loadOlder === origLoadOlderRef);
+check("关闭后 loadOlder 恢复原方法",
+  store.loadOlder === origLoadOlderRef && !Object.prototype.hasOwnProperty.call(store, "loadOlder"));
+check("关闭后主 store 上的包装标记已删除", !store.__lagfixLoadOlder);
 check("关闭后 __lagfixLoadOlder 标记已删除", !proto.__lagfixLoadOlder);
 check("关闭滚动诊断会断开 long-animation-frame 观察器",
   perfCalls.disconnect > perfDisconnectsBeforeDiagOff,
@@ -574,7 +642,7 @@ check("只关诊断时遮罩仍然工作", docEl.getAttribute("data-lagfix-scrol
 await wait(220);
 
 writeSettings({ scrollDiagOn: true });
-check("重新开启后 loadOlder 再次被包装", !!proto.__lagfixLoadOlder);
+check("重新开启后 loadOlder 再次被包装", !!store.__lagfixLoadOlder);
 
 console.log("-- 关闭遮罩开关：滚动中立刻移除 --");
 writeSettings({ maskOffOnScroll: false });
@@ -647,10 +715,16 @@ writeSettings({ observe: false });
 const pausedPayload = JSON.parse(window.__lagfixCollect());
 check("paused payload 的 scroll 为 null", pausedPayload.scroll === null);
 check("paused payload 的 input 为 null", pausedPayload.input === null);
+check("paused payload 的 sessions 为 null", pausedPayload.sessions === null,
+  `sessions=${JSON.stringify(pausedPayload.sessions)}`);
+check("paused payload 的 loadOlderDetail 为 null", pausedPayload.loadOlderDetail === null,
+  `detail=${JSON.stringify(pausedPayload.loadOlderDetail)}`);
 writeSettings({ observe: true });
 const resumedScroll = JSON.parse(window.__lagfixCollect()).scroll;
 check("恢复观测后 scroll 回到对象",
   resumedScroll && typeof resumedScroll === "object", JSON.stringify(resumedScroll));
+check("恢复观测后 sessions 回到数组",
+  Array.isArray(JSON.parse(window.__lagfixCollect()).sessions));
 // 暂停前挂起的旧 rAF 回调在恢复后不能再记账（否则隐藏窗口会留下两条自续链）。
 const framesBeforeOldChain = window.__lagfixDiag().frameSamples;
 rafBeforePause(performance.now() + 16);
@@ -663,14 +737,355 @@ check("恢复后新 rAF 链继续采样",
   window.__lagfixDiag().frameSamples === framesBeforeOldChain + 1,
   `frames=${window.__lagfixDiag().frameSamples}`);
 
-console.log("-- 角标可见性：设置页 / 被遮挡 / 多个输入框 --");
-const badgeClick = (badge._listeners.click || [])[0];
+console.log("-- v0.3.2 多会话归因：按 sid 分桶 --");
+const sessionsOf = () => {
+  const v = collect().sessions;
+  return Array.isArray(v) ? v : [];
+};
+const detailOf = () => {
+  const v = collect().loadOlderDetail;
+  return Array.isArray(v) ? v : [];
+};
+const bySid = (list, sid) => list.find((b) => b && b.sid === sid) || {};
+
+// 让第二个会话 pane 出现在 DOM；下一次 collect 会触发 pane 发现。
+sessionPaneList.push(paneB);
+let sess = sessionsOf();
+check("sessionDiagOn 默认开，sessions 是数组", Array.isArray(collect().sessions),
+  `type=${typeof collect().sessions}`);
+check("发现两个会话桶", sess.length === 2, `n=${sess.length}`);
+const a0 = bySid(sess, "sess_test_123");
+const b0 = bySid(sess, "sess_b");
+check("A 桶存在且可见", a0.sid === "sess_test_123" && a0.visible === true, JSON.stringify(a0));
+check("B 桶存在且可见", b0.sid === "sess_b" && b0.visible === true, JSON.stringify(b0));
+check("A/B 的 DOM 计数独立（含 pane 根）", a0.dom === 81 && b0.dom === 121,
+  `A=${a0.dom} B=${b0.dom}`);
+check("A/B 的挂载 turn 独立", a0.mountedTurns === 2 && b0.mountedTurns === 3,
+  `A=${a0.mountedTurns} B=${b0.mountedTurns}`);
+
+// 可见性翻转：隐藏 pane 仍保留桶，但 visible=false。
+anchor._visible = false;
+sess = sessionsOf();
+check("隐藏 pane 标记 visible=false", bySid(sess, "sess_test_123").visible === false,
+  JSON.stringify(bySid(sess, "sess_test_123")));
+check("另一个 pane 仍 visible=true", bySid(sess, "sess_b").visible === true);
+anchor._visible = true;
+
+// 提交归因：一次 seq 变化只进对应 sid 的桶。
+collect();   // 清掉启动以来的 frames（采样间隔通常已 >1s）
+fireAttr(anchor, "data-projection-seq");
+fireAttr(anchor, "data-projection-seq");
+fireAttr(paneB, "data-projection-seq");
+let sess1 = sessionsOf();
+check("A 的提交只进 A 桶", bySid(sess1, "sess_test_123").frames === 2,
+  `A=${bySid(sess1, "sess_test_123").frames}`);
+check("B 的提交只进 B 桶", bySid(sess1, "sess_b").frames === 1,
+  `B=${bySid(sess1, "sess_b").frames}`);
+await wait(1100);
+let sess2 = sessionsOf();
+check("采样间隔 >=1s 时给出 commitRate",
+  typeof bySid(sess2, "sess_test_123").commitRate === "number",
+  `rate=${bySid(sess2, "sess_test_123").commitRate}`);
+check("commitRate 数值合理（>0）", bySid(sess2, "sess_test_123").commitRate > 0,
+  `rate=${bySid(sess2, "sess_test_123").commitRate}`);
+
+// 隐藏 pane 的提交仍然计数（这正是“谁在后台拖”的证据）。
+paneB._visible = false;
+fireAttr(paneB, "data-projection-seq");
+let sess3 = sessionsOf();
+check("隐藏 pane 的提交仍进入该桶", bySid(sess3, "sess_b").frames >= 1,
+  `B=${bySid(sess3, "sess_b").frames}`);
+check("隐藏 pane 的 visible 仍为 false", bySid(sess3, "sess_b").visible === false);
+paneB._visible = true;
+
+// 按会话滚动 P95：只有发生滚动的 pane 有值。
+const timelineB = makeEl("div");
+timelineB.setAttribute("data-v4-timeline-scroll", "true");
+timelineB.closest = (sel) => (String(sel).includes("data-session-id") ? paneB : null);
+const scrollLive = () => (documentStub._listeners.scroll || []);
+scrollLive().forEach((fn) => fn({ target: timelineB }));
+await wait(10);
+driveFrame(performance.now());
+let sess4 = sessionsOf();
+check("B 的时间线滚动进入 B 的 scrollP95",
+  typeof bySid(sess4, "sess_b").scrollP95 === "number",
+  `B=${bySid(sess4, "sess_b").scrollP95}`);
+check("没有滚动的 A 不产生 scrollP95",
+  bySid(sess4, "sess_test_123").scrollP95 === null,
+  `A=${bySid(sess4, "sess_test_123").scrollP95}`);
+
+// 只开多会话归因（滚动诊断关闭）时，会话滚动仍要记录。
+writeSettings({ scrollDiagOn: false });
+scrollLive().forEach((fn) => fn({ target: timelineB }));
+await wait(10);
+driveFrame(performance.now());
+const sessOnly = sessionsOf();
+check("只开多会话归因时仍记录会话滚动",
+  typeof bySid(sessOnly, "sess_b").scrollP95 === "number",
+  `B=${bySid(sessOnly, "sess_b").scrollP95}`);
+writeSettings({ scrollDiagOn: true });
+
+// 关闭开关：sessions=null，且不再遍历会话 pane。
+const qBeforeOff = sessionQueryCount;
+writeSettings({ sessionDiagOn: false });
+let offSess = collect();
+check("sessionDiagOn=false 时 sessions 为 null", offSess.sessions === null,
+  `sessions=${JSON.stringify(offSess.sessions)}`);
+check("关闭后不再遍历会话 pane", sessionQueryCount === qBeforeOff,
+  `${qBeforeOff} -> ${sessionQueryCount}`);
+check("关闭后桶与观察目标已释放", window.__lagfixDiag().sessionBuckets === 0
+  && window.__lagfixDiag().sessionPanes === 0,
+  JSON.stringify(window.__lagfixDiag()));
+
+// 重新开启：桶重建，且一次提交只 +1（没有重复观察）。
+writeSettings({ sessionDiagOn: true });
+let onSess = sessionsOf();
+check("重新开启后桶重建", onSess.length >= 2, `n=${onSess.length}`);
+const framesABefore = bySid(onSess, "sess_test_123").frames || 0;
+fireAttr(anchor, "data-projection-seq");
+let onSess2 = sessionsOf();
+check("重新开启后一次提交只 +1（没有重复观察）",
+  (bySid(onSess2, "sess_test_123").frames || 0) === framesABefore + 1,
+  `before=${framesABefore} after=${bySid(onSess2, "sess_test_123").frames}`);
+
+// 同值 seq 重写不能计提交（与全局 frames 口径一致）。
+const sameBefore = bySid(sessionsOf(), "sess_test_123").frames || 0;
+fireMutation(anchor, "data-projection-seq");
+const sameAfter = bySid(sessionsOf(), "sess_test_123").frames || 0;
+check("同值 data-projection-seq 重写不计提交", sameAfter === sameBefore,
+  `before=${sameBefore} after=${sameAfter}`);
+
+// pane 卸载后桶保留但归零；重新挂回后恢复。
+sessionsOf();   // 确保 B 桶已建立
+sessionPaneList.splice(sessionPaneList.indexOf(paneB), 1);
+const unloaded = bySid(sessionsOf(), "sess_b");
+check("pane 卸载后桶保留但 visible=false、dom=0",
+  unloaded.sid === "sess_b" && unloaded.visible === false && unloaded.dom === 0,
+  JSON.stringify(unloaded));
+sessionPaneList.push(paneB);
+const remounted = bySid(sessionsOf(), "sess_b");
+check("pane 重新挂回后 DOM/turn 立即补采",
+  remounted.visible === true && remounted.dom > 0,
+  JSON.stringify(remounted));
+
+// 6 个常驻 pane：只保留 5 个桶，且不能在每轮 collect 时轮换。
+const extraPanes = ["sess_c", "sess_d", "sess_e", "sess_f"].map((sid) => {
+  const p = makeEl("div");
+  p.setAttribute("data-session-id", sid);
+  p._visible = true;
+  p._rect = { left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600 };
+  p._all = makeSubtree(4, 1);
+  return p;
+});
+extraPanes.forEach((p) => sessionPaneList.push(p));
+const sidSet = (list) => list.map((b) => b.sid).sort().join(",");
+const cap1 = sessionsOf();
+const capSids1 = sidSet(cap1);
+const capSids2 = sidSet(sessionsOf());
+check("6 个 pane 时最多 5 个桶", cap1.length === 5, `n=${cap1.length}`);
+check("连续 collect 的桶集合稳定（不周期性轮换）",
+  capSids1 === capSids2, `${capSids1} -> ${capSids2}`);
+const cappedSids = capSids1.split(",");
+const missingSid = extraPanes
+  .map((p) => p.getAttribute("data-session-id"))
+  .find((sid) => !cappedSids.includes(sid));
+const missingPane = extraPanes
+  .find((p) => p.getAttribute("data-session-id") === missingSid);
+check("第六个空闲 pane 先不建桶", !!missingSid && !!missingPane, `missing=${missingSid}`);
+fireAttr(missingPane, "data-projection-seq");
+const cap3 = sessionsOf();
+check("第六个 pane 有真实提交后接管名额",
+  cap3.length === 5 && cap3.some((b) => b.sid === missingSid),
+  `sids=${sidSet(cap3)}`);
+
+// 同值 sid 重写既不是切换也不是活跃；满 5 桶时不能借此给额外 pane 抢名额。
+const paneExtra = makeEl("div");
+paneExtra.setAttribute("data-session-id", "sess_extra");
+paneExtra._visible = true;
+paneExtra._rect = { left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600 };
+paneExtra._all = makeSubtree(2, 1);
+sessionPaneList.push(paneExtra);
+sessionsOf();   // 满 5 桶，额外 pane 只观察不建桶
+const extraBefore = sidSet(sessionsOf());
+fireMutation(paneExtra, "data-session-id", "sess_extra");
+check("同值 data-session-id 重写不建桶、不淘汰",
+  sidSet(sessionsOf()) === extraBefore && !sidSet(sessionsOf()).includes("sess_extra"),
+  `${extraBefore} -> ${sidSet(sessionsOf())}`);
+// 切成 draft 也不是真实活动：满 5 桶时不能把真实会话挤掉。
+paneExtra.setAttribute("data-session-id", "draft");
+fireMutation(paneExtra, "data-session-id", "sess_extra");
+check("满 5 桶时 SID→draft 不淘汰真实桶",
+  sidSet(sessionsOf()) === extraBefore,
+  `${extraBefore} -> ${sidSet(sessionsOf())}`);
+
+// 未入桶的额外 pane 同值 seq 重写：不能建桶、计帧或淘汰真实桶。
+const paneSeqExtra = makeEl("div");
+paneSeqExtra.setAttribute("data-session-id", "sess_seq_extra");
+paneSeqExtra.setAttribute("data-projection-seq", "5");
+paneSeqExtra._visible = true;
+paneSeqExtra._rect = { left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600 };
+paneSeqExtra._all = makeSubtree(2, 1);
+sessionPaneList.push(paneSeqExtra);
+sessionsOf();
+const seqExtraBefore = sidSet(sessionsOf());
+fireMutation(paneSeqExtra, "data-projection-seq", "5");
+check("未入桶 pane 的同值 seq 不建桶、不淘汰",
+  sidSet(sessionsOf()) === seqExtraBefore
+    && !sidSet(sessionsOf()).includes("sess_seq_extra"),
+  `${seqExtraBefore} -> ${sidSet(sessionsOf())}`);
+
+// 已跟踪的真实会话切到另一个真实会话：即使满 5 桶也要换桶（当前主 pane 不能缺席）。
+missingPane.setAttribute("data-session-id", "sess_switched");
+fireMutation(missingPane, "data-session-id", missingSid);
+const switchedSids = sidSet(sessionsOf());
+check("满 5 桶时已跟踪 pane 切到真实会话仍建桶",
+  switchedSids.split(",").includes("sess_switched") && switchedSids.split(",").length === 5,
+  `sids=${switchedSids}`);
+
+// 占位 draft → 真实 sid：旧占位桶必须删除，不能占名额。
+sessionPaneList.length = 0;
+sessionPaneList.push(anchor, paneB);
+const paneDraft = makeEl("div");
+paneDraft.setAttribute("data-session-id", "draft");
+paneDraft._visible = true;
+paneDraft._rect = { left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600 };
+paneDraft._all = makeSubtree(2, 1);
+sessionPaneList.push(paneDraft);
+writeSettings({ sessionDiagOn: false });
+writeSettings({ sessionDiagOn: true });
+sessionsOf();
+check("draft pane 有独立占位桶",
+  sessionsOf().some((b) => b.sid === "draft"), `sids=${sidSet(sessionsOf())}`);
+paneDraft.setAttribute("data-session-id", "sess_real");
+fireMutation(paneDraft, "data-session-id");
+const draftAfter = sessionsOf();
+check("draft→真实 sid 后占位桶被删除",
+  !draftAfter.some((b) => b.sid === "draft"), `sids=${sidSet(draftAfter)}`);
+check("真实 sid 接管同一 pane",
+  draftAfter.some((b) => b.sid === "sess_real" && b.visible === true),
+  `sids=${sidSet(draftAfter)}`);
+sessionPaneList.splice(sessionPaneList.indexOf(paneDraft), 1);
+
+console.log("-- v0.3.2 loadOlder 明细：耗时/行数/触发来源 --");
+// 清空明细并重置触发判定：关/开滚动诊断。
+writeSettings({ scrollDiagOn: false });
+check("scrollDiagOn=false 时 loadOlderDetail 为 null",
+  collect().loadOlderDetail === null,
+  `detail=${JSON.stringify(collect().loadOlderDetail)}`);
+writeSettings({ scrollDiagOn: true });
+collect();
+check("重新开启后明细是空数组",
+  Array.isArray(collect().loadOlderDetail) && detailOf().length === 0,
+  `n=${detailOf().length}`);
+
+// 暂停期间不累计 loadOlder 明细/calls；lastActive 不被暂停时刻改写。
+const pauseDetailBefore = window.__lagfixDiag().loadOlderDetail;
+const pauseCallsBefore = window.__lagfixDiag().loadOlderCalls;
+const pauseActiveBefore = bySid(sessionsOf(), "sess_b").lastActive;
+writeSettings({ observe: false });
+await store.loadOlder();
+await store.loadOlder();
+check("暂停期间 loadOlder 不累计明细",
+  window.__lagfixDiag().loadOlderDetail === pauseDetailBefore,
+  `before=${pauseDetailBefore} after=${window.__lagfixDiag().loadOlderDetail}`);
+check("暂停期间 loadOlder 不累计 calls",
+  window.__lagfixDiag().loadOlderCalls === pauseCallsBefore,
+  `before=${pauseCallsBefore} after=${window.__lagfixDiag().loadOlderCalls}`);
+writeSettings({ observe: true });
+check("暂停不改写 lastActive（暂停不是活跃）",
+  bySid(sessionsOf(), "sess_b").lastActive === pauseActiveBefore,
+  `before=${pauseActiveBefore} after=${bySid(sessionsOf(), "sess_b").lastActive}`);
+
+// 行数变化 + initial：无滚动、包装后第一次调用。
+store.state.snapshot.rows.window = new Array(60).fill(0);
+store.loadOlderGrow = 60;
+await store.loadOlder();
+store.loadOlderGrow = 0;
+let d1 = detailOf();
+const e1 = d1[d1.length - 1] || {};
+check("成功调用写入明细", e1.ok === true, JSON.stringify(e1));
+check("明细记录 rowsBefore/rowsAfter", e1.rowsBefore === 60 && e1.rowsAfter === 120,
+  `before=${e1.rowsBefore} after=${e1.rowsAfter}`);
+check("无滚动、首次调用判为 initial", e1.trigger === "initial", `trigger=${e1.trigger}`);
+check("明细不记录正文/消息 id/sid",
+  !("text" in e1) && !("messages" in e1) && !("sid" in e1), JSON.stringify(e1));
+check("明细未变化时样本只带空数组（避免日志膨胀）",
+  Array.isArray(collect().loadOlderDetail) && collect().loadOlderDetail.length === 0,
+  `detail=${JSON.stringify(collect().loadOlderDetail)}`);
+
+// scroll 触发：滚动后 2s 内调用。
+const timelineA = makeEl("div");
+timelineA.setAttribute("data-v4-timeline-scroll", "true");
+timelineA.closest = (sel) => (String(sel).includes("data-session-id") ? anchor : null);
+scrollLive().forEach((fn) => fn({ target: timelineA }));
+await wait(5);
+await store.loadOlder();
+let e2 = detailOf().slice(-1)[0] || {};
+check("滚动后 2s 内调用判为 scroll", e2.trigger === "scroll", `trigger=${e2.trigger}`);
+
+// unknown：无近期滚动、非首次、距挂载 >5s。
+// 用 performance.now 偏移模拟 5.1s，不拖慢测试；调用后立即还原。
+const realPerfNow = performance.now;
+performance.now = () => realPerfNow() + 5100;
+try {
+  await store.loadOlder();
+} finally {
+  performance.now = realPerfNow;
+}
+let e3 = detailOf().slice(-1)[0] || {};
+check("无近期滚动、非首次、距挂载 >5s 判为 unknown",
+  e3.trigger === "unknown", `trigger=${e3.trigger}`);
+
+// reject / 同步抛错也要留下 ok=false 明细，且原异常对象/原因不能被替换。
+store.loadOlderFail = true;
+let failErr = null;
+try { await store.loadOlder(); } catch (e) { failErr = e; }
+store.loadOlderFail = false;
+let eFail = detailOf().slice(-1)[0] || {};
+check("reject 写入 ok=false 明细", eFail.ok === false, JSON.stringify(eFail));
+check("reject 原因原样保留", !!failErr && failErr.message === "async-boom",
+  String(failErr && failErr.message));
+store.loadOlderThrow = true;
+let throwErr = null;
+try { store.loadOlder(); } catch (e) { throwErr = e; }
+store.loadOlderThrow = false;
+let eThrow = detailOf().slice(-1)[0] || {};
+check("同步抛错写入 ok=false 明细", eThrow.ok === false, JSON.stringify(eThrow));
+check("同步抛错对象原样保留", !!throwErr && throwErr.message === "sync-boom",
+  String(throwErr && throwErr.message));
+
+// 环形窗口上限 10，且淘汰的是最旧记录。
+writeSettings({ scrollDiagOn: false });
+writeSettings({ scrollDiagOn: true });
+collect();
+const capBase = Date.now() + 60000;
+const capRealDateNow = Date.now;
+let capTick = capBase;
+Date.now = () => capTick;
+try {
+  for (let i = 0; i < 12; i++) {
+    capTick += 1000;
+    await store.loadOlder();
+  }
+} finally {
+  Date.now = capRealDateNow;
+}
+let dcap = detailOf();
+check("明细最多保留最近 10 次", dcap.length === 10, `n=${dcap.length}`);
+check("明细上限淘汰最旧两条", dcap[0].t === capBase + 3000 && dcap[9].t === capBase + 12000,
+  `first=${dcap[0].t} last=${dcap[9].t} base=${capBase}`);
+store.state.snapshot.rows.window = [{ rowId: 1 }];   // 还原，避免影响后续断言
+
+console.log("-- 角标可见性：设置页 / 被遮挡 / 多个输入框 --");const badgeClick = (badge._listeners.click || [])[0];
 check("角标绑定了 click", typeof badgeClick === "function");
 
+let hostPopovers = [];
 function setSurfaces(list) {
   documentStub.querySelectorAll = (sel) => {
     if (String(sel).includes("data-projection-seq")) return [anchor];
+    if (String(sel).includes("data-session-id")) { sessionQueryCount++; return sessionPaneList; }
     if (String(sel).includes("chat-composer-input-surface")) return list;
+    if (String(sel).includes("hover-card-content")) return hostPopovers;
     return [];
   };
   documentStub.querySelector = (sel) => {
@@ -791,6 +1206,24 @@ await wait(1100);
 check("额度横幅压到角标带时，让到横幅上沿（top=408）",
   badge.style.display === "" && badge.style.top === "408px",
   `display=${badge.style.display} top=${badge.style.top}`);
+
+console.log("-- 宿主浮层（上下文容量等）：角标不压面板 --");
+// 上下文容量是 Radix HoverCard 的 body 级 portal，不在 composer 兄弟链里；
+// 之前的 dock 扫描看不到它，角标会直接盖在面板上。
+const hostPopover = makeEl("div");
+hostPopover._rect = { left: 550, top: 300, right: 920, bottom: 490, width: 370, height: 190 };
+hostPopovers = [hostPopover];
+setSurfaces([mainSurface]);
+documentStub.elementFromPoint = () => mainSurface;
+await wait(1100);
+check("宿主浮层压到角标带时让到浮层上沿（top=268）",
+  badge.style.display === "" && badge.style.top === "268px",
+  `display=${badge.style.display} top=${badge.style.top}`);
+hostPopover._rect = { left: 550, top: 20, right: 920, bottom: 490, width: 370, height: 190 };
+await wait(1100);
+check("宿主浮层顶到视口顶端时角标隐藏", badge.style.display === "none",
+  `display=${badge.style.display} top=${badge.style.top}`);
+hostPopovers = [];
 // 恢复 fallback 语义：不删掉 closest/兄弟节点，后面的用例会误走 dock 分支。
 delete dockSurface.closest;
 delete dockSurface.previousElementSibling;
@@ -855,10 +1288,11 @@ check("性能页按 渲染 / 历史 / 滚动 三组展示",
 check("旧行名已消失",
   ["订阅通知节流", "节流窗口", "自适应窗口", "切会话冷静期", "后台降频", "大会话保护"]
     .every((t) => !panelText.includes(t)));
-check("观测页含「滚动诊断」「输入延迟」",
-  panelText.includes("滚动诊断") && panelText.includes("输入延迟"));
+check("观测页含「滚动诊断」「输入延迟」「多会话归因」",
+  panelText.includes("滚动诊断") && panelText.includes("输入延迟")
+  && panelText.includes("多会话归因"));
 check("A8：面板不再提供「显示角标」开关", !panelText.includes("显示角标"));
-check("面板版本行是 v0.3.1", panelText.includes("v0.3.1"));
+check("面板版本行是 v0.3.2", panelText.includes("v0.3.2"));
 check("面板不再出现版本号式标题", !panelText.includes("v0.3 性能增强"));
 check("维护页写明日志路径与上限",
   panelText.includes("日志存储路径") && panelText.includes("日志上限"));
@@ -951,14 +1385,24 @@ check("另一窗口改 badgeText 后本窗口收敛", ps.settings.badgeText === 
 console.log("-- 换 store 实现（新原型）--");
 const s3 = makeStore();
 const s3OrigLoadOlder = s3.proto.loadOlder;   // 换原型后被包装的应还原成这个引用
+const detailBeforeSwitch = window.__lagfixDiag().loadOlderDetail;
+check("换 store 前明细环非空（前置条件）", detailBeforeSwitch > 0,
+  `n=${detailBeforeSwitch}`);
 anchor["__reactFiber$test"].memoizedState.memoizedState.binding.lease.store = s3.store;
 await wait(5200);   // 等看门狗（5s）重新核对目标
 check("新原型的 store 被自动包装", !!s3.proto.__lagfixThrottle);
 check("旧原型已还原（不再残留包装）", !proto.__lagfixThrottle);
 check("大会话保护跟着换到新原型", !!s3.proto.__lagfixLoadAll);
 check("旧原型的补拉保护已还原", proto.loadAllOlder === origLoadAllRef);
-check("loadOlder 观测跟着换到新原型", !!s3.proto.__lagfixLoadOlder);
-check("旧原型的 loadOlder 观测已还原", proto.loadOlder === origLoadOlderRef);
+check("loadOlder 观测跟着换到当前 store 实例", !!s3.store.__lagfixLoadOlder);
+check("loadOlder 不再写共享原型", s3.proto.__lagfixLoadOlder === undefined
+  && s3.proto.loadOlder === s3OrigLoadOlder);
+check("旧 store 实例的 loadOlder 观测已还原",
+  store.loadOlder === origLoadOlderRef
+    && !Object.prototype.hasOwnProperty.call(store, "loadOlder"));
+check("换 store 后旧会话补页明细不混入新会话",
+  window.__lagfixDiag().loadOlderDetail === 0,
+  `n=${window.__lagfixDiag().loadOlderDetail}`);
 
 console.log("-- 关闭后已订阅的 wrapper 立即直通 --");
 let dd = 0;
@@ -1005,16 +1449,26 @@ check("大赛话保护的标记已删除", !proto.__lagfixLoadAll);
 check("__lagfixOff 后滚动属性已移除",
   docEl.getAttribute("data-lagfix-scroll") === null,
   `attr=${docEl.getAttribute("data-lagfix-scroll")}`);
-check("__lagfixOff 后 loadOlder 观测已从当前原型还原",
-  s3.proto.loadOlder === s3OrigLoadOlder);
-check("__lagfixOff 后 loadOlder 标记已删除", !s3.proto.__lagfixLoadOlder);
+check("__lagfixOff 后 loadOlder 观测已从当前 store 实例还原",
+  s3.store.loadOlder === s3OrigLoadOlder
+    && !Object.prototype.hasOwnProperty.call(s3.store, "loadOlder"));
+check("__lagfixOff 后 loadOlder 标记已删除", !s3.store.__lagfixLoadOlder);
+check("__lagfixOff 后 sessions 为 null", collect().sessions === null,
+  `sessions=${JSON.stringify(collect().sessions)}`);
+check("__lagfixOff 后 loadOlderDetail 为 null", collect().loadOlderDetail === null,
+  `detail=${JSON.stringify(collect().loadOlderDetail)}`);
+check("__lagfixOff 清空会话桶与 pane 映射", window.__lagfixDiag().sessionBuckets === 0
+  && window.__lagfixDiag().sessionPanes === 0,
+  `buckets=${window.__lagfixDiag().sessionBuckets} panes=${window.__lagfixDiag().sessionPanes}`);
+check("__lagfixOff 清空 loadOlder 明细", window.__lagfixDiag().loadOlderDetail === 0);
 
 const saved = JSON.parse(localStorage.getItem("lagfix.settings.v1") || "{}");
 check("设置已持久化到独立 key", saved.throttleOn === false, JSON.stringify(saved).slice(0, 90));
 check("一键还原同时关掉大会话保护", saved.bigSessionOn === false);
-check("一键还原同时关掉滚动诊断/输入延迟/遮罩",
-  saved.scrollDiagOn === false && saved.inputLagOn === false && saved.maskOffOnScroll === false,
-  `scrollDiagOn=${saved.scrollDiagOn} inputLagOn=${saved.inputLagOn} mask=${saved.maskOffOnScroll}`);
+check("一键还原同时关掉滚动诊断/输入延迟/遮罩/多会话归因",
+  saved.scrollDiagOn === false && saved.inputLagOn === false && saved.maskOffOnScroll === false
+  && saved.sessionDiagOn === false,
+  `scrollDiagOn=${saved.scrollDiagOn} inputLagOn=${saved.inputLagOn} mask=${saved.maskOffOnScroll} session=${saved.sessionDiagOn}`);
 check("日志上限默认 50MB 并已持久化", saved.logMaxMB === 50, `logMaxMB=${saved.logMaxMB}`);
 check("没有污染宿主 localStorage 的其它 key",
   Object.keys(localStorage._d).every((k) => k === "lagfix.settings.v1"), Object.keys(localStorage._d).join(","));
@@ -1024,14 +1478,17 @@ console.log("-- __lagfixOff：补拉被拦过的历史 --");
 const beforeOffToggle = JSON.parse(localStorage.getItem("lagfix.settings.v1") || "{}");
 localStorage.setItem("lagfix.settings.v1",
   JSON.stringify({ ...beforeOffToggle, throttleOn: true, bigSessionOn: true,
-    scrollDiagOn: true, inputLagOn: true, maskOffOnScroll: true }));
+    scrollDiagOn: true, inputLagOn: true, maskOffOnScroll: true, sessionDiagOn: true }));
 onStorage({ key: "lagfix.settings.v1" });
 await wait(50);
 check("重新开启后大会话保护装到当前原型", !!s3.proto.__lagfixLoadAll);
-check("重新开启后 loadOlder 观测装到当前原型", !!s3.proto.__lagfixLoadOlder);
+check("重新开启后 loadOlder 观测装到当前 store 实例", !!s3.store.__lagfixLoadOlder);
 check("重新开启后 scroll 监听只挂一份",
   (documentStub._listeners.scroll || []).length === 1,
   `count=${(documentStub._listeners.scroll || []).length}`);
+const reSess = JSON.parse(window.__lagfixCollect()).sessions;
+check("重新开启后多会话归因回到数组",
+  Array.isArray(reSess) && reSess.length >= 1, `sessions=${JSON.stringify(reSess)}`);
 check("重新开启后 pagehide 监听挂回来",
   (window._listeners.pagehide || []).length === 1,
   `count=${(window._listeners.pagehide || []).length}`);

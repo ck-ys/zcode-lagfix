@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * zcode-lagfix 主进程加载器 v0.3.1（观测 + 渲染通知节流 + 日志预算 + 检查更新）。
+ * zcode-lagfix 主进程加载器 v0.3.2（观测 + 渲染通知节流 + 日志预算 + 检查更新）。
  *
  * 由 app.asar 入口尾部的 dynamic import 加载（CommonJS）。
  * 职责：
@@ -246,16 +246,16 @@
   }
 
   // 观测日志保留 14 天：每 5s 一条 ≈ 8MB/天，不清会无声无息吃掉几百 MB。
-  // 只匹配本插件自己生成的文件名，任何其它文件一律不碰。
+  // 只匹配本插件自己生成的文件名；符号链接、目录、非普通文件一律跳过。
   function sweepOldLogs(days) {
     try {
       var cutoff = Date.now() - days * 86400000;
       fs.readdirSync(DATA_DIR).forEach(function (name) {
-        if (!/^observe-\d{8}\.jsonl(?:\.\d+)?$/.test(name)) return;
-        var f = path.join(DATA_DIR, name);
         try {
-          if (fs.statSync(f).mtimeMs < cutoff) {
-            fs.unlinkSync(f);
+          var rec = ownedLogStat(name);
+          if (!rec || isLiveLog(name)) return;
+          if (rec.st.mtimeMs < cutoff) {
+            fs.unlinkSync(rec.full);
             log("清理过期观测日志（超过 " + days + " 天）：" + name);
           }
         } catch (e) {}
@@ -269,9 +269,39 @@
   // elevated-finalize.log 由 tools/finalize_all_admin.py 以管理员身份写入同一目录，
   // 不纳入预算的话它会绕过 50MB 上限一直长（终审 P2）。
   var LOG_RE = /^(observe-\d{8}\.jsonl(?:\.\d+)?|(?:main|inject|monitor|install|hook-error|elevated-finalize)\.log(?:\.\d+)?)$/;
+  var LIVE_LOG_RE = /^(main|inject|monitor|install|hook-error|elevated-finalize)\.log$/;
   var curLogMaxMB = 50;
   var haveRendererSettings = false;   // 收到过 renderer 设置后才知道真实预算，之前不删日志
   var lastSweepAt = 0;
+
+  // 清理只允许操作「DATA_DIR 直接子项 + 本插件白名单文件名 + 普通文件」。
+  // 任何一步不满足就返回 null，调用方一律跳过：宁可超预算，也不误删。
+  function ownedLogPath(name) {
+    if (typeof name !== "string" || !LOG_RE.test(name)) return null;
+    var dir = path.resolve(DATA_DIR);
+    var full = path.resolve(dir, name);
+    if (path.dirname(full) !== dir) return null;   // 防目录穿越/多余路径段
+    return full;
+  }
+
+  // 当前正在写的文件不参与预算删除：
+  // - 今天的 observe-*.jsonl；
+  // - 未轮转的 main/inject/monitor/install/hook-error/elevated-finalize.log。
+  // 活动文件在 Windows 上通常删不掉，在 POSIX 上删掉也只是 unlink 活动 inode；
+  // 这里统一保守处理，只删旧 observe 与 .1/.2 归档。
+  function isLiveLog(name) {
+    return name === path.basename(logFilePath(Date.now())) || LIVE_LOG_RE.test(name);
+  }
+
+  function ownedLogStat(name) {
+    var full = ownedLogPath(name);
+    if (!full) return null;
+    // lstat 不跟随符号链接：链接本身、目录、设备文件一律不碰。
+    var st = fs.lstatSync(full);
+    if (!st || !st.isFile()) return null;
+    if (typeof st.isSymbolicLink === "function" && st.isSymbolicLink()) return null;
+    return { full: full, st: st };
+  }
 
   // 当前日志量与文件数（与 sweepByBudget 同一份白名单，口径一致）。
   // 随每次采集注入 renderer，维护页据此显示「当前 X MB / 上限 Y MB」。
@@ -280,11 +310,10 @@
     try {
       if (!ensureDataDir()) return out;
       fs.readdirSync(DATA_DIR).forEach(function (name) {
-        if (!LOG_RE.test(name)) return;
         try {
-          var st = fs.statSync(path.join(DATA_DIR, name));
-          if (!st.isFile()) return;
-          out.bytes += st.size;
+          var rec = ownedLogStat(name);
+          if (!rec) return;
+          out.bytes += rec.st.size;
           out.files++;
         } catch (e) {}
       });
@@ -294,7 +323,8 @@
 
   var lastRetentionAt = 0;
   var deniedLogs = Object.create(null);
-  function sweepByBudget() {    try {
+  function sweepByBudget() {
+    try {
       if (!ensureDataDir()) return 0;
       // 14 天保留以前只在启动时跑一次；长期不重启（用户常见的常驻场景）
       // 会让过期文件一直留着。这里每小时补跑一次，成本是一次 readdir。
@@ -308,12 +338,12 @@
       var files = [];
       var total = 0;
       fs.readdirSync(DATA_DIR).forEach(function (name) {
-        if (!LOG_RE.test(name)) return;
         try {
-          var st = fs.statSync(path.join(DATA_DIR, name));
-          if (!st.isFile()) return;
-          files.push({ name: name, size: st.size, at: st.mtimeMs });
-          total += st.size;
+          var rec = ownedLogStat(name);
+          if (!rec) return;
+          if (isLiveLog(name)) return;   // 活动文件不参与预算删除
+          files.push({ name: name, size: rec.st.size, at: rec.st.mtimeMs });
+          total += rec.st.size;
         } catch (e) {}
       });
       if (total <= maxBytes) return 0;
@@ -322,7 +352,10 @@
       for (var i = 0; i < files.length && total > maxBytes; i++) {
         if (files[i].name === nowName) continue;   // 今天正在写的留着
         try {
-          fs.unlinkSync(path.join(DATA_DIR, files[i].name));
+          // 删前复核：名字、路径、普通文件、非符号链接，任何一项变了就跳过。
+          var rec = ownedLogStat(files[i].name);
+          if (!rec || isLiveLog(files[i].name)) continue;
+          fs.unlinkSync(rec.full);
           total -= files[i].size;
           removed++;
         } catch (e) {
@@ -383,7 +416,7 @@
     // 设置面板可能在用户拖动前后多次改采集间隔：重建定时器即可
     ELECTRON = electron;
 
-    log("v0.3.1 加载器已启动（观测 + 渲染节流 + 大历史保护 + 日志预算 + 检查更新；__lagfixOff 一键还原）");
+    log("v0.3.2 加载器已启动（观测 + 渲染节流 + 大历史保护 + 日志预算 + 检查更新；__lagfixOff 一键还原）");
   }
 
   var ELECTRON = null;
