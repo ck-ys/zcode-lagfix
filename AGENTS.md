@@ -73,9 +73,10 @@ ZCode app.asar 入口尾部
        └─ BrowserWindow.webContents 注入 lagfix-observe.js
             ├─ 角标 / 统计浮层 / 设置面板（DOM，fixed 定位，不插 React 树）
             ├─ __lagfixCollect() 每 N 秒回传指标
-            └─ 两处宿主包装：
+            └─ 三处宿主包装：
                  ├─ store.subscribe(listener)  → 合并通知（不改数据）
-                 └─ store.loadAllOlder()      → 大会话拦截一次性全量补拉
+                 ├─ store.loadAllOlder()      → 大会话拦截一次性全量补拉
+                 └─ store.loadOlder()         → 只观测耗时/失败（v0.3.1，不改返回值）
 ```
 
 状态所有者：
@@ -84,6 +85,8 @@ ZCode app.asar 入口尾部
 - **观测指标**：渲染端环形缓冲 + 主进程追加 `observe-YYYYMMDD.jsonl`；不进入任何业务 store。
 - **节流窗口**：按 store 实例（WeakMap）计时，不按订阅计时。React 19 每次 commit 会重新订阅，按订阅计时会让窗口归零。
 - **大会话拦截**：只改 `loadAllOlder` 的返回值，不伪造数据；`not-enough-queries` 是宿主认可的终态。
+- **滚动/输入观测**：`scrollRing`/`loadOlderRing`/`inputRing` 是 observer 内存里的 30s 环形窗口；`scrollEvents`/`anyScrollEvents`/`lafCount` 每采集周期清零；`data-lagfix-scroll` 是 `documentElement` 属性，停滚 180ms 或关开关时移除。
+- **检查更新**：渲染端只置内存标记 `updateCheckRequested`，随一个样本回传；主进程请求 GitHub Releases 后注入 `window.__lagfixUpdate`，不落盘、不带 token。
 - **角标位置**：每秒按 composer 的 `getBoundingClientRect()` 同步，不写进 React 树；宿主重渲染不会清掉。
 
 所有包装必须满足：
@@ -172,6 +175,7 @@ python tests/smoke_asar.py      # 合成 asar 夹具，绝不碰真实安装目�
 python tests/install_remove.py  # 卸载异常边界
 node tests/observe_smoke.mjs    # 渲染端 observer 冒烟
 node tests/update_check.mjs     # 主进程检查更新：白名单/重定向/版本比较/体积上限（不联网）
+node tests/log_budget.mjs       # 主进程日志预算：超限删最旧/保留活动文件/14 天清理（假 fs，不写盘）
 ```
 
 规则：
