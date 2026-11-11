@@ -17,13 +17,13 @@
 3. `git log --oneline -10` 对齐最近锚点。完成度以 git、测试和实际运行结果为准，不凭旧文档或记忆推断。
 4. 确认当前分支和待办：功能开发在 `feat/*`，不直接在 `main` 上改代码。
 5. 改行为前先补/更新 `docs/specs/vX.Y.Z-*.md`；写清产品规则、状态所有者、接口、验收场景。
-6. 涉及宿主 DOM、投影 store 或 `app.asar` 行为时，先到本机 ZCode 源码仓 `D:\Git\git-github\ZCode` grep 确认选择器/方法仍然存在；不要只凭旧版本记忆写代码。
+6. 涉及宿主 DOM、投影 store 或 `app.asar` 行为时，先到本机 ZCode 源码仓（按你的环境定位）grep 确认选择器/方法仍然存在；不要只凭旧版本记忆写代码。
 7. 开工前报告一句：“已读 X，准备做 Y，已确认 Z 存在。”
 
 ## 2. 仓库结构
 
 ```
-D:\Git\git-github\zcode-lagfix\
+zcode-lagfix/
 ├── AGENTS.md                     # 本文件
 ├── README.md                     # 对外安装/使用/边界说明
 ├── LICENSE
@@ -52,7 +52,7 @@ D:\Git\git-github\zcode-lagfix\
 
 以下规则不是建议，违反即返工：
 
-- **测试和开发绝不写真实安装目录**（如 `E:\Program Files\ZCode`）。asar 测试只用 `tests/smoke_asar.py` 的合成夹具；真实安装/替换必须由用户明确确认。
+- **测试和开发绝不写真实安装目录**（如 ZCode 安装目录、Program Files 等）。asar 测试只用 `tests/smoke_asar.py` 的合成夹具；真实安装/替换必须由用户明确确认。
 - **不读写 `~/.zcode/cli/db.sqlite`**，不读取会话正文、提示词、模型回复、工具参数或任何用户数据。
 - **不打开 CDP 端口**，不把调试端口暴露到本机或局域网。
 - **不联网上报**。插件只写本机 `~/.zcode/zcode-lagfix/`。
@@ -194,7 +194,7 @@ node tests/observe_smoke.mjs    # 渲染端 observer 冒烟
 - 版本规格：`docs/specs/`，可提交。
 - 发布说明：`docs/releases/`，可提交。
 - 可直接粘贴的开发提示词：`docs/prompts/`，可提交。
-- 临时脚本、验证输出、截图：放系统临时目录（如 `C:\tmp` 或 `$TMPDIR`），**不要平铺在仓库根**；需要长期留的证据才脱敏后放 `docs/decisions/assets/`。
+- 临时脚本、验证输出、截图：放系统临时目录（如 `%TEMP%` 或 `$TMPDIR`），**不要平铺在仓库根**；需要长期留的证据才脱敏后放 `docs/decisions/assets/`。
 - 不把 `.venv/`、`__pycache__/`、`*.log`、`*.tmp`、`.lagfix-stage-*` 提交进 git。
 
 ## 11. Git 与提交
