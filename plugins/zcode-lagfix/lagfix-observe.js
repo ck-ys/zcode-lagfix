@@ -1,5 +1,18 @@
 /**
- * zcode-lagfix renderer 观测脚本 v0.3.3
+ * zcode-lagfix renderer 观测脚本 v0.3.4
+ *
+ * v0.3.4（卡顿归因 + 翻页降频 + 长回合渲染减负）：
+ *   - P0 LoAF 归因（lafDiagOn，默认开，只读）：时长 ≥100ms 的长帧记录
+ *     最近 10 条（总时长/强制布局占比/脚本 top5），sourceURL 只留文件名。
+ *     与 v0.3.1 的 lafCount/lafMax 共用一个 PerformanceObserver。
+ *   - O3 翻页降频（loadOlderPaceOn，默认关，实验）：rows.window > 3000 行时
+ *     两次 loadOlder 触发至少隔 600ms；被跳过的触发不碰 store，返回已结算
+ *     promise，宿主在下次滚动事件自然重试（锚点反而更新）。
+ *   - O4 长回合渲染减负（turnContentVisOn，默认关，实验）：data-lagfix-cv
+ *     属性 + content-visibility:auto 只作用于 turn 内部行级块
+ *     （[data-row-id]，排除 live tail），contain-intrinsic-size:auto 让
+ *     已渲染过的块对 virtualizer 测高无扰动。
+ *   - 后端全量过滤是宿主侧成本，插件只减少触发次数，不声称降低单次成本。
  *
  * v0.3.3（侧栏开合 / 面板常开期 / 回前台，默认开、可单独关）：
  *   - P0 归因：pane.detected/open/panelPx/switches/switchP95/switchMax/guardHits；
@@ -108,7 +121,7 @@
   var REFOCUS_WINDOW_MS = 800;     // 回前台帧窗口
   var PANE_SWITCH_DEDUPE_MS = 150; // aria-hidden 与 class 双信号去重
   var REFOCUS_DEDUPE_MS = 500;     // visibilitychange 与 focus 双信号去重
-  var VERSION = "0.3.3";
+  var VERSION = "0.3.4";
   var ERR_LIMIT = 50;
   var OVERLAY_ID = "lagfix-overlay-badge";
   // 宿主浮层（Radix portal）：上下文容量、模型/工具菜单、对话框等。
@@ -140,6 +153,10 @@
     paneSwitchGuardOn: true,   // 开合 420ms 过渡/mask/角标保护
     paneHoldOn: true,          // 面板常开期 mask/节流/角标保护
     refocusGuardOn: true,      // 回前台 120ms 合并 + 700ms 保护
+    // v0.3.4 卡顿归因 + 两个实验缓解（缓解项默认关，A/B 达标前不进默认路径）
+    lafDiagOn: true,           // LoAF 卡顿来源定位（只读）
+    loadOlderPaceOn: false,    // O3 大会话翻页降频（实验）
+    turnContentVisOn: false,   // O4 turn 内 content-visibility（实验）
     logMaxMB: 50,       // 观测日志总预算（MB），超过自动删最旧
     warnMs: 50,         // 帧 P95 黄阈值
     badMs: 100,         // 帧 P95 红阈值
@@ -175,6 +192,10 @@
     if (typeof o.paneSwitchGuardOn === "boolean") s.paneSwitchGuardOn = o.paneSwitchGuardOn;
     if (typeof o.paneHoldOn === "boolean") s.paneHoldOn = o.paneHoldOn;
     if (typeof o.refocusGuardOn === "boolean") s.refocusGuardOn = o.refocusGuardOn;
+    // v0.3.4：三项独立开关，只接受布尔值。
+    if (typeof o.lafDiagOn === "boolean") s.lafDiagOn = o.lafDiagOn;
+    if (typeof o.loadOlderPaceOn === "boolean") s.loadOlderPaceOn = o.loadOlderPaceOn;
+    if (typeof o.turnContentVisOn === "boolean") s.turnContentVisOn = o.turnContentVisOn;
     if (o.logMaxMB != null) s.logMaxMB = clampNum(o.logMaxMB, 5, 1000, DEFAULTS.logMaxMB);
     if (o.warnMs != null) s.warnMs = clampNum(o.warnMs, 1, 5000, DEFAULTS.warnMs);
     if (o.badMs != null) s.badMs = clampNum(o.badMs, 2, 10000, DEFAULTS.badMs);
@@ -316,6 +337,39 @@
   var sinceVisibleAt = 0;
   var lastBlurAt = 0;
   var lastRefocusAt = 0;
+
+  // ---- v0.3.4：LoAF 归因 + 翻页降频 + content-visibility ----
+  var LAF_DETAIL_MAX = 10;    // 最近 10 条 ≥100ms 长帧归因
+  var LAF_MIN_DETAIL_MS = 100;
+  var lafDetail = [];         // [{t, ms, styleMs, scripts:[{src, invoker, ms}]}]
+  var lafDetailKey = "";      // 上次随样本发出的归因指纹；未变化时只发 []
+  var lafSupported = false;   // 浏览器是否支持 long-animation-frame 条目
+  // 降频参数是拍板值（docs/specs/v0.3.4-loadolder-dom.md §1.2）：改值必须重新 A/B。
+  var PACE_MIN_ROWS = 3000;   // 窗口行数不超过它时完全不计时
+  var PACE_INTERVAL_MS = 600; // 大窗口下两次放行的最小间隔
+  // 只有「正在派发时间线 scroll 事件」的同步调用才允许降频。不能用「最近 N ms
+  // 有滚动」的时间窗：宿主前插锚定后会 scheduleMicrotask 里 dispatchEvent(new
+  // Event("scroll")) 补发通知（ConversationTimeline notifyScrollObserversAfterCommit），
+  // 那个合成 scroll 会把时间窗刷新，导致随后的 SessionPane 首 turn header 自动补拉
+  // 被误判成滚动触发——它用 cursor 去重，跳过就永不重试。
+  // 标志在 document capture 阶段置位、微任务里清掉：React 的 onScroll 处理与其
+  // 同步调用的 loadOlder 都在这段窗口内，而 effect 里的自动补拉已经出栈。
+  var paceInScrollDispatch = false;
+  var paceStats = null;       // 当前 loadOlder 包装闭包里的计数（换 store 归零）
+  var CV_ATTR = "data-lagfix-cv";
+
+  // v0.3.4 O4：data-lagfix-cv 是 documentElement 上的唯一新增痕迹；所有效果
+  // 都由 ensureStyle 里带属性前缀的 CSS 生效。幂等：重复调用只做一次属性读写。
+  function syncCvAttr() {
+    try {
+      var root = document.documentElement;
+      if (!root) return;
+      var want = settings.turnContentVisOn && settings.observe && !state.dead;
+      var cur = root.getAttribute(CV_ATTR) === "1";
+      if (want && !cur) root.setAttribute(CV_ATTR, "1");
+      else if (!want && cur) root.removeAttribute(CV_ATTR);
+    } catch (e) {}
+  }
 
   function paneWatchNeeded() {
     return !state.dead && settings.observe
@@ -737,6 +791,11 @@
     loadOlderRing.length = 0;
     loadOlderDetail.length = 0;
     lastDetailKey = "";
+    // v0.3.4：归因环与 CV 属性同样不留痕（state.dead 已置位，syncCvAttr 会移除属性）。
+    lafDetail.length = 0;
+    lafDetailKey = "";
+    paceInScrollDispatch = false;
+    try { syncCvAttr(); } catch (e) {}
     inputRing.length = 0;
     scrollEvents = 0;
     anyScrollEvents = 0;
@@ -913,6 +972,8 @@
   } catch (e) { /* 浏览器不支持就静默跳过，不致命 */ }
 
   // ---- v0.3.1：long-animation-frame（可选，不支持就静默跳过）----
+  // v0.3.4：lafCount/lafMax 口径不变（随 scrollDiagOn）；lafDiagOn 额外把
+  // ≥100ms 的长帧归因（脚本归属）记进 lafDetail 环，只留文件名，不记路径。
   var lafObserver = null;
   // 开关关闭/观测暂停/自禁用/一键还原时都要断开：PerformanceObserver 是常驻
   // 全局观察器，不能只把输出字段置 null 却在后台继续吃 entry。
@@ -923,20 +984,86 @@
       else lafObserver.disconnect();
     } catch (e) {}
   }
+  function lafWatchNeeded() {
+    return !state.dead && settings.observe
+      && (settings.scrollDiagOn || settings.lafDiagOn);
+  }
+  // sourceURL 只留最后一段文件名（去查询串）：生产构建是 app.js 这类短名，
+  // 不含用户路径，也不该把开发者机器的绝对路径写进日志。
+  function lafBaseName(url) {
+    try {
+      var s = String(url || "").split("?")[0].split("#")[0];
+      // data:/blob: 不是文件路径，整段塞进日志既无意义又浪费预算。
+      if (/^(data|blob):/i.test(s)) return "";
+      // 同时认 Windows 反斜杠路径，并硬截 64 字符：src 也要有长度上限。
+      var i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
+      return (i >= 0 ? s.slice(i + 1) : s).slice(0, 64);
+    } catch (e) { return ""; }
+  }
+  function recordLafDetail(entry) {
+    var scripts = [];
+    // forcedStyleAndLayoutDuration 在**脚本条目**上（PerformanceScriptTiming），
+    // 帧对象（PerformanceLongAnimationFrameTiming）没有这个属性——读帧级会恒为 0。
+    // 这里对所有脚本求和（截断 top5 之前），得到该帧的强制布局/样式总时长。
+    var forcedMs = 0;
+    try {
+      var src = entry.scripts;
+      if (src && src.length) {
+        for (var i = 0; i < src.length; i++) {
+          var sc = src[i];
+          if (!sc || typeof sc !== "object") continue;
+          forcedMs += Number(sc.forcedStyleAndLayoutDuration) || 0;
+          scripts.push({
+            src: lafBaseName(sc.sourceURL),
+            invoker: String(sc.invoker || "").slice(0, 120),
+            ms: Math.round(sc.duration || 0),
+          });
+        }
+        // 按耗时降序取前 5：归因只关心最贵的脚本。
+        scripts.sort(function (a, b) { return b.ms - a.ms; });
+        if (scripts.length > 5) scripts.length = 5;
+      }
+    } catch (e) { scripts = []; }
+    lafDetail.push({
+      t: Date.now(),
+      ms: Math.round(entry.duration || 0),
+      styleMs: Math.round(forcedMs),
+      scripts: scripts,
+    });
+    if (lafDetail.length > LAF_DETAIL_MAX) lafDetail.shift();
+  }
   try {
     if (typeof PerformanceObserver === "function") {
       lafObserver = new PerformanceObserver(function (list) {
         try {
           var entries = list.getEntries();
           for (var i = 0; i < entries.length; i++) {
-            lafCount++;
-            var ms = Math.round(entries[i].duration || 0);
-            if (ms > lafMax) lafMax = ms;
+            var e = entries[i];
+            var ms = Math.round(e.duration || 0);
+            // 计数随滚动诊断或卡顿归因任一（归因段要显示「本周期长帧 N 次」，
+            // 只开归因、关滚动诊断时不能一路 0）；归因环只随 lafDiagOn。
+            if ((settings.scrollDiagOn || settings.lafDiagOn)
+              && settings.observe && !state.dead) {
+              lafCount++;
+              if (ms > lafMax) lafMax = ms;
+            }
+            if (settings.lafDiagOn && settings.observe && !state.dead
+              && ms >= LAF_MIN_DETAIL_MS) {
+              recordLafDetail(e);
+            }
           }
-        } catch (e) { /* 观测失败不能影响宿主 */ }
+        } catch (e2) { /* 观测失败不能影响宿主 */ }
       });
       // 用 type 形式：浏览器不支持该 entry 类型时会抛，由外层 catch 吞掉。
-      setLafObserving(settings.scrollDiagOn && settings.observe);
+      setLafObserving(lafWatchNeeded());
+      // 一次性支持探测：creation 时两个诊断开关可能都关着（此时不会 observe），
+      // 但样本仍要如实报告 supported，不能把「还没开」写成「不支持」。
+      try {
+        var probe = new PerformanceObserver(function () {});
+        probe.observe({ type: "long-animation-frame", buffered: false });
+        probe.disconnect();
+        lafSupported = true;
+      } catch (e3) { lafSupported = false; }
     }
   } catch (e) { lafObserver = null; }
 
@@ -983,7 +1110,8 @@
     try {
       if (state.dead) return;
       if (!settings.scrollDiagOn && !settings.maskOffOnScroll
-        && !(settings.sessionDiagOn && settings.observe)) return;
+        && !(settings.sessionDiagOn && settings.observe)
+        && !settings.loadOlderPaceOn) return;   // v0.3.4：降频靠滚动信号区分触发来源
       var el = ev && ev.target;
       // 滚动事件的 target 就是滚动容器本身，不向上 closest()；target 没有
       // matches（合成事件/测试 stub）时直接放行，不能因此报错。
@@ -998,6 +1126,13 @@
         // 本插件自己的面板/浮层同样排除，避免伪造 mismatch。
         if (countDiag && !isOwnUiScroll(el) && isSessionScrollTarget(el)) anyScrollEvents++;
         return;
+      }
+      // v0.3.4：降频判定用的「在 scroll 派发栈内」标记——只开降频、关诊断时也要记。
+      if (settings.loadOlderPaceOn) {
+        paceInScrollDispatch = true;
+        // 微任务在整次 dispatch（含宿主同步的 handleScroll → loadOlder）之后执行，
+        // 到宿主 effect 里的自动补拉时已出栈，不会被判成滚动触发。
+        Promise.resolve().then(function () { paceInScrollDispatch = false; });
       }
       if (countDiag) {
         lastScrollAt = performance.now();
@@ -1052,7 +1187,8 @@
   // v0.3.2：只要滚动诊断、遮罩抑制或多会话归因任一需要，就保留 scroll 监听。
   function scrollWatchNeeded() {
     return !state.dead && (settings.scrollDiagOn || settings.maskOffOnScroll
-      || (settings.sessionDiagOn && settings.observe));
+      || (settings.sessionDiagOn && settings.observe)
+      || settings.loadOlderPaceOn);   // v0.3.4：降频需要滚动信号
   }
 
   // ---- v0.3.1 输入延迟：只采输入框内的按键，一次 closest，不拦截事件 ----
@@ -1079,6 +1215,7 @@
 
   setScrollListener(scrollWatchNeeded());
   setInputListener(settings.inputLagOn && settings.observe);
+  syncCvAttr();   // v0.3.4：启动即对齐一次（幂等，属性只在开关开时出现）
 
   // 页面卸载时别把属性留在 DOM 上（多窗口/热重载会保留 documentElement）
   function onPageUnload() {
@@ -1090,6 +1227,7 @@
         root.removeAttribute("data-lagfix-scroll");
         root.removeAttribute("data-lagfix-pane-switch");
         root.removeAttribute("data-lagfix-pane-open");
+        root.removeAttribute(CV_ATTR);
       }
     } catch (e) {}
   }
@@ -1111,6 +1249,12 @@
   // 避免「关掉又打开」后 calls=0 但 p95/max 有值。
   var loadOlderGen = 0;
 
+  // v0.3.4：滚动诊断关闭会清空观测环，但降频开着时包装不卸载。在途 promise
+  // 的回调只认 loadOlderGen（包装代际），会把关闭前的调用写回已清空的环；
+  // 若用户在 resolve 前又打开诊断，这条数据会被当成重开后的新明细。
+  // 独立的诊断代际：关闭时递增，回调要求代际一致。
+  var loadOlderDiagGen = 0;
+
   function recordLoadOlder(t0) {
     var now = performance.now();
     var ms = Math.round(now - t0);
@@ -1118,15 +1262,49 @@
     if (loadOlderRing.length > RING_MAX) loadOlderRing.shift();
   }
 
+  // 包装函数 → 它的 pace 计数对象。安装成功/复用 marker 时用它绑定 paceStats。
+  function paceOf(wrapped) {
+    try { return wrapped.__lagfixPace || null; } catch (e) { return null; }
+  }
+
   function makeProbedLoadOlder(orig) {
     var gen = loadOlderGen;
+    var diagGen = loadOlderDiagGen;   // v0.3.4：关闭滚动诊断后，在途回调不得写回
     // 本次包装后的调用数：换 store 会重建 wrapper，trigger 的 initial 随之重置。
     // 不能用全局 loadOlderCalls——它跨 store 累计，会让新 store 的首次补页误判 unknown。
     var callsInWrap = 0;
+    // v0.3.4 O3 降频状态随包装实例存亡：换主 store 归零；paceStats 让样本能读到。
+    // lastAllowedAt 只在 >PACE_MIN_ROWS 的放行时刷新：小窗口补页本就不贵，不计时。
+    // 初值给一个极小值：performance.now() 在页面启动后可能小于 600，
+    // 用 0 会让开机后第一次大窗口补页被误判成"距上次不足 600ms"。
+    var pace = { allowed: 0, skipped: 0, lastAllowedAt: -1e9 };
+    // 不在这里写 paceStats：安装可能失败（冻结/不可扩展 store），那时样本会
+    // 显示 0/0，把「没装上」误报成「还没有触发」。由 applyLoadOlderProbe 在
+    // marker 写入成功后绑定；任何失败/回滚分支置 null。
     // 显式严格模式：宿主的类方法是严格函数，解构调用（无 this）时应拿到 undefined
     // 而不是被 sloppy 规则换成 globalThis。保持与原方法完全一致的 this 语义。
-    return function () {
+    var wrapped = function () {
       "use strict";
+      // v0.3.4 O3 触发降频：与观测开关独立（节流/大会话保护同样不依赖 observe）。
+      // 只对**滚动触发**的调用降频：宿主还有非滚动补拉——SessionPane 检测到首 turn
+      // 缺 header 时 `void lease.store.loadOlder()`，并用 cursor 去重（跳过就不会
+      // 重试），跳掉它会让首 turn header 一直缺失。滚动的触发来自 handleScroll，
+      // 同步发生在 scroll 事件里，用 200ms 窗口足以识别。
+      if (settings.loadOlderPaceOn && !state.dead && paceInScrollDispatch) {
+        var rowsNow = readLoadedRows(this);
+        if (rowsNow !== null && rowsNow > PACE_MIN_ROWS) {
+          var tNow = performance.now();
+          if (tNow - pace.lastAllowedAt < PACE_INTERVAL_MS) {
+            pace.skipped++;
+            // 跳过的调用不碰原方法、不进任何观测环/明细、不计数——没发生的调用
+            // 不能被记成成功或失败；返回已结算 promise，宿主 fire-and-forget
+            // 触发链无感，下一次滚动事件会带更新的锚点自然重试。
+            return Promise.resolve();
+          }
+          pace.lastAllowedAt = tNow;
+        }
+        pace.allowed++;
+      }
       // 暂停观测或关闭滚动诊断时原样放行：不计数、不写明细、不消耗 initial 判定。
       if (!settings.observe || !settings.scrollDiagOn || state.dead) return orig.apply(this, arguments);
       var t0 = performance.now();
@@ -1154,7 +1332,7 @@
         // 返回**原 promise**：调用方拿到的必须和未包装时同一个引用，
         // 否则 await/链式 .then 的时序与身份判断都会变。
         ret.then(function () {
-          if (gen === loadOlderGen && settings.observe) {
+          if (gen === loadOlderGen && diagGen === loadOlderDiagGen && settings.observe) {
             recordLoadOlder(t0);
             recordLoadOlderDetail({
               t: startedAt, ms: Math.round(performance.now() - t0), ok: true,
@@ -1162,7 +1340,7 @@
             });
           }
         }, function () {
-          if (gen === loadOlderGen && settings.observe) {
+          if (gen === loadOlderGen && diagGen === loadOlderDiagGen && settings.observe) {
             loadOlderErrors++;
             recordLoadOlder(t0);
             recordLoadOlderDetail({
@@ -1173,7 +1351,7 @@
         });
         return ret;
       }
-      if (gen === loadOlderGen && settings.observe) {
+      if (gen === loadOlderGen && diagGen === loadOlderDiagGen && settings.observe) {
         recordLoadOlder(t0);
         recordLoadOlderDetail({
           t: startedAt, ms: Math.round(performance.now() - t0), ok: true,
@@ -1182,10 +1360,14 @@
       }
       return ret;
     };
+    try { wrapped.__lagfixPace = pace; } catch (e) {}
+    return wrapped;
   }
 
   function applyLoadOlderProbe(store) {
-    if (!settings.scrollDiagOn || state.dead || !store) return false;
+    // v0.3.4：观测（scrollDiagOn）或降频（loadOlderPaceOn）任一需要都要装；
+    // 两者同时关时才不装/卸载，行为回到 v0.3.3。
+    if ((!settings.scrollDiagOn && !settings.loadOlderPaceOn) || state.dead || !store) return false;
     // 宿主的 loadOlder 定义在 ConversationProjectionStore 原型上，但调用点是
     // lease.store.loadOlder()（实例查找）。只包当前主 store 实例：既不把隐藏会话
     // 的补页记进同一份明细，也不在共享原型上留下全局副作用。
@@ -1198,6 +1380,7 @@
     var marker = store.__lagfixLoadOlder;
     if (marker && marker.wrapped && store.loadOlder === marker.wrapped) {
       loadOlderTarget = store;
+      paceStats = marker.pace || null;   // v0.3.4：复用已包装时恢复计数归属
       return true;   // 已包装：复用，不套两层
     }
     if (marker) {
@@ -1222,7 +1405,8 @@
       return false;   // 冻结/只读 store：降级为不观测，不能影响宿主
     }
     try {
-      store.__lagfixLoadOlder = { orig: orig, hadOwn: hadOwn, wrapped: wrapped };
+      // v0.3.4：pace 随 marker 存亡——marker 命中分支据此恢复 paceStats。
+      store.__lagfixLoadOlder = { orig: orig, hadOwn: hadOwn, wrapped: wrapped, pace: paceOf(wrapped) };
     } catch (e2) {
       // 方法已替换但 marker 写不进去（不可扩展 store）：回滚方法，避免下次
       // 再包一层后既无法识别也无法还原。
@@ -1232,9 +1416,11 @@
           else delete store.loadOlder;
         }
       } catch (e3) {}
+      paceStats = null;
       return false;
     }
     loadOlderTarget = store;
+    paceStats = paceOf(wrapped);   // 安装成功才绑定计数
     return true;
   }
 
@@ -1242,6 +1428,7 @@
     var target = loadOlderTarget;
     loadOlderTarget = null;
     loadOlderGen++;   // 在途回调作废：不向已清空的环形窗口写回
+    paceStats = null; // v0.3.4：降频计数随包装一起消失，样本回落到 pace=null
     if (!target) return;
     try {
       var rec = target.__lagfixLoadOlder;
@@ -1744,7 +1931,8 @@
             try { syncSessionPanes(); } catch (e3) {}
             // 切会话可能重建 projection store；立即尝试重装一次，别等 5s 看门狗
             // （冷静期只有 10s，前 5s 的首屏水合最需要保护）。
-            if (settings.throttleOn || settings.bigSessionOn || settings.scrollDiagOn) {
+            if (settings.throttleOn || settings.bigSessionOn || settings.scrollDiagOn
+              || settings.loadOlderPaceOn) {
               try { applyThrottle(); } catch (e2) {}
             }
             return;
@@ -1785,7 +1973,7 @@
     try { syncPaneProbe(); } catch (e) {}
     armWatchdog();    // 锚点一挂上就尝试装节流（store 只能从真实 fiber 上取，必须等挂载完成）
     if ((settings.throttleOn && !fixState.applied) || settings.bigSessionOn
-      || settings.scrollDiagOn) applyThrottle();
+      || settings.scrollDiagOn || settings.loadOlderPaceOn) applyThrottle();
   }
 
   function armWatchdog() {
@@ -1809,7 +1997,7 @@
         // 大会话保护也走同一条复核：只判 !loadTarget 的话，宿主中途换原型会让
         // 保护静默失效，而面板仍按旧目标显示"已装"。
         if ((settings.throttleOn && (fixState.applied || fixState.tries < 20))
-          || settings.bigSessionOn || settings.scrollDiagOn) {
+          || settings.bigSessionOn || settings.scrollDiagOn || settings.loadOlderPaceOn) {
           applyThrottle();
         }
         // v0.3.2：新开的会话 pane 不一定伴随锚点变化，看门狗顺带补发现。
@@ -2108,6 +2296,15 @@
       // v0.3.3 P2：面板常开期只关消息层遮罩，不隐藏内容、不改布局。
       '[data-lagfix-pane-open="1"] [data-v4-timeline-message-layer="true"]{',
       "-webkit-mask-image:none !important;mask-image:none !important}",
+      // v0.3.4 O4：turn 内部行级块离屏时跳过绘制。三重防线：
+      // 1) 只选 [data-v4-turn-unit] 内部的 [data-row-id]——不碰被 virtualizer
+      //    测高的 turn wrapper（wrapper 高度变了整条时间线会跳）；
+      // 2) :not([data-v4-running-live-tail])——正在生成的回合绝不能被跳过绘制；
+      // 3) contain-intrinsic-size 的 auto 关键字——浏览器记住每块上次真实高度，
+      //    屏外跳过时占位不变，已渲染过的块对测高完全无扰动（宿主只读时间线的
+      //    先例没有 virtualizer，用的是固定 0 420px，两者不通用）。
+      '[data-lagfix-cv="1"] [data-v4-turn-unit="true"]:not([data-v4-running-live-tail]) [data-row-id]{',
+      "content-visibility:auto;contain-intrinsic-size:auto 160px}",
       // 开关
       "#" + PANEL_ID + " .sw{position:relative;display:inline-block;width:34px;height:18px;flex:0 0 auto}",
       "#" + PANEL_ID + " .sw input{position:absolute;opacity:0;width:0;height:0}",
@@ -2894,6 +3091,14 @@
       + "后台会话也会记录，并标注为不可见。最多同时保留 5 个会话，更多会话要有新动静才会替换最久没动静的那个。\n"
       + "不会做什么：不读消息内容，不改会话数据，也不改变加载和显示方式。关掉后不再分别统计，"
       + "也不再逐个检查会话窗口。"));
+    c2b.appendChild(rowEl("卡顿来源定位", "画面卡住超过 100 毫秒时，记下当时最耗时的几段界面工作来自哪里。",
+      switchEl(settings.lafDiagOn, function (v) {
+        settings.lafDiagOn = v; saveSettings(); applyScrollSettings(); rebuildPanel();
+      }),
+      "会做什么：画面一次卡住超过 100 毫秒时，记录这次卡了多久、其中排版占了多少，"
+      + "以及当时最耗时的几段界面工作出自哪个脚本文件，最多保留最近 10 次。用来回答「卡的时候到底在忙什么」。\n"
+      + "不会做什么：不读对话内容，不改任何数据，也不让画面变快。记录里只有脚本文件名和时间，没有路径和内容。\n"
+      + "代价：极低，只在卡顿发生的那一下多记几条统计。"));
     sObs.appendChild(c2b);
     sections.observe = sObs;
 
@@ -3048,6 +3253,33 @@
       + "不会做什么：不拦截 ZCode 自己的回前台刷新，也不影响回复接收和消息状态。\n"
       + "代价：画面最多晚 120ms 追上最新状态。"));
     sFix.appendChild(c3e);
+
+    // v0.3.4：两个实验缓解默认关闭，A/B 达标后才考虑进默认路径（见 docs/specs）。
+    var capExp = document.createElement("div");
+    capExp.className = "cap";
+    capExp.textContent = "实验（默认关闭）";
+    sFix.appendChild(capExp);
+    var c3f = card();
+    c3f.appendChild(rowEl("大会话翻页降频 · 实验", "在很长的会话里快速上翻时，放慢自动加载更早消息的频率。",
+      switchEl(settings.loadOlderPaceOn, function (v) {
+        settings.loadOlderPaceOn = v; saveSettings(); applyScrollSettings();
+        if (v) { try { applyThrottle(); } catch (e) {} }
+        rebuildPanel(); renderPanelStatus();
+      }),
+      "会做什么：会话已显示的消息超过约 3000 行时，上翻触发的自动加载至少间隔 600ms 一次，"
+      + "避免一次卡 1–2 秒的长加载扎堆。\n"
+      + "不会做什么：只影响滚动引起的加载，ZCode 自己为保证消息完整而发起的补齐不受影响；不丢消息、不改消息内容，也不改变每页条数；被放过的加载会在你继续滚动时自动补上。\n"
+      + "代价：快速上翻时更早的历史可能晚一点出现；如果停在半路不再滚动，需要再滚一下才会继续加载。\n"
+      + "说明：ZCode 每次加载本身的耗时（随会话总长度增长）这项降不了，它只减少加载的次数。"));
+    c3f.appendChild(rowEl("长回合渲染减负 · 实验", "让画面外的长消息块暂时不参与绘制，滚回附近再恢复绘制。",
+      switchEl(settings.turnContentVisOn, function (v) {
+        settings.turnContentVisOn = v; saveSettings(); syncCvAttr(); rebuildPanel();
+      }),
+      "会做什么：一段消息超出画面很远时，浏览器暂时跳过它的绘制；滚回附近自动恢复。"
+      + "正在生成的回复不受影响。\n"
+      + "不会做什么：不折叠、不隐藏、不删任何内容；滚到哪里内容都在，搜索和选中也不受影响。\n"
+      + "代价：一段很长的历史第一次滚到时，没绘制过的消息块可能有一次较明显的跳动（之后不再出现）。"));
+    sFix.appendChild(c3f);
     sections.fix = sFix;
 
     // --- 维护 ---
@@ -3837,8 +4069,13 @@
   // v0.3.1：两个观测开关与遮罩开关的唯一应用点。
   // 面板、跨窗口 storage、恢复默认、一键还原都走这里，避免四条路径各写一份清理。
   function applyScrollSettings() {
-    if (!settings.scrollDiagOn || state.dead) {
+    // v0.3.4：滚动诊断关闭只清观测数据；loadOlder 包装是否卸载还要看降频开关
+    // （O3 与观测独立生效）。两者同时关才释放包装，行为回到 v0.3.3。
+    if ((!settings.scrollDiagOn && !settings.loadOlderPaceOn) || state.dead) {
       releaseLoadOlderProbe();
+    }
+    if (!settings.scrollDiagOn || state.dead) {
+      loadOlderDiagGen++;   // 作废在途回调：不能把关闭前的那次补页写回空环
       scrollRing.length = 0;
       loadOlderRing.length = 0;
       loadOlderDetail.length = 0;
@@ -3863,8 +4100,15 @@
       inputPendingAt = 0;
     }
     if (!settings.maskOffOnScroll || state.dead) setScrollMaskActive(false);
-    // long-animation-frame 属于滚动诊断：诊断关掉就断开观察器。
-    setLafObserving(settings.scrollDiagOn && settings.observe && !state.dead);
+    // v0.3.4：降频关闭时丢掉滚动时间戳，避免下次开启时拿陈旧信号误判触发来源。
+    if (!settings.loadOlderPaceOn || state.dead) paceInScrollDispatch = false;
+    // v0.3.4：LoAF 计数随滚动诊断，归因环随 lafDiagOn；两者任一需要才保留观察器。
+    if (!settings.lafDiagOn || state.dead) {
+      lafDetail.length = 0;
+      lafDetailKey = "";
+      paceInScrollDispatch = false;
+    }
+    setLafObserving(lafWatchNeeded());
     // 监听器按当前开关装卸；关闭后不再空转，重新开启时这里会挂回来。
     setScrollListener(scrollWatchNeeded());
     setPageUnloadListener(!state.dead && settings.observe);
@@ -3891,6 +4135,11 @@
       settings.paneSwitchGuardOn = false;
       settings.paneHoldOn = false;
       settings.refocusGuardOn = false;
+      // v0.3.4：归因与两个实验缓解一并关；CV 属性由 syncCvAttr 移除，
+      // 降频包装随 releaseLoadOlderProbe 消失，归因环清空。
+      settings.lafDiagOn = false;
+      settings.loadOlderPaceOn = false;
+      settings.turnContentVisOn = false;
       saveSettings();
       releaseThrottle();
       releaseLoadAllGuard();
@@ -3902,10 +4151,14 @@
       setScrollListener(false);
       setPageUnloadListener(false);
       setInputListener(false);
+      syncCvAttr();
       scrollRing.length = 0;
       loadOlderRing.length = 0;
       loadOlderDetail.length = 0;
       lastDetailKey = "";
+      lafDetail.length = 0;
+      lafDetailKey = "";
+      paceInScrollDispatch = false;
       inputRing.length = 0;
       inputPendingAt = 0;
       scrollEvents = 0;
@@ -3991,11 +4244,16 @@
       try { if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; } } catch (e) {}
       try { if (slowRetryTimer) { clearTimeout(slowRetryTimer); slowRetryTimer = null; } } catch (e) {}
     }
-    setLafObserving(settings.observe && settings.scrollDiagOn);
+    setLafObserving(lafWatchNeeded());
     setInputListener(settings.inputLagOn && settings.observe && !state.dead);
     setScrollListener(scrollWatchNeeded());
     // v0.3.3：暂停时移除侧栏属性/监听，恢复时重新发现侧栏并挂回。
     try { applyPaneSettings(); } catch (e) { err(); }
+    // v0.3.4：暂停时同样移除 CV 属性（syncCvAttr 看 observe），恢复时补回。
+    syncCvAttr();
+    // v0.3.4：__lagfixOff 会把 pagehide/beforeunload 摘掉，而它不置 state.dead；
+    // 之后只重新打开「观测」时不经过 applyScrollSettings，卸载清理就再也不会挂回。
+    setPageUnloadListener(!state.dead && settings.observe);
     renderOverlay();
     renderPanelStatus();
   }
@@ -4023,13 +4281,22 @@
     var wasPaneGuard = settings.paneSwitchGuardOn;
     var wasPaneHold = settings.paneHoldOn;
     var wasRefocusGuard = settings.refocusGuardOn;
+    // v0.3.4：三项新开关的变化也各有收敛动作（都在 applyScrollSettings / syncCvAttr 内）。
+    var wasLafDiag = settings.lafDiagOn;
+    var wasPace = settings.loadOlderPaceOn;
+    var wasCv = settings.turnContentVisOn;
     mergeStored(o, settings);
     if (settings.badMs <= settings.warnMs) settings.badMs = settings.warnMs + 1;
     if (settings.observe !== wasObserve) setObserving(settings.observe, true);
     if (settings.scrollDiagOn !== wasScrollDiag || settings.inputLagOn !== wasInputLag
-      || settings.maskOffOnScroll !== wasMask) {
+      || settings.maskOffOnScroll !== wasMask
+      || settings.lafDiagOn !== wasLafDiag || settings.loadOlderPaceOn !== wasPace) {
       applyScrollSettings();
+      // 降频开关打开时立即尝试装包装（scrollDiagOn 可能是关的，不会走上面的 applyThrottle）。
+      if (settings.loadOlderPaceOn) { try { applyThrottle(); } catch (e) {} }
     }
+    // CV 属性幂等同步：另一窗口开关实验项时本窗口立即生效/失效。
+    if (settings.turnContentVisOn !== wasCv) syncCvAttr();
     if (settings.sessionDiagOn !== wasSessionDiag) applySessionSettings();
     if (settings.paneDiagOn !== wasPaneDiag
       || settings.paneSwitchGuardOn !== wasPaneGuard
@@ -4088,6 +4355,9 @@
       paneSwitchGuardOn: settings.paneSwitchGuardOn,
       paneHoldOn: settings.paneHoldOn,
       refocusGuardOn: settings.refocusGuardOn,
+      lafDiagOn: settings.lafDiagOn,
+      loadOlderPaceOn: settings.loadOlderPaceOn,
+      turnContentVisOn: settings.turnContentVisOn,
       logMaxMB: settings.logMaxMB,
       warnMs: settings.warnMs, badMs: settings.badMs, collectSec: settings.collectSec,
     };
@@ -4153,6 +4423,42 @@
     return { p95: pctOf(vals, 0.95), max: ringMax(inputRing, now), samples: vals.length };
   }
 
+  // ---- v0.3.4 观测快照：LoAF 归因 + 降频计数 ----
+  // 归因明细与 loadOlderDetail 同一套「未变化发 []」约定：消费端向前找最近非空。
+  // count/max 是本周期 ≥50ms 长帧口径。supported 由创建时的一次性探测得出，
+  // 开关打开后即为准确值；lafDiagOn 关闭时整段返回 null（不报 supported）。
+  function lafDetailKeyOf() {
+    var parts = [];
+    for (var i = 0; i < lafDetail.length; i++) {
+      var d = lafDetail[i];
+      parts.push(d.t + ":" + d.ms + ":" + d.styleMs + ":" + d.scripts.length);
+    }
+    return parts.join("|");
+  }
+
+  function lafSnapshot() {
+    if (!settings.lafDiagOn || !settings.observe) return null;
+    var key = lafDetailKeyOf();
+    var snap = key === lafDetailKey ? [] : lafDetail.slice();
+    lafDetailKey = key;
+    return {
+      supported: lafSupported ? 1 : 0,
+      count: lafCount,
+      max: lafMax || null,
+      detail: snap,
+    };
+  }
+
+  function paceSnapshot() {
+    if (!settings.loadOlderPaceOn) return null;
+    return {
+      minRows: PACE_MIN_ROWS,
+      intervalMs: PACE_INTERVAL_MS,
+      allowed: paceStats ? paceStats.allowed : 0,
+      skipped: paceStats ? paceStats.skipped : 0,
+    };
+  }
+
   function fixSnapshot() {
     return {
       on: !!settings.throttleOn, ms: settings.throttleMs,
@@ -4179,6 +4485,7 @@
         // schema 稳定：dead 样本也带这些字段，消费端不必判 undefined
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
         pane: null, refocus: null,
+        laf: null, pace: null,
         ver: VERSION, updateCheck: 0,
         restart: state.restartRequested ? 1 : 0,
       });
@@ -4191,6 +4498,7 @@
       scrollEvents = 0;
       anyScrollEvents = 0;
       lafCount = 0;
+      lafMax = 0;   // v0.3.4：与 lafCount 同口径，暂停不留陈旧最大值
       inputPendingAt = 0;
       // 暂停不影响手动「检查更新」：标记随本样本回传一次后立即清掉，
       // 否则暂停期间每个周期都会重复请求。
@@ -4206,6 +4514,8 @@
         settings: cfg, fix: fixSnapshot(),
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
         pane: null, refocus: null,
+        // 暂停期归因环不累计（laf=null）；降频是缓解项，与 observe 独立，照实上报。
+        laf: null, pace: paceSnapshot(),
         ver: VERSION, updateCheck: pausedAsk,
         restart: state.restartRequested ? 1 : 0,
       });
@@ -4277,6 +4587,8 @@
         loadOlderDetail: detailSnap,
         pane: paneSnapshot(now),
         refocus: refocusSnapshot(now),
+        laf: lafSnapshot(),
+        pace: paceSnapshot(),
         ver: VERSION,
         updateCheck: askUpdate,
         restart: state.restartRequested ? 1 : 0,
@@ -4287,7 +4599,7 @@
       return JSON.stringify({ sid: state.sid, frames: 0, dt: 0, dead: false, errs: state.errCount,
         settings: cfg, fix: fixSnapshot(),
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
-        pane: null, refocus: null, ver: VERSION,
+        pane: null, refocus: null, laf: null, pace: null, ver: VERSION,
         updateCheck: askUpdate,
         restart: state.restartRequested ? 1 : 0 });
     } finally {
@@ -4301,6 +4613,9 @@
       // 记下已发出，面板在结果注入前继续显示「正在检查」。
       if (askUpdate) markUpdateRequestSent();
       state.updateCheckRequested = false;
+      // v0.3.4：lafMax 与 lafCount 同为「本周期」口径（终审对齐 spec 1.1.1；
+      // 此前跨周期保留会让报告的「本周期最长」拿到陈旧值）。
+      lafMax = 0;
     }
   };
 

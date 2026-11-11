@@ -277,10 +277,21 @@ function fireAttr(target, name) {
 // long-animation-frame 也是 PerformanceObserver：记录 observe/disconnect 次数，
 // 验证「关掉滚动诊断 / 一键还原」真的断开了观察器，而不是只把输出字段置 null。
 const perfCalls = { observe: 0, disconnect: 0 };
+// v0.3.4：要能向 LoAF 观察器投递假条目（P0 归因用），实例记录 cb 与观察类型。
+const perfInstances = [];
 globalThis.PerformanceObserver = class {
-  observe() { perfCalls.observe++; }
-  disconnect() { perfCalls.disconnect++; }
+  constructor(cb) { this.cb = cb; this.observing = null; perfInstances.push(this); }
+  observe(opts) {
+    perfCalls.observe++;
+    this.observing = opts && (opts.type || (opts.entryTypes && opts.entryTypes[0])) || null;
+  }
+  disconnect() { perfCalls.disconnect++; this.observing = null; }
 };
+function fireLoAF(entries) {
+  const inst = perfInstances.filter((i) => i.observing === "long-animation-frame").pop();
+  if (!inst) throw new Error("no active long-animation-frame observer");
+  inst.cb({ getEntries: () => entries });
+}
 window.innerWidth = 1440;
 window.innerHeight = 900;
 window.addEventListener = (t, fn) => {
@@ -305,6 +316,10 @@ const origLoadOlderRef = proto.loadOlder;   // v0.3.1 loadOlder 观测的原始�
 localStorage.setItem("lagfix.settings.v1",
   JSON.stringify({ adaptiveOn: false, switchGuardOn: false, badgeVisible: false }));
 new Function(src)();
+
+// v0.3.4：在任何人 writeSettings 之前抓一份初始设置快照——后面的「默认值」断言
+// 必须读它，否则读到的可能是被前面用例改过的持久化值，DEFAULTS 改错也能过。
+const initialSettings = JSON.parse(window.__lagfixCollect()).settings;
 
 await new Promise((r) => setTimeout(r, 60));   // renderOverlay 首次是同步调用，这里只是让事件循环转一圈
 
@@ -507,7 +522,9 @@ check("只覆盖 mask-image（不覆盖 mask 简写，避免重置宿主其它 m
 
 const scrollListeners = documentStub._listeners.scroll || [];
 check("注册了 scroll 捕获监听", scrollListeners.length > 0);
-const dispatchScroll = (target) => scrollListeners.forEach((fn) => fn({ target }));
+// 读实时列表：后面的用例会按开关摘/挂 scroll 监听，快照可能是旧的。
+const dispatchScroll = (target) =>
+  (documentStub._listeners.scroll || []).forEach((fn) => fn({ target }));
 
 const timelineEl = makeEl("div");
 timelineEl.setAttribute("data-v4-timeline-scroll", "true");
@@ -633,9 +650,18 @@ check("关闭后 loadOlder 恢复原方法",
   store.loadOlder === origLoadOlderRef && !Object.prototype.hasOwnProperty.call(store, "loadOlder"));
 check("关闭后主 store 上的包装标记已删除", !store.__lagfixLoadOlder);
 check("关闭后 __lagfixLoadOlder 标记已删除", !proto.__lagfixLoadOlder);
-check("关闭滚动诊断会断开 long-animation-frame 观察器",
-  perfCalls.disconnect > perfDisconnectsBeforeDiagOff,
+// v0.3.4：LoAF 观察器同时服务滚动诊断与卡顿归因；lafDiagOn 默认开，
+// 只关 scrollDiagOn 不得断开观察器（归因还在用），两个都关才断。
+check("只关滚动诊断时 LoAF 观察器仍保留（lafDiagOn 还开着）",
+  perfCalls.disconnect === perfDisconnectsBeforeDiagOff,
   `before=${perfDisconnectsBeforeDiagOff} after=${perfCalls.disconnect}`);
+const perfDisconnectsBeforeLafOff = perfCalls.disconnect;
+writeSettings({ lafDiagOn: false });
+check("lafDiagOn 也关掉后 LoAF 观察器断开",
+  perfCalls.disconnect > perfDisconnectsBeforeLafOff,
+  `before=${perfDisconnectsBeforeLafOff} after=${perfCalls.disconnect}`);
+check("lafDiagOn=false 时样本 laf 为 null", JSON.parse(window.__lagfixCollect()).laf === null);
+writeSettings({ lafDiagOn: true });
 check("关闭滚动诊断不影响遮罩开关", offDiag.settings.maskOffOnScroll === true);
 dispatchScroll(timelineEl);
 check("只关诊断时遮罩仍然工作", docEl.getAttribute("data-lagfix-scroll") === "1");
@@ -658,6 +684,125 @@ check("滚动中途关掉会立刻移除属性",
   docEl.getAttribute("data-lagfix-scroll") === null,
   `attr=${docEl.getAttribute("data-lagfix-scroll")}`);
 writeSettings({ maskOffOnScroll: true });
+
+console.log("-- v0.3.4 O3：翻页降频 --");
+// 必须在 loadOlderTarget 仍是 store A 的段落测：后面的多会话用例会把包装
+// 指到别的 store 实例（applyLoadOlderProbe 换目标时释放旧包装）。
+// v0.3.4 终审修复：只对**滚动触发**降频——宿主 SessionPane 对首 turn 缺 header
+// 的自动补拉是 cursor 去重的，跳过就不会重试，绝不能碰。所以每个「预期被降频」
+// 的调用前都要先 dispatchScroll 刷新滚动信号。
+check("O3 前置：loadOlder 已包装", !!store.__lagfixLoadOlder);
+const winRows = store.state.snapshot.rows.window;
+const paceScroll = () => dispatchScroll(timelineEl);
+writeSettings({ loadOlderPaceOn: true });
+const pace0 = JSON.parse(window.__lagfixCollect()).pace;
+check("pace 快照带拍板参数", pace0 && pace0.minRows === 3000 && pace0.intervalMs === 600,
+  JSON.stringify(pace0));
+// 小窗口（远小于 3000 行）：连发不计时
+const smallHitsBefore = store.loadOlderHits || 0;
+paceScroll();
+await store.loadOlder();
+paceScroll();
+await store.loadOlder();
+check("小窗口连发两次都放行", (store.loadOlderHits || 0) === smallHitsBefore + 2,
+  `hits=${store.loadOlderHits}`);
+// 大窗口：第一次放行，600ms 内的第二次跳过
+for (let i = 0; i < 3200; i++) winRows.push({ rowId: "pace" + i });
+const bigHitsBefore = store.loadOlderHits || 0;
+const loCallsBefore = scrollOf().loadOlderCalls;
+const detailRingBefore = window.__lagfixDiag().loadOlderDetail;
+paceScroll();
+const p1 = store.loadOlder();   // 放行（lastAllowedAt 初值 -1e9）
+paceScroll();
+const p2 = store.loadOlder();   // 距上次 <600ms → 跳过
+check("大窗口第一次放行、第二次跳过（原方法只执行一次）",
+  (store.loadOlderHits || 0) === bigHitsBefore + 1, `hits=${store.loadOlderHits}`);
+check("跳过的调用返回 promise", typeof p2.then === "function");
+// 真正验证「已结算」：0ms 竞速，未结算会落到 timeout 分支。
+const p2Race = await Promise.race([p2.then(() => "settled"), wait(0).then(() => "pending")]);
+check("跳过的调用返回的是已结算 promise（不会悬挂）", p2Race === "settled", `race=${p2Race}`);
+await Promise.all([p1, p2]);
+check("跳过的调用不进明细环（只有放行的那次被记录）",
+  window.__lagfixDiag().loadOlderDetail === detailRingBefore + 1,
+  `before=${detailRingBefore} after=${window.__lagfixDiag().loadOlderDetail}`);
+const pace1 = JSON.parse(window.__lagfixCollect()).pace;
+check("pace 计数：allowed 含小窗口放行，skipped 只计跳过",
+  pace1.allowed === 3 && pace1.skipped === 1,
+  JSON.stringify(pace1));
+check("跳过的调用不计入 loadOlderCalls（没发生的调用不能记账）",
+  scrollOf().loadOlderCalls === loCallsBefore + 1,
+  `calls=${scrollOf().loadOlderCalls}`);
+await wait(650);                 // 超过 600ms 间隔
+paceScroll();
+await store.loadOlder();
+check("间隔超过 600ms 后再次放行", (store.loadOlderHits || 0) === bigHitsBefore + 2,
+  `hits=${store.loadOlderHits}`);
+// 非滚动触发（宿主首 turn 缺 header 的自动补齐）：即使紧跟在上一次大窗口
+// 补页之后，也绝不跳过——被跳过它不会重试，首 turn header 会一直缺失。
+await wait(650);
+paceScroll();
+await store.loadOlder();        // 放行并刷新 lastAllowedAt
+const nonScrollBefore = store.loadOlderHits || 0;
+await store.loadOlder();        // 没有新的滚动派发 → 不在降频范围 → 放行
+check("非滚动触发的补页永不跳过（首 turn header 不会被吞）",
+  (store.loadOlderHits || 0) === nonScrollBefore + 1,
+  `hits=${store.loadOlderHits}`);
+// P1-1（终审）：宿主前插锚定后会在微任务里 dispatchEvent(new Event("scroll"))，
+// 那不是用户滚动。SessionPane 的自动补拉发生在后续 effect 里——即便距那次合成
+// scroll 只有几毫秒、且距上次放行不足 600ms，也不能被判成滚动触发。
+const syntheticBefore = store.loadOlderHits || 0;
+paceScroll();
+await wait(0);                  // 合成 scroll 已派发完、微任务标记已清
+await Promise.resolve();
+await store.loadOlder();        // 出栈后的调用：旧实现会跳过，新实现放行
+check("合成 scroll 之后的 effect 补拉不跳过（P1-1）",
+  (store.loadOlderHits || 0) === syntheticBefore + 1,
+  `hits=${store.loadOlderHits}`);
+writeSettings({ loadOlderPaceOn: false });
+paceScroll();
+await store.loadOlder();
+paceScroll();
+await store.loadOlder();
+check("开关关闭后连发全部放行", (store.loadOlderHits || 0) === nonScrollBefore + 4,
+  `hits=${store.loadOlderHits}`);
+check("关闭后样本 pace 为 null", JSON.parse(window.__lagfixCollect()).pace === null);
+// 观测（scrollDiagOn）与降频独立：只关诊断时包装保留、降频继续
+writeSettings({ scrollDiagOn: false, loadOlderPaceOn: true });
+check("只关滚动诊断时降频包装保留", !!store.__lagfixLoadOlder);
+await wait(650);                // 上次放行就在几个微任务之前：先真正等过间隔
+paceScroll();                   // pace 开时滚动监听仍在（scrollWatchNeeded 含 loadOlderPaceOn）
+await store.loadOlder();        // 放行
+paceScroll();
+await store.loadOlder();        // <600ms → 跳过
+check("scrollDiagOn 关但 pace 开：大窗口仍降频", (store.loadOlderHits || 0) === nonScrollBefore + 5,
+  `hits=${store.loadOlderHits}`);
+writeSettings({ scrollDiagOn: true, loadOlderPaceOn: false });
+check("恢复后 wrapper 仍可用（观测语义）", !!store.__lagfixLoadOlder);
+// P1-2（终审）：诊断关闭会清环，但降频开着时包装不卸载。关闭前发出的调用
+// 在关闭后 resolve，不能把数据写回已清空的环（否则「关→开」后会被当成新明细）。
+writeSettings({ loadOlderPaceOn: true });
+check("P1-2 前置：pace 开时包装在", !!store.__lagfixLoadOlder);
+store.loadOlderGrow = 1;
+const inFlight = store.loadOlder();          // 在途
+writeSettings({ scrollDiagOn: false });      // 关闭诊断：清环但不卸载包装
+writeSettings({ scrollDiagOn: true });       // 立刻重开：不能带回关闭前那次
+await inFlight;
+const revived = collect();
+check("关闭前在途的补页不写回重开后的环（P1-2）",
+  window.__lagfixDiag().loadOlderDetail === 0
+    && (revived.scroll === null || (revived.scroll && revived.scroll.loadOlderCalls === 0)),
+  `detail=${window.__lagfixDiag().loadOlderDetail} calls=${revived.scroll && revived.scroll.loadOlderCalls}`);
+writeSettings({ loadOlderPaceOn: false });
+// 包装被卸载再重装后 pace 计数归零（换主 store 重建包装同此口径）
+writeSettings({ scrollDiagOn: false, loadOlderPaceOn: false });
+check("两开关同关后包装卸载", !store.__lagfixLoadOlder);
+writeSettings({ scrollDiagOn: false, loadOlderPaceOn: true });
+const paceFresh = JSON.parse(window.__lagfixCollect()).pace;
+check("包装重装后 pace 计数归零",
+  paceFresh && paceFresh.allowed === 0 && paceFresh.skipped === 0,
+  JSON.stringify(paceFresh));
+writeSettings({ scrollDiagOn: true, loadOlderPaceOn: false });
+winRows.length = 1;             // 还原小窗口，不影响后续用例
 
 console.log("-- O1b 输入延迟 --");
 const keySurface = makeEl("div");
@@ -1306,7 +1451,7 @@ check("A8：面板不再提供「显示角标」开关", !panelText.includes("�
 check("性能页含「侧栏与回前台」四项",
   ["侧栏与回前台统计", "侧栏开合保护", "面板常开保护", "回前台保护"]
     .every((t) => panelText.includes(t)));
-check("面板版本行是 v0.3.3", panelText.includes("v0.3.3"));
+check("面板版本行是 v0.3.4", panelText.includes("v0.3.4"));
 check("面板不再出现版本号式标题", !panelText.includes("v0.3 性能增强"));
 check("维护页写明日志路径与上限",
   panelText.includes("日志存储路径") && panelText.includes("日志上限"));
@@ -1743,6 +1888,109 @@ check("重新开启后 visibility/focus/blur 都回来",
     && (window._listeners.focus || []).length === 1
     && (window._listeners.blur || []).length === 1);
 
+console.log("-- v0.3.4 P0：LoAF 卡顿归因 --");
+const v034Defaults = JSON.parse(window.__lagfixCollect());
+check("默认 lafDiagOn=true（读脚本加载时的快照）", initialSettings.lafDiagOn === true,
+  `snapshot=${initialSettings.lafDiagOn}`);
+check("默认 loadOlderPaceOn=false（实验默认关）", initialSettings.loadOlderPaceOn === false,
+  `snapshot=${initialSettings.loadOlderPaceOn}`);
+check("默认 turnContentVisOn=false（实验默认关）", initialSettings.turnContentVisOn === false,
+  `snapshot=${initialSettings.turnContentVisOn}`);
+check("laf 快照存在且浏览器支持标记为 1", v034Defaults.laf && v034Defaults.laf.supported === 1,
+  JSON.stringify(v034Defaults.laf && v034Defaults.laf.supported));
+// 真实 API 形状：forcedStyleAndLayoutDuration 在**脚本条目**（PerformanceScriptTiming）
+// 上，帧对象（PerformanceLongAnimationFrameTiming）没有这个属性。
+fireLoAF([
+  {
+    duration: 250.4,
+    scripts: [
+      { sourceURL: "https://example.com/assets/index-a1b2.js?v=9", invoker: "SCRIPT.getElementById:onclick",
+        duration: 180.2, forcedStyleAndLayoutDuration: 100.4 },
+      { sourceURL: "file:///D:/work/b.js#frag", invoker: "x".repeat(300),
+        duration: 60.7, forcedStyleAndLayoutDuration: 43.2 },
+    ],
+  },
+  { duration: 42, scripts: [] },   // <100ms：进计数、不进归因环
+]);
+const laf1 = JSON.parse(window.__lagfixCollect()).laf;
+check("≥100ms 长帧进归因环，<100ms 只计数", laf1.detail.length === 1 && laf1.count === 2 && laf1.max === 250,
+  `detail=${laf1.detail.length} count=${laf1.count} max=${laf1.max}`);
+const ld0 = laf1.detail[0];
+check("时长四舍五入", ld0.ms === 250, `ms=${ld0.ms}`);
+check("styleMs = 各脚本强制布局时长之和（帧对象没有该字段）",
+  ld0.styleMs === 144, `styleMs=${ld0.styleMs}（100.4+43.2≈144）`);
+check("src 只留文件名（去查询串/去路径）",
+  ld0.scripts[0].src === "index-a1b2.js" && ld0.scripts[1].src === "b.js",
+  `src=[${ld0.scripts.map((s) => s.src)}]`);
+check("scripts 按耗时降序", ld0.scripts[0].ms >= ld0.scripts[1].ms);
+check("invoker 截断到 120 字符", ld0.scripts[1].invoker.length === 120,
+  `len=${ld0.scripts[1].invoker.length}`);
+const laf2 = JSON.parse(window.__lagfixCollect()).laf;
+check("归因明细未变化时发 []（日志不膨胀）",
+  Array.isArray(laf2.detail) && laf2.detail.length === 0);
+for (let i = 0; i < 12; i++) fireLoAF([{ duration: 150, scripts: [] }]);
+const laf3 = JSON.parse(window.__lagfixCollect()).laf;
+check("归因环最多 10 条", laf3.detail.length === 10, `len=${laf3.detail.length}`);
+// scripts >5 只留最贵的前 5
+// 输入按耗时**升序**排列：若实现没排序，scripts[0] 会是 s0.js（最便宜的），
+// 断言 scripts[0].src === "s6.js" 才能证明真的按耗时降序排过。
+fireLoAF([{ duration: 210, scripts: Array.from({ length: 7 }, (_, i) => ({
+  sourceURL: `s${i}.js`, invoker: "f", duration: 10 * (i + 1),
+})) }]);
+const laf4 = JSON.parse(window.__lagfixCollect()).laf;
+check("scripts 按耗时降序只留前 5（最贵的 s6 在前，s0/s1 被截掉）",
+  laf4.detail[laf4.detail.length - 1].scripts.length === 5
+    && laf4.detail[laf4.detail.length - 1].scripts[0].src === "s6.js"
+    && !laf4.detail[laf4.detail.length - 1].scripts.some((x) => x.src === "s0.js"),
+  JSON.stringify(laf4.detail[laf4.detail.length - 1].scripts.map((x) => x.src)));
+// lafDiagOn 关→开：环清空，不带旧数据（终审建议补）
+writeSettings({ lafDiagOn: false });
+writeSettings({ lafDiagOn: true });
+fireLoAF([{ duration: 150, scripts: [] }]);
+const laf5 = JSON.parse(window.__lagfixCollect()).laf;
+check("lafDiagOn 重开后归因环从空开始（不带旧数据）",
+  laf5.detail.length === 1, `len=${laf5.detail.length}`);
+// lafMax 每周期清零（v0.3.4 对齐）：旧周期的 210/150 不留到本周期
+fireLoAF([{ duration: 42, scripts: [] }]);
+const laf6 = JSON.parse(window.__lagfixCollect()).laf;
+check("lafMax 每周期清零（不拿陈旧最大值）", laf6.max === 42 && laf6.count === 1,
+  `max=${laf6.max} count=${laf6.count}`);
+
+// P2-3：Windows 反斜杠路径与 data:/blob: 也要按文件名处理
+fireLoAF([{ duration: 120, scripts: [
+  { sourceURL: String.raw`C:\Users\x\app.js`, invoker: "f", duration: 50 },
+  { sourceURL: "data:text/javascript;base64,AAAA", invoker: "g", duration: 40 },
+  { sourceURL: "blob:https://x/y", invoker: "h", duration: 30 },
+] }]);
+const lafWin = JSON.parse(window.__lagfixCollect()).laf;
+const winScripts = lafWin.detail[lafWin.detail.length - 1].scripts;
+check("Windows 反斜杠路径只留文件名",
+  winScripts.some((x) => x.src === "app.js"), JSON.stringify(winScripts.map((x) => x.src)));
+check("data:/blob: URL 不留原文（记为空）",
+  winScripts.filter((x) => x.src === "").length === 2,
+  JSON.stringify(winScripts.map((x) => x.src)));
+
+
+console.log("-- v0.3.4 O4：长回合渲染减负 --");
+check("O4 前置：默认无 CV 属性", docEl.getAttribute("data-lagfix-cv") === null,
+  `attr=${docEl.getAttribute("data-lagfix-cv")}`);
+const cvStyleEl = documentStub.getElementById("lagfix-style");
+check("CSS 含 turn 内行级 content-visibility 规则（排除 live tail）",
+  !!cvStyleEl
+  && String(cvStyleEl.textContent).includes('[data-lagfix-cv="1"] [data-v4-turn-unit="true"]:not([data-v4-running-live-tail]) [data-row-id]')
+  && String(cvStyleEl.textContent).includes("content-visibility:auto")
+  && String(cvStyleEl.textContent).includes("contain-intrinsic-size:auto 160px"));
+writeSettings({ turnContentVisOn: true });
+check("开启后 documentElement 带 data-lagfix-cv=1",
+  docEl.getAttribute("data-lagfix-cv") === "1", `attr=${docEl.getAttribute("data-lagfix-cv")}`);
+// 页面卸载（pagehide/beforeunload）也要移除 CV 属性（终审建议补；此时卸载监听仍在挂）
+(window._listeners.pagehide || []).forEach((fn) => fn({}));
+check("pagehide 移除 data-lagfix-cv", docEl.getAttribute("data-lagfix-cv") === null,
+  `attr=${docEl.getAttribute("data-lagfix-cv")}`);
+writeSettings({ turnContentVisOn: false });
+check("关闭后属性移除", docEl.getAttribute("data-lagfix-cv") === null,
+  `attr=${docEl.getAttribute("data-lagfix-cv")}`);
+
 // 给下面的 __lagfixOff 清理用例留一个已打开、保护属性在身上的现场。
 paneFrame.setAttribute("aria-hidden", "false");
 fireMutation(paneFrame, "aria-hidden", "true");
@@ -1769,9 +2017,11 @@ check("关掉后已订阅的 wrapper 立即直通（不等 120ms）",
 unD();
 
 console.log("-- 还原 --");
-// 先重新打开遮罩与滚动诊断（上面的 __lagfixOff 已把它们关掉），再制造一个活动
-// 的滚动属性，验证一键还原真的会清掉它、也会断开 long-animation-frame 观察器。
-writeSettings({ maskOffOnScroll: true, scrollDiagOn: true });
+// 先重新打开遮罩、滚动诊断与 CV 实验（上面的 __lagfixOff 已把它们关掉），再制造一个
+// 活动的滚动属性，验证一键还原真的会清掉它、也会断开 long-animation-frame 观察器。
+writeSettings({ maskOffOnScroll: true, scrollDiagOn: true, lafDiagOn: true, turnContentVisOn: true });
+check("还原前置：CV 属性在身上", docEl.getAttribute("data-lagfix-cv") === "1",
+  `attr=${docEl.getAttribute("data-lagfix-cv")}`);
 dispatchScroll(timelineEl);
 check("还原前滚动属性存在（前置条件）",
   docEl.getAttribute("data-lagfix-scroll") === "1",
@@ -1808,6 +2058,12 @@ check("__lagfixOff 清空会话桶与 pane 映射", window.__lagfixDiag().sessio
   && window.__lagfixDiag().sessionPanes === 0,
   `buckets=${window.__lagfixDiag().sessionBuckets} panes=${window.__lagfixDiag().sessionPanes}`);
 check("__lagfixOff 清空 loadOlder 明细", window.__lagfixDiag().loadOlderDetail === 0);
+check("__lagfixOff 移除 CV 属性（v0.3.4）",
+  docEl.getAttribute("data-lagfix-cv") === null,
+  `attr=${docEl.getAttribute("data-lagfix-cv")}`);
+check("__lagfixOff 后 laf/pace 为 null",
+  collect().laf === null && collect().pace === null,
+  `laf=${JSON.stringify(collect().laf)} pace=${JSON.stringify(collect().pace)}`);
 check("__lagfixOff 移除侧栏保护属性",
   docEl.getAttribute("data-lagfix-pane-switch") === null
     && docEl.getAttribute("data-lagfix-pane-open") === null,
@@ -1836,6 +2092,9 @@ check("一键还原同时关掉侧栏/回前台四项",
   saved.paneDiagOn === false && saved.paneSwitchGuardOn === false
     && saved.paneHoldOn === false && saved.refocusGuardOn === false,
   `paneDiagOn=${saved.paneDiagOn} guard=${saved.paneSwitchGuardOn} hold=${saved.paneHoldOn} refocus=${saved.refocusGuardOn}`);
+check("一键还原同时关掉 v0.3.4 三项",
+  saved.lafDiagOn === false && saved.loadOlderPaceOn === false && saved.turnContentVisOn === false,
+  `laf=${saved.lafDiagOn} pace=${saved.loadOlderPaceOn} cv=${saved.turnContentVisOn}`);
 check("日志上限默认 50MB 并已持久化", saved.logMaxMB === 50, `logMaxMB=${saved.logMaxMB}`);
 check("没有污染宿主 localStorage 的其它 key",
   Object.keys(localStorage._d).every((k) => k === "lagfix.settings.v1"), Object.keys(localStorage._d).join(","));
@@ -1961,6 +2220,37 @@ const panel3 = documentStub.getElementById("lagfix-settings-panel");
 }));
 check("macOS Cmd+Alt+L（key=¬ / code=KeyL）也能打开",
   documentStub.getElementById("lagfix-modal-mask").style.display === "flex");
+
+console.log("-- v0.3.4 面板与暂停路径 --");
+// 三个新开关行都在面板里（诊断组一个 + 实验组两个）
+const panelRootV34 = documentStub.getElementById("lagfix-settings-panel");
+check("面板有「卡顿来源定位」行", !!findRow(panelRootV34, "卡顿来源定位"));
+check("面板有「大会话翻页降频 · 实验」行", !!findRow(panelRootV34, "大会话翻页降频 · 实验"));
+check("面板有「长回合渲染减负 · 实验」行", !!findRow(panelRootV34, "长回合渲染减负 · 实验"));
+// 暂停观测时 CV 属性必须移除（want 条件含 observe），恢复后补回
+writeSettings({ turnContentVisOn: true });
+check("v0.3.4 尾段前置：CV 属性在", docEl.getAttribute("data-lagfix-cv") === "1",
+  `attr=${docEl.getAttribute("data-lagfix-cv")}`);
+writeSettings({ observe: false });
+check("暂停观测时 CV 属性移除", docEl.getAttribute("data-lagfix-cv") === null,
+  `attr=${docEl.getAttribute("data-lagfix-cv")}`);
+check("暂停样本 laf=null 但 pace 照实上报",
+  collect().laf === null && collect().pace !== undefined,
+  `laf=${JSON.stringify(collect().laf)}`);
+writeSettings({ observe: true, turnContentVisOn: false });
+check("恢复观测且开关已关：属性不回来", docEl.getAttribute("data-lagfix-cv") === null,
+  `attr=${docEl.getAttribute("data-lagfix-cv")}`);
+// P2-4（终审）：__lagfixOff 会摘掉 pagehide/beforeunload 但不会让 observer 死掉。
+// 之后只重新打开「观测」（不碰滚动/输入/归因开关）时，卸载清理必须挂回来。
+window.__lagfixOff();
+check("P2-4 前置：__lagfixOff 后卸载监听已移除",
+  (window._listeners.pagehide || []).length === 0);
+writeSettings({ observe: false });
+writeSettings({ observe: true });          // 只走 setObserving 路径
+check("只重开观测时 pagehide 监听挂回来（P2-4）",
+  (window._listeners.pagehide || []).length === 1,
+  `pagehide=${(window._listeners.pagehide || []).length}`);
+
 
 console.log("== 结果：", failures === 0 ? "PASS" : `FAIL(${failures})`, "==");
 process.exit(failures === 0 ? 0 : 1);
