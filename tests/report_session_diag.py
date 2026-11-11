@@ -299,7 +299,7 @@ def main() -> int:
     # detail 未变化发 []：向前找最近一次非空
     out = run_laf([laf_on, dict(laf_on, laf=dict(laf_on["laf"], detail=[]))])
     check("detail=[] 时回退到最近非空样本并标注",
-          "index-a1b2.js" in out and "最近一次有效样本" in out, out)
+          "index-a1b2.js" in out and "最近一次有效明细" in out, out)
 
     # 开启但没有任何 ≥100ms 记录
     out = run_laf([{"settings": {"lafDiagOn": True},
@@ -369,6 +369,84 @@ def main() -> int:
                                        "scripts": 7}]}}
     out = run_laf([bad_scripts])
     check("scripts 非列表时不炸", "Traceback" not in out, out)
+
+    print("-- v0.3.5 P0 长帧上下文归因 --")
+    ctx_entry = {
+        "t": 1730000100000, "ms": 180, "styleMs": 20,
+        "src": "flush", "sinceFlush": 0, "sinceNotify": 3,
+        "sinceScroll": 240, "sinceCommit": 18,
+        "scripts": [{"src": "index-a1b2.js", "invoker": "TimerHandler:setTimeout", "ms": 90}],
+    }
+    laf_ctx = {
+        "settings": {"lafDiagOn": True, "lafCtxOn": True},
+        "paneOpen": True, "panelQuiet": 1,
+        "laf": {"supported": 1, "count": 4, "max": 180,
+                "ctx": {"flush": 2, "notify": 1, "scroll": 1, "other": 0},
+                "detail": [ctx_entry]},
+    }
+    out = run_laf([laf_ctx])
+    check("来源分布按中文打印四类计数",
+          "节流补发 2" in out and "通知到达 1" in out and "滚动 1" in out and "其它 0" in out,
+          out)
+    check("面板状态行打印打开 + 面板期合并生效",
+          "当前面板：打开" in out and "面板期进一步合并已生效" in out, out)
+    check("明细行带来源与四个时间差",
+          "来源=节流补发" in out and "距补发 0ms" in out and "距通知 3ms" in out
+          and "距滚动 240ms" in out and "距提交 18ms" in out, out)
+    # other + sinceCommit<=50：提示紧跟宿主提交，帮助判断宿主渲染成本。
+    other_entry = dict(ctx_entry, src="other", sinceCommit=20)
+    out = run_laf([dict(laf_ctx, laf=dict(laf_ctx["laf"], detail=[other_entry]))])
+    check("other 且提交很近时提示「紧跟宿主提交」",
+          "来源=其它" in out and "紧跟宿主提交" in out, out)
+    # P0 关闭：ctx=null，报告提示来源细分关闭而不是「没有卡顿」。
+    out = run_laf([{"settings": {"lafDiagOn": True, "lafCtxOn": False},
+                    "laf": {"supported": 1, "count": 0, "max": None,
+                            "ctx": None, "detail": []}}])
+    check("lafCtxOn=false 时提示来源细分已关闭",
+          "长帧来源细分已关闭" in out, out)
+    # 旧样本没有 ctx：只提示版本未记录，不炸。
+    out = run_laf([{"settings": {"lafDiagOn": True},
+                    "laf": {"supported": 1, "count": 1, "max": 120, "detail": []}}])
+    check("旧样本无 ctx 时提示本版本未记录",
+          "本版本未记录长帧来源细分" in out, out)
+    # 三审 P1 回归：旧样本有 detail+ctx，最新样本关闭细分 → 必须报「已关闭」，
+    # 不能把旧 ctx 当本周期，也不能继续打印旧明细的 src。
+    rows_old_then_off = [
+        {"settings": {"lafDiagOn": True, "lafCtxOn": True},
+         "laf": {"supported": 1, "count": 3, "max": 180,
+                 "ctx": {"flush": 2, "notify": 1, "scroll": 0, "other": 0},
+                 "detail": [ctx_entry]}},
+        {"settings": {"lafDiagOn": True, "lafCtxOn": False},
+         "laf": {"supported": 1, "count": 0, "max": None,
+                 "ctx": None, "detail": []}},
+    ]
+    out = run_laf(rows_old_then_off)
+    check("最新样本关闭时不打印旧来源分布/旧来源明细",
+          "长帧来源细分已关闭" in out
+          and "本周期长帧来源" not in out
+          and "来源=节流补发" not in out, out)
+    # NaN / Infinity：json.loads 默认接受，报告不能因此 traceback。
+    nan_ctx = {
+        "settings": {"lafDiagOn": True, "lafCtxOn": True},
+        "laf": {"supported": 1, "count": 1, "max": float("inf"),
+                "ctx": {"flush": float("nan"), "notify": 1,
+                        "scroll": 1, "other": 1},
+                "detail": [{
+                    "t": 1730000100000, "ms": float("inf"), "styleMs": float("nan"),
+                    "src": "flush", "sinceFlush": float("nan"), "sinceNotify": 1,
+                    "sinceScroll": 2, "sinceCommit": float("inf"),
+                    "scripts": [{"src": "x.js", "invoker": "f", "ms": float("inf")}],
+                }]},
+    }
+    out = run_laf([nan_ctx])
+    check("NaN/Infinity 不炸", "Traceback" not in out, out)
+    # 坏形状：ctx 是数字、paneOpen 是字符串 → 不抛异常。
+    bad_ctx = {"settings": {"lafDiagOn": True, "lafCtxOn": True},
+               "paneOpen": "yes", "panelQuiet": "1",
+               "laf": {"supported": 1, "count": 1, "max": 120,
+                       "ctx": 5, "detail": []}}
+    out = run_laf([bad_ctx])
+    check("ctx/paneOpen 坏形状不炸", "Traceback" not in out, out)
 
     print("== report_session_diag 结果：", "PASS" if ok else "FAIL", "==")
     return 0 if ok else 1

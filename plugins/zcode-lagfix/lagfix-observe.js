@@ -1,5 +1,11 @@
 /**
- * zcode-lagfix renderer 观测脚本 v0.3.4
+ * zcode-lagfix renderer 观测脚本 v0.3.5
+ *
+ * v0.3.5（长帧上下文归因 + 面板期进一步合并）：
+ *   - P0 lafCtxOn（默认开，只读）：每条 ≥100ms 长帧记录距上次通知/补发/滚动/
+ *     投影提交的毫秒数，并归类 flush/notify/scroll/other；样本带 paneOpen/panelQuiet。
+ *   - O5 panelQuietOn（默认关，实验）：面板常开期通知下限 300→400ms、角标
+ *     1.8s→3s；面板关闭立即恢复。只改插件侧时序，不碰宿主 DOM/数据。
  *
  * v0.3.4（卡顿归因 + 翻页降频 + 长回合渲染减负）：
  *   - P0 LoAF 归因（lafDiagOn，默认开，只读）：时长 ≥100ms 的长帧记录
@@ -115,13 +121,18 @@
   var PANE_SWITCH_WINDOW_MS = 800; // 开合后帧窗口
   var PANE_HOLD_FLOOR_MS = 300;    // 面板常开期节流下限
   var PANE_BADGE_MIN_MS = 1800;    // 面板常开期角标定位上限频率
+  // v0.3.5 O5：面板期进一步合并（实验，默认关）；取比 P2 更严格的值。
+  var PANEL_QUIET_FLOOR_MS = 400;  // 面板期通知下限
+  var PANEL_QUIET_BADGE_MS = 3000; // 面板期角标定位上限频率
+  // v0.3.5 P0：长帧能被归因到某个信号的最大滞后。
+  var LAF_CTX_WINDOW_MS = 1000;
   var REFOCUS_DELAY_MS = 120;      // 回前台合并补发延迟
   var REFOCUS_GUARD_MS = 700;      // 回前台节流下限窗口
   var REFOCUS_BADGE_SKIP_MS = 300; // 回前台前 300ms 不定位角标
   var REFOCUS_WINDOW_MS = 800;     // 回前台帧窗口
   var PANE_SWITCH_DEDUPE_MS = 150; // aria-hidden 与 class 双信号去重
   var REFOCUS_DEDUPE_MS = 500;     // visibilitychange 与 focus 双信号去重
-  var VERSION = "0.3.4";
+  var VERSION = "0.3.5";
   var ERR_LIMIT = 50;
   var OVERLAY_ID = "lagfix-overlay-badge";
   // 宿主浮层（Radix portal）：上下文容量、模型/工具菜单、对话框等。
@@ -157,6 +168,9 @@
     lafDiagOn: true,           // LoAF 卡顿来源定位（只读）
     loadOlderPaceOn: false,    // O3 大会话翻页降频（实验）
     turnContentVisOn: false,   // O4 turn 内 content-visibility（实验）
+    // v0.3.5 P0 归因补强 + O5 面板期进一步合并（默认关，A/B 达标前不进默认路径）
+    lafCtxOn: true,            // 长帧上下文归因（只读）
+    panelQuietOn: false,       // O5 面板期进一步合并（实验）
     logMaxMB: 50,       // 观测日志总预算（MB），超过自动删最旧
     warnMs: 50,         // 帧 P95 黄阈值
     badMs: 100,         // 帧 P95 红阈值
@@ -196,6 +210,9 @@
     if (typeof o.lafDiagOn === "boolean") s.lafDiagOn = o.lafDiagOn;
     if (typeof o.loadOlderPaceOn === "boolean") s.loadOlderPaceOn = o.loadOlderPaceOn;
     if (typeof o.turnContentVisOn === "boolean") s.turnContentVisOn = o.turnContentVisOn;
+    // v0.3.5：两项独立开关，只接受布尔值。
+    if (typeof o.lafCtxOn === "boolean") s.lafCtxOn = o.lafCtxOn;
+    if (typeof o.panelQuietOn === "boolean") s.panelQuietOn = o.panelQuietOn;
     if (o.logMaxMB != null) s.logMaxMB = clampNum(o.logMaxMB, 5, 1000, DEFAULTS.logMaxMB);
     if (o.warnMs != null) s.warnMs = clampNum(o.warnMs, 1, 5000, DEFAULTS.warnMs);
     if (o.badMs != null) s.badMs = clampNum(o.badMs, 2, 10000, DEFAULTS.badMs);
@@ -274,6 +291,11 @@
   var scrollEvents = 0;      // 本周期时间线滚动事件数
   var anyScrollEvents = 0;   // 本周期所有 scroll 事件数（区分「没人滚」与「选择器失配」）
   var lastScrollAt = 0;      // performance.now()
+  // v0.3.5 P0：长帧上下文时间戳（0 = 尚未发生）；暂停/关闭/自禁用一律清空。
+  var lastNotifyAt = 0;      // 宿主通知进入 subscribe 包装
+  var lastFlushAt = 0;       // 插件把合并后的通知真正交给宿主
+  var lastCommitAt = 0;      // 活动 pane 的 data-projection-seq 变化
+  var lastLafScrollAt = 0;   // P0 专用滚动时间戳（不与滚动诊断共用，互不污染）
   var loadOlderRing = [];    // [{t, ms}]
   var loadOlderCalls = 0;    // 自 observer 启动累计
   var loadOlderErrors = 0;   // 同步抛错 + promise reject
@@ -344,6 +366,86 @@
   var lafDetail = [];         // [{t, ms, styleMs, scripts:[{src, invoker, ms}]}]
   var lafDetailKey = "";      // 上次随样本发出的归因指纹；未变化时只发 []
   var lafSupported = false;   // 浏览器是否支持 long-animation-frame 条目
+  // v0.3.5 P0：本周期每条 ≥100ms 长帧的来源计数；随采集周期清零。
+  var lafCtxCounts = { flush: 0, notify: 0, scroll: 0, other: 0 };
+
+  function resetLafCtx() {
+    lastNotifyAt = 0;
+    lastFlushAt = 0;
+    lastCommitAt = 0;
+    lastLafScrollAt = 0;
+    lafCtxCounts = { flush: 0, notify: 0, scroll: 0, other: 0 };
+  }
+
+  // v0.3.5：关闭来源细分后，环里旧条目也不能再带上下文字段——否则下一次
+  // 明细重发会把旧 src 一起发出去，报告出现「已关闭 + 来源=…」自相矛盾。
+  function stripLafCtxFromDetail() {
+    var changed = false;
+    for (var i = 0; i < lafDetail.length; i++) {
+      var d = lafDetail[i];
+      if (!d || typeof d !== "object") continue;
+      if ("src" in d || "sinceNotify" in d || "sinceFlush" in d
+        || "sinceScroll" in d || "sinceCommit" in d) {
+        delete d.src;
+        delete d.sinceNotify;
+        delete d.sinceFlush;
+        delete d.sinceScroll;
+        delete d.sinceCommit;
+        changed = true;
+      }
+    }
+    if (changed) lafDetailKey = "";
+  }
+
+  // 长帧归因可用的上下文时间戳：父开关/观测/自禁用任一不满足就不更新。
+  function lafCtxWanted() {
+    return settings.lafDiagOn && settings.lafCtxOn
+      && settings.observe && !state.dead;
+  }
+
+  // 信号相对长帧的滞后：帧开始前 = start - ts；发生在帧内（含帧首）= 0；
+  // 晚于帧结束（不属于这一帧）或未发生 = null。
+  // LoAF entry.startTime 是**帧起点**，滚动/通知/补发/提交回调通常发生在帧内，
+  // 它们的 performance.now() 晚于 startTime 是正常的同帧因果，不能当成“未来时间”。
+  function lafLagOf(ts, start, end) {
+    if (!ts) return null;
+    if (ts < start) return Math.round(start - ts);
+    if (ts <= end) return 0;
+    return null;
+  }
+
+  // 在 flush/notify/scroll 中取滞后最小的候选；超过窗口或没有候选归 other。
+  // 帧内信号（lag=0）按发生时间取更早者：滚动处理里同步触发的通知/补发，
+  // 根因仍是滚动；真正由延迟补发触发的帧，lastFlushAt 会晚于 lastNotifyAt。
+  // 完全同一毫秒时按 flush → notify → scroll。
+  function lafCtxOf(startTime, duration) {
+    var start = Number(startTime) || 0;
+    var end = start + Math.max(0, Number(duration) || 0);
+    var cands = [
+      { src: "flush", ts: lastFlushAt },
+      { src: "notify", ts: lastNotifyAt },
+      { src: "scroll", ts: lastLafScrollAt },
+    ];
+    var best = "other";
+    var bestLag = Infinity;
+    var bestTs = Infinity;
+    for (var i = 0; i < cands.length; i++) {
+      var lag = lafLagOf(cands[i].ts, start, end);
+      if (lag === null || lag > LAF_CTX_WINDOW_MS) continue;
+      if (lag < bestLag || (lag === bestLag && cands[i].ts < bestTs)) {
+        best = cands[i].src;
+        bestLag = lag;
+        bestTs = cands[i].ts;
+      }
+    }
+    return {
+      src: best,
+      sinceNotify: lafLagOf(lastNotifyAt, start, end),
+      sinceFlush: lafLagOf(lastFlushAt, start, end),
+      sinceScroll: lafLagOf(lastLafScrollAt, start, end),
+      sinceCommit: lafLagOf(lastCommitAt, start, end),
+    };
+  }
   // 降频参数是拍板值（docs/specs/v0.3.4-loadolder-dom.md §1.2）：改值必须重新 A/B。
   var PACE_MIN_ROWS = 3000;   // 窗口行数不超过它时完全不计时
   var PACE_INTERVAL_MS = 600; // 大窗口下两次放行的最小间隔
@@ -373,7 +475,8 @@
 
   function paneWatchNeeded() {
     return !state.dead && settings.observe
-      && (settings.paneDiagOn || settings.paneSwitchGuardOn || settings.paneHoldOn);
+      && (settings.paneDiagOn || settings.paneSwitchGuardOn || settings.paneHoldOn
+        || settings.panelQuietOn);
   }
 
   function refocusWatchNeeded() {
@@ -804,6 +907,7 @@
     lafCount = 0;
     lafMax = 0;
     lastScrollAt = 0;
+    resetLafCtx();
     domPeak = 0;
     domPeakAt = 0;
     domProbeAt = 0;
@@ -839,6 +943,9 @@
     // 帧环按窗口滚动，但切会话后旧会话的"最差一帧"不该继续染红新会话的角标。
     // （注释一直写着 attach/sid 变化会重置，这里补齐实际清理。）
     try { frameRing.length = 0; frameMaxAll = 0; } catch (e) {}
+    // v0.3.5：lastCommitAt 跟随活动 pane；attach/切会话后不能把旧 pane 的提交
+    // 当成本会话长帧的上下文（通知/滚动时间戳是窗口级，保留）。
+    lastCommitAt = 0;
   }
 
   function windowValues(ring, now) {
@@ -1024,12 +1131,23 @@
         if (scripts.length > 5) scripts.length = 5;
       }
     } catch (e) { scripts = []; }
-    lafDetail.push({
+    var rec = {
       t: Date.now(),
       ms: Math.round(entry.duration || 0),
       styleMs: Math.round(forcedMs),
       scripts: scripts,
-    });
+    };
+    // v0.3.5 P0：上下文只在开关开着时记录（关掉后明细不带这些键，旧消费端不受影响）。
+    if (settings.lafCtxOn) {
+      var ctx = lafCtxOf(entry.startTime, entry.duration);
+      rec.src = ctx.src;
+      rec.sinceNotify = ctx.sinceNotify;
+      rec.sinceFlush = ctx.sinceFlush;
+      rec.sinceScroll = ctx.sinceScroll;
+      rec.sinceCommit = ctx.sinceCommit;
+      lafCtxCounts[ctx.src]++;
+    }
+    lafDetail.push(rec);
     if (lafDetail.length > LAF_DETAIL_MAX) lafDetail.shift();
   }
   try {
@@ -1111,7 +1229,8 @@
       if (state.dead) return;
       if (!settings.scrollDiagOn && !settings.maskOffOnScroll
         && !(settings.sessionDiagOn && settings.observe)
-        && !settings.loadOlderPaceOn) return;   // v0.3.4：降频靠滚动信号区分触发来源
+        && !settings.loadOlderPaceOn
+        && !(settings.lafDiagOn && settings.lafCtxOn && settings.observe)) return;
       var el = ev && ev.target;
       // 滚动事件的 target 就是滚动容器本身，不向上 closest()；target 没有
       // matches（合成事件/测试 stub）时直接放行，不能因此报错。
@@ -1139,6 +1258,8 @@
         scrollEvents++;
         anyScrollEvents++;
       }
+      // v0.3.5 P0：独立时间戳，关掉滚动诊断也不影响上下文归因。
+      if (lafCtxWanted()) lastLafScrollAt = performance.now();
       if (settings.maskOffOnScroll) setScrollMaskActive(true);
       // v0.3.2：按 pane 记录滚动活动；找不到 pane 时归到当前主会话。
       if (settings.sessionDiagOn && settings.observe) {
@@ -1188,7 +1309,9 @@
   function scrollWatchNeeded() {
     return !state.dead && (settings.scrollDiagOn || settings.maskOffOnScroll
       || (settings.sessionDiagOn && settings.observe)
-      || settings.loadOlderPaceOn);   // v0.3.4：降频需要滚动信号
+      || settings.loadOlderPaceOn
+      // v0.3.5 P0：长帧上下文需要滚动时间戳，即使滚动诊断关着。
+      || (settings.lafDiagOn && settings.lafCtxOn && settings.observe));
   }
 
   // ---- v0.3.1 输入延迟：只采输入框内的按键，一次 closest，不拦截事件 ----
@@ -1946,6 +2069,10 @@
             state.lastT = now;
             return;
           }
+          // v0.3.5 P0：seq 变化就是一次投影提交；首次基线变化也算（它同样会触发渲染）。
+          if (settings.lafDiagOn && settings.lafCtxOn && !state.dead) {
+            lastCommitAt = now;
+          }
           // 挂载/切会话后的第一次变化是「加载耗时」，不是帧间隔（终审 P1-4）
           if (!state.primed) {
             state.primed = true;
@@ -2488,7 +2615,11 @@
     var keepVisible = el.style.display !== "none";
     if (settings.paneSwitchGuardOn && paneGuardUntil && now < paneGuardUntil) return keepVisible;
     if (settings.refocusGuardOn && refocusBadgeUntil && now < refocusBadgeUntil) return keepVisible;
-    if (settings.paneHoldOn && paneOpen && keepVisible) {
+    if (settings.panelQuietOn && settings.observe && paneOpen && keepVisible) {
+      // v0.3.5 O5：面板期角标最多每 3s 定位一次（比 P2 的 1.8s 更省）。
+      if (paneLastBadgeAt && now - paneLastBadgeAt < PANEL_QUIET_BADGE_MS) return true;
+      paneLastBadgeAt = now;
+    } else if (settings.paneHoldOn && paneOpen && keepVisible) {
       if (paneLastBadgeAt && now - paneLastBadgeAt < PANE_BADGE_MIN_MS) return true;
       paneLastBadgeAt = now;
     }
@@ -3099,6 +3230,14 @@
       + "以及当时最耗时的几段界面工作出自哪个脚本文件，最多保留最近 10 次。用来回答「卡的时候到底在忙什么」。\n"
       + "不会做什么：不读对话内容，不改任何数据，也不让画面变快。记录里只有脚本文件名和时间，没有路径和内容。\n"
       + "代价：极低，只在卡顿发生的那一下多记几条统计。"));
+    c2b.appendChild(rowEl("卡顿来源细分", "在卡顿记录里补上距上次刷新、滚动、消息更新的时间，用来判断卡顿由哪类操作引起。",
+      switchEl(settings.lafCtxOn, function (v) {
+        settings.lafCtxOn = v; saveSettings(); applyScrollSettings(); rebuildPanel();
+      }),
+      "会做什么：每次画面卡住超过 100 毫秒时，额外记下它距离上一次画面刷新、聊天区滚动、消息更新各有多久，"
+      + "并把这次卡顿归到「刷新合并」「滚动」「通知」或「其它」四类之一，方便判断下一步该优化哪里。\n"
+      + "不会做什么：不读对话内容，不改数据，也不让画面变快；只在上面的「卡顿来源定位」已开启时生效。\n"
+      + "代价：极低，只多记几个时间差。"));
     sObs.appendChild(c2b);
     sections.observe = sObs;
 
@@ -3279,6 +3418,15 @@
       + "正在生成的回复不受影响。\n"
       + "不会做什么：不折叠、不隐藏、不删任何内容；滚到哪里内容都在，搜索和选中也不受影响。\n"
       + "代价：一段很长的历史第一次滚到时，没绘制过的消息块可能有一次较明显的跳动（之后不再出现）。"));
+    c3f.appendChild(rowEl("面板常开时进一步合并 · 实验", "面板打开时把刷新间隔至少放到 400ms、角标最多每 3 秒移动一次。",
+      switchEl(settings.panelQuietOn, function (v) {
+        settings.panelQuietOn = v; saveSettings(); applyPaneSettings(); rebuildPanel(); renderPanelStatus();
+      }),
+      "会做什么：右侧面板保持打开时，聊天区的刷新间隔取「你设置的最短刷新间隔」与 400ms 的较大者，"
+      + "角标最多每 3 秒同步一次位置。面板关闭后，之后的通知立即回到基础刷新间隔（默认 120ms，可在上方调整）。\n"
+      + "不会做什么：不改变面板内容、滚动位置、消息数据或工具执行；不新增任何页面上的标记。\n"
+      + "代价：面板常开时聊天文字可能更晚更新（至少 400ms 一次），角标位置更新更慢。\n"
+      + "说明：这是一项实验，需要实际对比开/关的卡顿数据；没有明显改善就保持关闭。"));
     sFix.appendChild(c3f);
     sections.fix = sFix;
 
@@ -3742,6 +3890,11 @@
       }
       effCache = { at: now, ms: ms };
     }
+    // v0.3.5 O5：面板期进一步合并的 400ms 下限不进入 1s 缓存——面板一关
+    // 必须当拍恢复，不能因为缓存再拖最多 1s。
+    if (settings.panelQuietOn && settings.observe && paneOpen && !state.dead) {
+      ms = Math.max(ms, PANEL_QUIET_FLOOR_MS);
+    }
     // 回前台 700ms 的下限不进入 1s 缓存，否则窗口结束后还会多拖最多 1s。
     if (settings.refocusGuardOn && refocusGuardUntil && now < refocusGuardUntil) {
       ms = Math.max(ms, 400);
@@ -3772,13 +3925,27 @@
       var win = winOf(self);
       var timer = null, pending = false, lastArgs = null;
       function fire() {
-        win.last = performance.now();
+        var now = performance.now();
+        win.last = now;
+        // v0.3.5 P0：真正交付通知的时刻（含立即放行、延迟补发、回前台补发）。
+        // 只在合并刷新仍生效时记录：关闭后旧 wrapper 可能还会被调用一次，
+        // 但那不再代表插件在合并通知，不能把随后的长帧归到 flush。
+        if (settings.throttleOn && settings.lafDiagOn && settings.lafCtxOn
+          && settings.observe && !state.dead) {
+          lastFlushAt = now;
+        }
         var args = lastArgs;
         lastArgs = null;
         try { cb.apply(null, args || []); } catch (e) {}
       }
       function wrapped() {
         lastArgs = arguments;
+        // v0.3.5 P0：宿主通知进入包装的时刻。与 fire() 分开记录，才能区分
+        // 「通知到了但被合并」（notify 近、flush 远）和「补发才真正渲染」（flush 近）。
+        if (settings.throttleOn && settings.lafDiagOn && settings.lafCtxOn
+          && settings.observe && !state.dead) {
+          lastNotifyAt = performance.now();
+        }
         throttleHits++;
         // 关掉开关后，已经订阅过的组件也要立刻恢复即时通知
         if (!settings.throttleOn) {
@@ -4064,6 +4231,10 @@
     restoreTarget(target);
     fixState.target = null;
     fixState.orig = null;
+    // v0.3.5：合并刷新关闭后，旧 wrapper 可能还会被调用一次；清掉通知时间戳，
+    // 避免 P0 把关闭后的长帧继续归到 flush/notify（与文档边界一致）。
+    lastNotifyAt = 0;
+    lastFlushAt = 0;
   }
 
   // v0.3.1：两个观测开关与遮罩开关的唯一应用点。
@@ -4108,6 +4279,11 @@
       lafDetailKey = "";
       paceInScrollDispatch = false;
     }
+    // v0.3.5：P0 关闭（或父开关关）时清掉上下文时间戳与周期计数；重新开启从 0 起算。
+    if (!settings.lafCtxOn || !settings.lafDiagOn || state.dead) {
+      resetLafCtx();
+      if (!settings.lafCtxOn) stripLafCtxFromDetail();
+    }
     setLafObserving(lafWatchNeeded());
     // 监听器按当前开关装卸；关闭后不再空转，重新开启时这里会挂回来。
     setScrollListener(scrollWatchNeeded());
@@ -4140,6 +4316,9 @@
       settings.lafDiagOn = false;
       settings.loadOlderPaceOn = false;
       settings.turnContentVisOn = false;
+      // v0.3.5：上下文归因与面板期合并一并关；时间戳/计数清空。
+      settings.lafCtxOn = false;
+      settings.panelQuietOn = false;
       saveSettings();
       releaseThrottle();
       releaseLoadAllGuard();
@@ -4168,6 +4347,7 @@
       lafCount = 0;
       lafMax = 0;
       lastScrollAt = 0;
+      resetLafCtx();
       domPeak = 0;
       domPeakAt = 0;
       domProbeAt = 0;
@@ -4235,6 +4415,7 @@
       scrollEvents = 0;
       anyScrollEvents = 0;
       lafCount = 0;
+      resetLafCtx();   // v0.3.5：暂停期间不保留上一段的长帧上下文
       // v0.3.2：暂停期间不观察提交，但保留桶；恢复后重新同步。
       resetSessionCounts();
       try { if (sessionMO) sessionMO.disconnect(); } catch (e) {}
@@ -4285,12 +4466,16 @@
     var wasLafDiag = settings.lafDiagOn;
     var wasPace = settings.loadOlderPaceOn;
     var wasCv = settings.turnContentVisOn;
+    // v0.3.5：P0 上下文与 O5 面板期合并。
+    var wasLafCtx = settings.lafCtxOn;
+    var wasPanelQuiet = settings.panelQuietOn;
     mergeStored(o, settings);
     if (settings.badMs <= settings.warnMs) settings.badMs = settings.warnMs + 1;
     if (settings.observe !== wasObserve) setObserving(settings.observe, true);
     if (settings.scrollDiagOn !== wasScrollDiag || settings.inputLagOn !== wasInputLag
       || settings.maskOffOnScroll !== wasMask
-      || settings.lafDiagOn !== wasLafDiag || settings.loadOlderPaceOn !== wasPace) {
+      || settings.lafDiagOn !== wasLafDiag || settings.loadOlderPaceOn !== wasPace
+      || settings.lafCtxOn !== wasLafCtx) {
       applyScrollSettings();
       // 降频开关打开时立即尝试装包装（scrollDiagOn 可能是关的，不会走上面的 applyThrottle）。
       if (settings.loadOlderPaceOn) { try { applyThrottle(); } catch (e) {} }
@@ -4301,7 +4486,8 @@
     if (settings.paneDiagOn !== wasPaneDiag
       || settings.paneSwitchGuardOn !== wasPaneGuard
       || settings.paneHoldOn !== wasPaneHold
-      || settings.refocusGuardOn !== wasRefocusGuard) {
+      || settings.refocusGuardOn !== wasRefocusGuard
+      || settings.panelQuietOn !== wasPanelQuiet) {
       applyPaneSettings();
     }
     if (settings.throttleOn) {
@@ -4358,6 +4544,8 @@
       lafDiagOn: settings.lafDiagOn,
       loadOlderPaceOn: settings.loadOlderPaceOn,
       turnContentVisOn: settings.turnContentVisOn,
+      lafCtxOn: settings.lafCtxOn,
+      panelQuietOn: settings.panelQuietOn,
       logMaxMB: settings.logMaxMB,
       warnMs: settings.warnMs, badMs: settings.badMs, collectSec: settings.collectSec,
     };
@@ -4431,7 +4619,13 @@
     var parts = [];
     for (var i = 0; i < lafDetail.length; i++) {
       var d = lafDetail[i];
-      parts.push(d.t + ":" + d.ms + ":" + d.styleMs + ":" + d.scripts.length);
+      // v0.3.5：上下文变化也要触发一次完整明细，否则来源/差值变化会被
+      // 「未变化发 []」吞掉。
+      parts.push(d.t + ":" + d.ms + ":" + d.styleMs + ":" + d.scripts.length
+        + ":" + (d.src || "") + ":" + (d.sinceNotify == null ? "" : d.sinceNotify)
+        + ":" + (d.sinceFlush == null ? "" : d.sinceFlush)
+        + ":" + (d.sinceScroll == null ? "" : d.sinceScroll)
+        + ":" + (d.sinceCommit == null ? "" : d.sinceCommit));
     }
     return parts.join("|");
   }
@@ -4445,8 +4639,21 @@
       supported: lafSupported ? 1 : 0,
       count: lafCount,
       max: lafMax || null,
+      // v0.3.5 P0：本周期来源分布；开关关闭时为 null（不假装有数据）。
+      ctx: settings.lafCtxOn ? {
+        flush: lafCtxCounts.flush,
+        notify: lafCtxCounts.notify,
+        scroll: lafCtxCounts.scroll,
+        other: lafCtxCounts.other,
+      } : null,
       detail: snap,
     };
+  }
+
+  // v0.3.5 O5：面板期进一步合并当前是否生效（样本 panelQuiet 与报告共用一口径）。
+  function panelQuietActive() {
+    return !!(settings.panelQuietOn && settings.observe && !state.dead
+      && paneDetected && paneOpen);
   }
 
   function paceSnapshot() {
@@ -4486,6 +4693,7 @@
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
         pane: null, refocus: null,
         laf: null, pace: null,
+        paneOpen: null, panelQuiet: 0,
         ver: VERSION, updateCheck: 0,
         restart: state.restartRequested ? 1 : 0,
       });
@@ -4499,6 +4707,8 @@
       anyScrollEvents = 0;
       lafCount = 0;
       lafMax = 0;   // v0.3.4：与 lafCount 同口径，暂停不留陈旧最大值
+      // v0.3.5：暂停期间的上下文计数不带到恢复后的第一段。
+      resetLafCtx();
       inputPendingAt = 0;
       // 暂停不影响手动「检查更新」：标记随本样本回传一次后立即清掉，
       // 否则暂停期间每个周期都会重复请求。
@@ -4516,6 +4726,7 @@
         pane: null, refocus: null,
         // 暂停期归因环不累计（laf=null）；降频是缓解项，与 observe 独立，照实上报。
         laf: null, pace: paceSnapshot(),
+        paneOpen: null, panelQuiet: 0,
         ver: VERSION, updateCheck: pausedAsk,
         restart: state.restartRequested ? 1 : 0,
       });
@@ -4589,6 +4800,9 @@
         refocus: refocusSnapshot(now),
         laf: lafSnapshot(),
         pace: paceSnapshot(),
+        // v0.3.5：P0 的窗口上下文 + O5 是否正在生效；未检测到侧栏时 paneOpen=null。
+        paneOpen: paneDetected ? !!paneOpen : null,
+        panelQuiet: panelQuietActive() ? 1 : 0,
         ver: VERSION,
         updateCheck: askUpdate,
         restart: state.restartRequested ? 1 : 0,
@@ -4599,7 +4813,8 @@
       return JSON.stringify({ sid: state.sid, frames: 0, dt: 0, dead: false, errs: state.errCount,
         settings: cfg, fix: fixSnapshot(),
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
-        pane: null, refocus: null, laf: null, pace: null, ver: VERSION,
+        pane: null, refocus: null, laf: null, pace: null,
+        paneOpen: null, panelQuiet: 0, ver: VERSION,
         updateCheck: askUpdate,
         restart: state.restartRequested ? 1 : 0 });
     } finally {
@@ -4616,6 +4831,8 @@
       // v0.3.4：lafMax 与 lafCount 同为「本周期」口径（终审对齐 spec 1.1.1；
       // 此前跨周期保留会让报告的「本周期最长」拿到陈旧值）。
       lafMax = 0;
+      // v0.3.5：来源分布同样是周期计数。
+      lafCtxCounts = { flush: 0, notify: 0, scroll: 0, other: 0 };
     }
   };
 
@@ -4631,6 +4848,11 @@
       loadOlderErrors: loadOlderErrors, inputSamples: inputRing.length,
       sessionBuckets: sessionBuckets.length, sessionPanes: sessionPanes.length,
       loadOlderDetail: loadOlderDetail.length,
+      lafCtx: {
+        notify: lastNotifyAt, flush: lastFlushAt,
+        scroll: lastLafScrollAt, commit: lastCommitAt,
+        counts: lafCtxCounts,
+      },
       paneDetected: paneDetected, paneOpen: paneOpen, paneSwitches: paneSwitches,
       paneGuardHits: paneGuardHits,
       paneSwitchFrames: paneSwitchRing.length,

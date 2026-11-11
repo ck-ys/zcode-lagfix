@@ -18,6 +18,7 @@ v0.1.2 修订（三轮终审落地）：
 from __future__ import annotations
 
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -99,7 +100,8 @@ def fmt(v, suffix=""):
 
 
 def num(v):
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    # JSON 允许 NaN/Infinity；它们进入 int() 会直接抛异常，报告不能因此崩掉。
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
 def _monitor_alive() -> int:
@@ -249,6 +251,16 @@ def _laf_script_label(script: dict) -> str:
     才是唯一可用的归类信息，不能一律塌成 "?"。
     """
     return str(script.get("src") or script.get("invoker") or "?")[:24]
+
+
+def _laf_src_label(src) -> str:
+    """v0.3.5：长帧来源分类的中文展示名。"""
+    return {
+        "flush": "节流补发",
+        "notify": "通知到达",
+        "scroll": "滚动",
+        "other": "其它",
+    }.get(str(src or ""), "未标注")
 
 
 def print_session_diag(rows: list[dict]) -> None:
@@ -478,7 +490,7 @@ def print_pane_diag(rows: list[dict]) -> None:
 
 
 def print_laf_diag(rows: list[dict]) -> None:
-    """v0.3.4 卡顿来源定位（LoAF 归因）+ 翻页降频计数。
+    """v0.3.4 卡顿来源定位（LoAF 归因）+ v0.3.5 上下文分类 + 翻页降频计数。
 
     - laf 取最近一条 dict；detail 为 [] 时向前找最近一次非空（与 loadOlderDetail 同约定）。
     - supported=0 明确提示浏览器不支持，不把「不支持」说成「没有卡顿」。
@@ -491,37 +503,71 @@ def print_laf_diag(rows: list[dict]) -> None:
     newest = rows[-1] if rows else {}
     newest_settings = _settings_of(newest)
 
-    lrow = None
-    l_older = False
-    l_disabled = False
+    # v0.3.5 三审 P1：count/max/ctx/关闭状态必须取**最新一条 laf**，
+    # 不能拿「最近一次有明细的旧样本」冒充本周期；明细表再单独向前回退。
+    newest_laf = None
+    newest_laf_idx = None
+    detail_row = None
+    detail_idx = None
     for idx, r in enumerate(reversed(rows)):
         val = r.get("laf")
         if isinstance(val, dict):
-            if val.get("detail"):
-                lrow = val
-                l_older = idx > 0
-                break
-            if lrow is None:
-                lrow = val  # 先记住最近一条（带 count/max），明细继续向前找
+            if newest_laf is None:
+                newest_laf = val
+                newest_laf_idx = idx
+            if detail_row is None and val.get("detail"):
+                detail_row = val
+                detail_idx = idx
         elif val is None and _settings_of(r).get("lafDiagOn") is False:
             break        # 遇到关闭样本就停止回退，不把关闭前的数据当当前数据
 
-    if lrow is not None:
-        supported = lrow.get("supported")
+    if newest_laf is not None:
+        supported = newest_laf.get("supported")
         if supported == 0:
             print(f"  {INFO} 当前浏览器不支持 long-animation-frame，无法做卡顿来源定位")
         else:
-            suffix = "（最近一次有效样本）" if l_older else ""
-            print(f"  卡顿来源定位：本周期长帧 {fmt(lrow.get('count'))} 次"
-                  f"，最长 {fmt(lrow.get('max'), 'ms')}{suffix}")
-            if lrow.get("count") == 0 and lrow.get("detail"):
+            current_older = bool(newest_laf_idx)
+            suffix = "（最近一次有效样本）" if current_older else ""
+            print(f"  卡顿来源定位：本周期长帧 {fmt(newest_laf.get('count'))} 次"
+                  f"，最长 {fmt(newest_laf.get('max'), 'ms')}{suffix}")
+            # v0.3.5：P0 上下文（面板状态 + 来源分布）。旧样本没有这些字段，
+            # 只提示、不把「没记录」说成「没有卡顿」。
+            pane_open = newest.get("paneOpen")
+            if isinstance(pane_open, bool):
+                quiet = newest.get("panelQuiet") == 1
+                print(f"    当前面板：{'打开' if pane_open else '收起'}"
+                      + ("（面板期进一步合并已生效）" if quiet else ""))
+            ctx = newest_laf.get("ctx")
+            ctx_enabled_now = newest_settings.get("lafCtxOn") is not False
+            if not ctx_enabled_now:
+                print(f"    {INFO} 长帧来源细分已关闭")
+            elif isinstance(ctx, dict):
+                vals = {k: int(ctx.get(k) or 0) for k in
+                        ("flush", "notify", "scroll", "other")
+                        if num(ctx.get(k)) and ctx.get(k) >= 0}
+                total = sum(vals.values())
+                label = "最近一次有效样本的长帧来源" if current_older else "本周期长帧来源"
+                if total:
+                    print(f"    {label}："
+                          + " / ".join(f"{_laf_src_label(k)} {vals.get(k, 0)}"
+                                       for k in ("flush", "notify", "scroll", "other"))
+                          + f"（共 {total} 次）")
+                else:
+                    print(f"    {INFO} 本周期还没有 ≥100ms 的长帧，来源分布为空")
+            elif "ctx" not in newest_laf:
+                print(f"    {INFO} 本版本未记录长帧来源细分（旧样本）")
+            if (num(newest_laf.get("count")) and newest_laf.get("count") == 0
+                    and detail_row is not None):
                 print(f"    {INFO} 计数为 0 但已有明细：旧样本只开了卡顿归因、未开滚动诊断"
                       f"（v0.3.4 起两者共用计数，新样本不会再出现）")
-            raw_detail = lrow.get("detail")
+            raw_detail = detail_row.get("detail") if isinstance(detail_row, dict) else None
             details = [d for d in (raw_detail if isinstance(raw_detail, list) else [])
                        if isinstance(d, dict)][-10:]
             if details:
-                print(f"    最近 {len(details)} 次 ≥100ms 长帧：")
+                head = f"    最近 {len(details)} 次 ≥100ms 长帧"
+                if detail_idx and detail_idx > 0:
+                    head += "（最近一次有效明细，可能不是本周期）"
+                print(head + "：")
                 for d in details:
                     raw_scripts = d.get("scripts")
                     scripts = [s for s in (raw_scripts if isinstance(raw_scripts, list) else [])
@@ -531,8 +577,22 @@ def print_laf_diag(rows: list[dict]) -> None:
                         for s in scripts[:3]) or "（无脚本归属）"
                     style = d.get("styleMs")
                     style_note = f"，其中强制布局 {style}ms" if num(style) and style > 0 else ""
+                    # v0.3.5：来源分类与四个时间差；老样本/已关闭时整段省略。
+                    src_note = ""
+                    if ctx_enabled_now and d.get("src") is not None:
+                        bits = []
+                        for key, label in (("sinceFlush", "补发"), ("sinceNotify", "通知"),
+                                           ("sinceScroll", "滚动"), ("sinceCommit", "提交")):
+                            if num(d.get(key)):
+                                bits.append(f"距{label} {int(d[key])}ms")
+                        src_note = f"｜来源={_laf_src_label(d.get('src'))}"
+                        if bits:
+                            src_note += "（" + "，".join(bits) + "）"
+                        if (d.get("src") == "other" and num(d.get("sinceCommit"))
+                                and d.get("sinceCommit") <= 50):
+                            src_note += "（紧跟宿主提交）"
                     print(f"      {_fmt_ts(d.get('t'))}  {fmt(d.get('ms'), 'ms'):>8s}{style_note}"
-                          f"  ← {top}")
+                          f"  ← {top}{src_note}")
                 agg: dict = {}
                 for d in details:
                     raw_sc = d.get("scripts")
@@ -553,8 +613,6 @@ def print_laf_diag(rows: list[dict]) -> None:
         print(f"  {INFO} 卡顿来源定位已暂停（开关仍开，恢复观测后继续记录）")
     elif newest.get("dead"):
         print(f"  {INFO} 观测器已自禁用，卡顿来源定位停止")
-    elif l_disabled:
-        print(f"  {INFO} 卡顿来源定位已关闭")
     else:
         print(f"  {INFO} 无卡顿来源数据（旧样本，或本文件内还没有开启过）")
 
@@ -772,7 +830,7 @@ def main() -> int:
     print("  · 真实帧间隔 P95 > 50ms 或 单帧最长 > 200ms  → 用户能感知到卡")
     print("  · 长任务次数 > 0 → 主线程被单次阻塞，与卡顿直接相关")
     print("  · 投影提交率高但帧间隔正常 → 宿主在勤快重渲染，暂未卡死")
-    print("[lagfix] v0.3.4：新增卡顿来源定位（记录 ≥100ms 长帧的脚本归属与强制布局占比，只留文件名，默认开）；新增两项默认关闭的实验缓解——大会话翻页降频与长回合渲染减负；collect 新增 laf/pace 字段，报告新增「卡顿来源定位」「翻页降频」两段。仍不读消息正文、不写 store、不联网上报；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
+    print("[lagfix] v0.3.5：长帧归因补上上下文——每条 ≥100ms 长帧记录距上次通知/补发/滚动/消息提交的毫秒数，并归类为节流补发 / 通知到达 / 滚动 / 其它；样本新增 paneOpen/panelQuiet，报告卡顿段新增面板状态与来源分布。另新增默认关闭的实验「面板常开时进一步合并」（面板期通知下限 400ms、角标 3s）。仍不读消息正文、不写 store、不联网上报；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
     print()
     print_logs()
     return 0

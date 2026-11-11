@@ -174,6 +174,13 @@ v0.3.4 已拍板范围（Route A，归因先行 + 双实验）：
 - 三键均可独立关闭；`__lagfixOff()`/自禁用/暂停三条路径必须清掉 CV 属性、归因环、降频计数。两项实验保留门槛：A/B 滚动 P95 或长任务下降 ≥20%（或长任务 ≥30%），否则永久默认关闭并如实标注。
 - 行为规格见 `docs/specs/v0.3.4-loadolder-dom.md`；路线与数据门槛见 `docs/decisions/v0.3.4-route.html` 第 04/07 节。O7 多会话策略与预览绘制成本本版不做。
 
+v0.3.5 已拍板范围（推荐 A：P0 + O5 + U1）：
+
+- P0 长帧上下文归因（`lafCtxOn`，默认开，只读）：每条 ≥100ms 长帧记录 `sinceNotify/sinceFlush/sinceScroll/sinceCommit`（信号相对帧的滞后：帧前=距帧起点，帧内=0，晚于帧结束或未发生=`null`），归类 `flush/notify/scroll/other`；候选为 flush/notify/scroll 中滞后最小者，必须 ≤1000ms；帧内候选按信号发生时间取更早者，完全同毫秒按 flush→notify→scroll；commit 只作上下文不成类，attach/切会话清零。`ctx` 是本周期四类计数；样本带 `paneOpen`（未检测到侧栏为 `null`）与 `panelQuiet`（0/1）。P0 需要 `lafDiagOn` 父开关同时开启；滚动时间戳独立为 `lastLafScrollAt`，不得复用/污染滚动诊断的 `lastScrollAt`。
+- O5 面板期进一步合并（`panelQuietOn`，默认关，实验）：面板打开且观察到时通知下限 300→400ms、角标上限 1.8s→3s；面板关闭后新通知立即回基础间隔（在途一次最多按原窗口送达，400ms 下限在 1s 缓存之外计算）；不新增 DOM 属性、不碰 mask；即使 P2/P1/P0 全关，只要 O5 开就保留 pane 探针。过线门槛沿用 A/B：长帧数或 `frameP95` 下降 ≥20%，否则永久默认关闭。
+- U1 只出文档：把右侧预览是 Electron `<webview>` guest、合成落在宿主 renderer 的证据写进 README/发布说明，不改注入链、不声称插件已修。
+- 两键均可独立关闭；`__lagfixOff()`/自禁用/暂停三条路径必须清空四个时间戳、`ctx` 计数与 `paneOpen/panelQuiet` 输出。行为规格见 `docs/specs/v0.3.5-laf-context.md`；拍板页见 `docs/decisions/v0.3.5-next-optimization.html`。O3b（自动补拉降频）与 O6（非活动 pane 节流）本版不做。
+
 ## 7. 版本与发布
 
 每次版本变更必须同步以下位置，缺一不可：
