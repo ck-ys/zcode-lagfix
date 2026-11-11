@@ -259,10 +259,10 @@ globalThis.MutationObserver = class {
   }
   disconnect() { this.targets = []; }
 };
-function fireMutation(target, name) {
+function fireMutation(target, name, oldValue) {
   for (const inst of moInstances) {
     if (!inst.targets.some((t) => t.target === target)) continue;
-    inst.cb([{ type: "attributes", target, attributeName: name }], inst);
+    inst.cb([{ type: "attributes", target, attributeName: name, oldValue }], inst);
   }
 }
 // 真实宿主的 seq 每次提交都会变成新值；测试默认模拟“真的变化”，
@@ -833,6 +833,9 @@ check("sessionDiagOn=false 时 sessions 为 null", offSess.sessions === null,
   `sessions=${JSON.stringify(offSess.sessions)}`);
 check("关闭后不再遍历会话 pane", sessionQueryCount === qBeforeOff,
   `${qBeforeOff} -> ${sessionQueryCount}`);
+check("关闭后桶与观察目标已释放", window.__lagfixDiag().sessionBuckets === 0
+  && window.__lagfixDiag().sessionPanes === 0,
+  JSON.stringify(window.__lagfixDiag()));
 
 // 重新开启：桶重建，且一次提交只 +1（没有重复观察）。
 writeSettings({ sessionDiagOn: true });
@@ -860,6 +863,10 @@ check("pane 卸载后桶保留但 visible=false、dom=0",
   unloaded.sid === "sess_b" && unloaded.visible === false && unloaded.dom === 0,
   JSON.stringify(unloaded));
 sessionPaneList.push(paneB);
+const remounted = bySid(sessionsOf(), "sess_b");
+check("pane 重新挂回后 DOM/turn 立即补采",
+  remounted.visible === true && remounted.dom > 0,
+  JSON.stringify(remounted));
 
 // 6 个常驻 pane：只保留 5 个桶，且不能在每轮 collect 时轮换。
 const extraPanes = ["sess_c", "sess_d", "sess_e", "sess_f"].map((sid) => {
@@ -890,6 +897,50 @@ const cap3 = sessionsOf();
 check("第六个 pane 有真实提交后接管名额",
   cap3.length === 5 && cap3.some((b) => b.sid === missingSid),
   `sids=${sidSet(cap3)}`);
+
+// 同值 sid 重写既不是切换也不是活跃；满 5 桶时不能借此给额外 pane 抢名额。
+const paneExtra = makeEl("div");
+paneExtra.setAttribute("data-session-id", "sess_extra");
+paneExtra._visible = true;
+paneExtra._rect = { left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600 };
+paneExtra._all = makeSubtree(2, 1);
+sessionPaneList.push(paneExtra);
+sessionsOf();   // 满 5 桶，额外 pane 只观察不建桶
+const extraBefore = sidSet(sessionsOf());
+fireMutation(paneExtra, "data-session-id", "sess_extra");
+check("同值 data-session-id 重写不建桶、不淘汰",
+  sidSet(sessionsOf()) === extraBefore && !sidSet(sessionsOf()).includes("sess_extra"),
+  `${extraBefore} -> ${sidSet(sessionsOf())}`);
+// 切成 draft 也不是真实活动：满 5 桶时不能把真实会话挤掉。
+paneExtra.setAttribute("data-session-id", "draft");
+fireMutation(paneExtra, "data-session-id", "sess_extra");
+check("满 5 桶时 SID→draft 不淘汰真实桶",
+  sidSet(sessionsOf()) === extraBefore,
+  `${extraBefore} -> ${sidSet(sessionsOf())}`);
+
+// 未入桶的额外 pane 同值 seq 重写：不能建桶、计帧或淘汰真实桶。
+const paneSeqExtra = makeEl("div");
+paneSeqExtra.setAttribute("data-session-id", "sess_seq_extra");
+paneSeqExtra.setAttribute("data-projection-seq", "5");
+paneSeqExtra._visible = true;
+paneSeqExtra._rect = { left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600 };
+paneSeqExtra._all = makeSubtree(2, 1);
+sessionPaneList.push(paneSeqExtra);
+sessionsOf();
+const seqExtraBefore = sidSet(sessionsOf());
+fireMutation(paneSeqExtra, "data-projection-seq", "5");
+check("未入桶 pane 的同值 seq 不建桶、不淘汰",
+  sidSet(sessionsOf()) === seqExtraBefore
+    && !sidSet(sessionsOf()).includes("sess_seq_extra"),
+  `${seqExtraBefore} -> ${sidSet(sessionsOf())}`);
+
+// 已跟踪的真实会话切到另一个真实会话：即使满 5 桶也要换桶（当前主 pane 不能缺席）。
+missingPane.setAttribute("data-session-id", "sess_switched");
+fireMutation(missingPane, "data-session-id", missingSid);
+const switchedSids = sidSet(sessionsOf());
+check("满 5 桶时已跟踪 pane 切到真实会话仍建桶",
+  switchedSids.split(",").includes("sess_switched") && switchedSids.split(",").length === 5,
+  `sids=${switchedSids}`);
 
 // 占位 draft → 真实 sid：旧占位桶必须删除，不能占名额。
 sessionPaneList.length = 0;
@@ -985,25 +1036,44 @@ let e3 = detailOf().slice(-1)[0] || {};
 check("无近期滚动、非首次、距挂载 >5s 判为 unknown",
   e3.trigger === "unknown", `trigger=${e3.trigger}`);
 
-// reject / 同步抛错也要留下 ok=false 明细。
+// reject / 同步抛错也要留下 ok=false 明细，且原异常对象/原因不能被替换。
 store.loadOlderFail = true;
-try { await store.loadOlder(); } catch (e) {}
+let failErr = null;
+try { await store.loadOlder(); } catch (e) { failErr = e; }
 store.loadOlderFail = false;
 let eFail = detailOf().slice(-1)[0] || {};
 check("reject 写入 ok=false 明细", eFail.ok === false, JSON.stringify(eFail));
+check("reject 原因原样保留", !!failErr && failErr.message === "async-boom",
+  String(failErr && failErr.message));
 store.loadOlderThrow = true;
-try { store.loadOlder(); } catch (e) {}
+let throwErr = null;
+try { store.loadOlder(); } catch (e) { throwErr = e; }
 store.loadOlderThrow = false;
 let eThrow = detailOf().slice(-1)[0] || {};
 check("同步抛错写入 ok=false 明细", eThrow.ok === false, JSON.stringify(eThrow));
+check("同步抛错对象原样保留", !!throwErr && throwErr.message === "sync-boom",
+  String(throwErr && throwErr.message));
 
-// 环形窗口上限 10。
+// 环形窗口上限 10，且淘汰的是最旧记录。
 writeSettings({ scrollDiagOn: false });
 writeSettings({ scrollDiagOn: true });
 collect();
-for (let i = 0; i < 12; i++) await store.loadOlder();
+const capBase = Date.now() + 60000;
+const capRealDateNow = Date.now;
+let capTick = capBase;
+Date.now = () => capTick;
+try {
+  for (let i = 0; i < 12; i++) {
+    capTick += 1000;
+    await store.loadOlder();
+  }
+} finally {
+  Date.now = capRealDateNow;
+}
 let dcap = detailOf();
 check("明细最多保留最近 10 次", dcap.length === 10, `n=${dcap.length}`);
+check("明细上限淘汰最旧两条", dcap[0].t === capBase + 3000 && dcap[9].t === capBase + 12000,
+  `first=${dcap[0].t} last=${dcap[9].t} base=${capBase}`);
 store.state.snapshot.rows.window = [{ rowId: 1 }];   // 还原，避免影响后续断言
 
 console.log("-- 角标可见性：设置页 / 被遮挡 / 多个输入框 --");const badgeClick = (badge._listeners.click || [])[0];
@@ -1295,6 +1365,9 @@ check("另一窗口改 badgeText 后本窗口收敛", ps.settings.badgeText === 
 console.log("-- 换 store 实现（新原型）--");
 const s3 = makeStore();
 const s3OrigLoadOlder = s3.proto.loadOlder;   // 换原型后被包装的应还原成这个引用
+const detailBeforeSwitch = window.__lagfixDiag().loadOlderDetail;
+check("换 store 前明细环非空（前置条件）", detailBeforeSwitch > 0,
+  `n=${detailBeforeSwitch}`);
 anchor["__reactFiber$test"].memoizedState.memoizedState.binding.lease.store = s3.store;
 await wait(5200);   // 等看门狗（5s）重新核对目标
 check("新原型的 store 被自动包装", !!s3.proto.__lagfixThrottle);
@@ -1307,6 +1380,9 @@ check("loadOlder 不再写共享原型", s3.proto.__lagfixLoadOlder === undefine
 check("旧 store 实例的 loadOlder 观测已还原",
   store.loadOlder === origLoadOlderRef
     && !Object.prototype.hasOwnProperty.call(store, "loadOlder"));
+check("换 store 后旧会话补页明细不混入新会话",
+  window.__lagfixDiag().loadOlderDetail === 0,
+  `n=${window.__lagfixDiag().loadOlderDetail}`);
 
 console.log("-- 关闭后已订阅的 wrapper 立即直通 --");
 let dd = 0;

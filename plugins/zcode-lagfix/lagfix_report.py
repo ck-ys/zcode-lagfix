@@ -306,14 +306,20 @@ def print_session_diag(rows: list[dict]) -> None:
                 ok = bool(d.get("ok"))
                 rb, ra = d.get("rowsBefore"), d.get("rowsAfter")
                 same = num(rb) and num(ra) and rb == ra
+                trig = str(d.get("trigger") or "unknown")
+                if trig not in ("scroll", "initial", "unknown"):
+                    trig = "unknown"
                 print(f"    {_fmt_ts(d.get('t'))}  {fmt(d.get('ms'), 'ms'):>8s}"
                       f"  {'正常' if ok else '异常'}"
                       f"  行 {fmt(rb)}→{fmt(ra)}"
-                      f"  触发 {str(d.get('trigger') or '-')}"
+                      f"  触发 {trig}"
                       + ("  （无变化）" if same else ""))
             slow = max(details, key=lambda x: x.get("ms") if num(x.get("ms")) else -1)
+            slow_trig = str(slow.get("trigger") or "unknown")
+            if slow_trig not in ("scroll", "initial", "unknown"):
+                slow_trig = "unknown"
             print(f"    Top 慢补页：{fmt(slow.get('ms'), 'ms')}"
-                  f"（{slow.get('trigger') or '-'}，"
+                  f"（{slow_trig}，"
                   f"行 {fmt(slow.get('rowsBefore'))}→{fmt(slow.get('rowsAfter'))}）")
             counts = {"scroll": 0, "initial": 0, "unknown": 0}
             for d in details:
@@ -324,9 +330,9 @@ def print_session_diag(rows: list[dict]) -> None:
             print("    注：正常仅表示 promise 结算无异常；宿主内部失败可能被吞掉，"
                   "行数无变化也可能是 no-op。")
         else:
-            print(f"  {INFO} 补页明细为空（尚未调用 loadOlder）")
+            print(f"  {INFO} 本文件内未记录到补页明细（可能尚未调用 loadOlder，或明细在上一个日志文件）")
     elif d_seen:
-        print(f"  {INFO} 补页明细为空（尚未调用 loadOlder）")
+        print(f"  {INFO} 本文件内未记录到补页明细（可能尚未调用 loadOlder，或明细在上一个日志文件）")
     elif d_disabled:
         print(f"  {INFO} 滚动诊断已关闭，无补页明细")
     else:

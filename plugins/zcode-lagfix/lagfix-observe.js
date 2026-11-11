@@ -228,8 +228,8 @@
   var sessionPanes = [];     // [{pane, bucket}]
   var sessionMO = null;      // 一个 MutationObserver 同时观察多个 pane
   var sessionObservedPanes = []; // sessionMO 当前实际观察的 pane（集合不变就不重挂）
-  var sessionDomAt = 0;      // 上次遍历 pane 子树的时间（固定 60s，新桶立即采一次）
   var loadOlderDetail = [];  // 最近 10 次 loadOlder 调用（只记元数据）
+  var detailVersion = 0;     // 每次追加都 +1，防止 t/ms/ok 恰好相同的指纹碰撞
   var lastDetailKey = "";    // 上次随样本发出的明细指纹；未变化时只发 []，避免日志膨胀
   var domPeak = 0;           // 最近 30s 内采样到的最大 DOM 数
   var domPeakAt = 0;         // 峰值窗口起点
@@ -691,8 +691,8 @@
     // 而不是被 sloppy 规则换成 globalThis。保持与原方法完全一致的 this 语义。
     return function () {
       "use strict";
-      // 暂停观测时原样放行：不计数、不写明细、不消耗 initial 判定。
-      if (!settings.observe || state.dead) return orig.apply(this, arguments);
+      // 暂停观测或关闭滚动诊断时原样放行：不计数、不写明细、不消耗 initial 判定。
+      if (!settings.observe || !settings.scrollDiagOn || state.dead) return orig.apply(this, arguments);
       var t0 = performance.now();
       var startedAt = Date.now();
       var isFirst = callsInWrap === 0;
@@ -753,7 +753,12 @@
     // 宿主的 loadOlder 定义在 ConversationProjectionStore 原型上，但调用点是
     // lease.store.loadOlder()（实例查找）。只包当前主 store 实例：既不把隐藏会话
     // 的补页记进同一份明细，也不在共享原型上留下全局副作用。
-    if (loadOlderTarget && loadOlderTarget !== store) releaseLoadOlderProbe();
+    if (loadOlderTarget && loadOlderTarget !== store) {
+      releaseLoadOlderProbe();
+      // 明细环是“当前主 store”口径：切到新会话后不把上一个会话的补页记录混进来。
+      loadOlderDetail.length = 0;
+      lastDetailKey = "";
+    }
     var marker = store.__lagfixLoadOlder;
     if (marker && marker.wrapped && store.loadOlder === marker.wrapped) {
       loadOlderTarget = store;
@@ -773,12 +778,25 @@
     var orig = store.loadOlder;
     if (typeof orig !== "function") return false;
     var hadOwn = Object.prototype.hasOwnProperty.call(store, "loadOlder");
+    var wrapped;
     try {
-      var wrapped = makeProbedLoadOlder(orig);
+      wrapped = makeProbedLoadOlder(orig);
       store.loadOlder = wrapped;
-      store.__lagfixLoadOlder = { orig: orig, hadOwn: hadOwn, wrapped: wrapped };
     } catch (e) {
       return false;   // 冻结/只读 store：降级为不观测，不能影响宿主
+    }
+    try {
+      store.__lagfixLoadOlder = { orig: orig, hadOwn: hadOwn, wrapped: wrapped };
+    } catch (e2) {
+      // 方法已替换但 marker 写不进去（不可扩展 store）：回滚方法，避免下次
+      // 再包一层后既无法识别也无法还原。
+      try {
+        if (store.loadOlder === wrapped) {
+          if (hadOwn) store.loadOlder = orig;
+          else delete store.loadOlder;
+        }
+      } catch (e3) {}
+      return false;
     }
     loadOlderTarget = store;
     return true;
@@ -861,7 +879,7 @@
       // 否则超过 5 个 pane 时会反复淘汰真正有数据的桶。
       lastActive: 0, firstSeenAt: now,
       frames: 0, sampleAt: now,
-      mountedTurns: 0, dom: 0, needsSample: true,
+      mountedTurns: 0, dom: 0, needsSample: true, domAt: 0,
       lastSeq: readPaneSeq(pane),
       lastScrollAt: 0, scrollRing: [],
     };
@@ -914,8 +932,13 @@
       b = makeSessionBucket(sid, pane);
     }
     if (pane) {
+      // pane 从卸载状态重新挂回/换到新元素：立即补采 DOM/turn，并从新 pane
+      // 当前 seq 重新起算，避免拿旧 pane 的 seq 误判同值而少计一次提交。
+      if (b.pane !== pane) {
+        b.needsSample = true;
+        b.lastSeq = readPaneSeq(pane);
+      }
       b.pane = pane;
-      if (b.lastSeq === null || b.lastSeq === undefined) b.lastSeq = readPaneSeq(pane);
       mapPane(pane, b);
     }
     return b;
@@ -936,17 +959,15 @@
     } catch (e) { return false; }
   }
 
-  // 每会话 DOM/turn 计数固定 60s 一次，新出现的桶强制立即采一次。
+  // 每个桶各自按 60s 采样 DOM/turn；新桶/重挂回桶立即采一次。
   // 不跟随 5s 采集周期遍历 pane 子树：9k DOM 下那会把观测器变成新的卡顿源。
   function sampleSessionDom(now) {
-    var need = false;
     for (var i = 0; i < sessionBuckets.length; i++) {
-      if (sessionBuckets[i].needsSample) { need = true; break; }
-    }
-    if (!need && sessionDomAt && now - sessionDomAt <= 60000) return;
-    for (var j = 0; j < sessionBuckets.length; j++) {
-      var b = sessionBuckets[j];
+      var b = sessionBuckets[i];
+      var due = b.needsSample || !b.domAt || now - b.domAt > 60000;
+      if (!due) continue;
       b.needsSample = false;
+      b.domAt = now;
       if (!b.pane || !b.pane.isConnected) {
         b.mountedTurns = 0;
         b.dom = 0;
@@ -964,7 +985,6 @@
       b.dom = all.length + 1;   // 含 pane 根
       b.mountedTurns = turns;
     }
-    sessionDomAt = now;
   }
 
   function onSessionMutation(muts) {
@@ -979,6 +999,10 @@
         var b = findBucketByPane(pane);
         if (m.attributeName === SID_ATTR) {
           var sid = readPaneSid(pane);
+          // 同值重写既不是切换，也不是活跃：不能更新 lastActive，更不能借此
+          // 给满 5 桶时的额外 pane 抢名额（宿主正常不会这么做，纯防御）。
+          var prevSid = m.oldValue;
+          if (prevSid !== null && prevSid !== undefined && String(prevSid) === sid) continue;
           if (!b || b.sid !== sid) {
             var old = b;
             removePaneMapping(pane);
@@ -992,15 +1016,24 @@
                 if (oi >= 0) removeSessionBucketAt(oi);
               }
             }
-            b = ensureSessionBucket(sid, pane, true);
+            // 切会话本身不是提交/滚动；只有“已跟踪的真实会话 → 另一个真实会话”
+            // 才按换桶处理（当前主 pane 切走后要能看到新会话）。额外 pane 或
+            // draft/空 sid 不满足准入，等真实提交/滚动再接管名额。
+            var wasTracked = !!old && !isPlaceholderSid(old.sid);
+            var canAdmit = wasTracked && !isPlaceholderSid(sid);
+            b = ensureSessionBucket(sid, pane, canAdmit);
             if (!b) continue;
             b.lastSeq = readPaneSeq(pane);   // 新会话从当前 seq 起算
           }
-          b.lastActive = Date.now();
+          // 只换桶，不把“切到一个会话”当成活跃；lastActive 由真实提交/滚动更新。
           continue;
         }
         if (m.attributeName !== ATTR) continue;
         var seq = readPaneSeq(pane);
+        // 同值 seq 重写不是提交；未入桶的额外 pane 也不能借此抢名额/伪造帧。
+        var prevSeq = m.oldValue;
+        if (prevSeq !== null && prevSeq !== undefined
+          && String(prevSeq) === String(seq)) continue;
         if (!b) {
           // 首次看到这个 pane 的提交：建桶（必要时淘汰最久未活跃的旧桶）并记 1 次。
           b = ensureSessionBucket(readPaneSid(pane), pane, true);
@@ -1038,7 +1071,14 @@
     ensureSessionMO();
     if (!sessionMO) return;
     if (samePaneList(panes, sessionObservedPanes)) return;
+    // disconnect() 会丢掉已排队的 mutation；先取出来补处理，避免切换/重建
+    // pane 的同批提交被静默漏计。
+    var pending = [];
+    try { pending = sessionMO.takeRecords(); } catch (e) {}
     try { sessionMO.disconnect(); } catch (e) {}
+    if (pending.length) {
+      try { onSessionMutation(pending); } catch (e2) {}
+    }
     sessionObservedPanes = panes.slice();
     for (var i = 0; i < panes.length; i++) {
       try {
@@ -1098,7 +1138,6 @@
     sessionBuckets.length = 0;
     sessionPanes.length = 0;
     sessionObservedPanes.length = 0;
-    sessionDomAt = 0;
   }
 
   // 暂停：清周期计数与 DOM 引用，但不改 lastActive（暂停不是活跃），
@@ -1116,6 +1155,7 @@
       b.mountedTurns = 0;
       b.dom = 0;
       b.needsSample = true;
+      b.domAt = 0;
     }
     sessionPanes.length = 0;
     sessionObservedPanes.length = 0;
@@ -1190,12 +1230,13 @@
   }
 
   function recordLoadOlderDetail(entry) {
+    detailVersion++;
     loadOlderDetail.push(entry);
     if (loadOlderDetail.length > LOAD_OLDER_DETAIL_MAX) loadOlderDetail.shift();
   }
 
   function loadOlderDetailKey() {
-    var s = "";
+    var s = detailVersion + "|";
     for (var i = 0; i < loadOlderDetail.length; i++) {
       var d = loadOlderDetail[i];
       s += d.t + ":" + d.ms + ":" + (d.ok ? 1 : 0) + ";";
@@ -1319,6 +1360,8 @@
           state.el = null;
           state.lastSeq = null;
           state.lostSince = Date.now();
+          // 丢锚点后旧 store 已不代表当前会话；立即释放，避免旧实例继续记账。
+          try { releaseLoadOlderProbe(); } catch (e3) {}
           clearInterval(watchdogTimer);
           watchdogTimer = null;
           startReacquire();
@@ -3197,8 +3240,11 @@
       // v0.3.1：滚动诊断只观测 loadOlder，与「节流」开关无关——
       // 只要诊断开着就装，关掉诊断由 applyScrollSettings 释放。
       applyLoadOlderProbe(store);
-    } else if (!settings.bigSessionOn) {
-      releaseLoadAllGuard();
+    } else {
+      if (!settings.bigSessionOn) releaseLoadAllGuard();
+      // store 暂时取不到（宿主重建 pane/切换会话）时，先把观测包装还回去：
+      // 否则旧实例会继续把补页记进当前会话的明细环。
+      releaseLoadOlderProbe();
     }
     if (!settings.throttleOn) return false;
     if (!store) {
@@ -3384,7 +3430,10 @@
       rafLast = 0;
       startRaf();
       try { syncSessionPanes(); } catch (e) {}
-      // 恢复后从当前时刻起算 commitRate，分母不包含整段暂停时长。
+      // 恢复后从当前时刻起算全局 commitRate，分母不包含整段暂停时长。
+      state.lastCollectAt = performance.now();
+      state.frames = 0;
+      // per-session 的 commitRate 同理，从恢复时刻重新起算。
       try { restartSessionSampling(); } catch (e) {}
     } else {
       try { if (mo) { mo.disconnect(); mo = null; } } catch (e) {}

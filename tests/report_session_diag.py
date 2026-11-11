@@ -77,6 +77,7 @@ def main() -> int:
     check("Top 慢补页取最大 ms", "Top 慢补页：7298ms" in out)
     check("trigger 三态计数（坏值归 unknown）",
           "触发来源：scroll 1 / initial 1 / unknown 1" in out)
+    check("逐行坏 trigger 也归一为 unknown", "触发 unknown" in out)
     check("无行数变化标出「无变化」", out.count("（无变化）") == 2)
     check("失败叫「异常」且明细行不再叫「失败」",
           "异常" in out and "  失败" not in out)
@@ -104,11 +105,17 @@ def main() -> int:
           "滚动诊断已关闭，无补页明细" in out and "7298ms" not in out)
     check("关闭边界阻断会话桶向前回退",
           "多会话归因已关闭" in out and "sess_rea" not in out)
+    # 更新的暂停样本在上、关闭样本在下：回退必须停在关闭边界，不能穿透到更早的数据。
+    out = run_print([normal, disabled, paused])
+    check("暂停回退遇到关闭边界即停（会话桶）",
+          "多会话归因已关闭" in out and "sess_rea" not in out, out)
+    check("暂停回退遇到关闭边界即停（补页明细）",
+          "未记录到补页明细" in out and "7298ms" not in out, out)
 
     print("-- 空/坏数据 --")
     out = run_print([{"sessions": [1, "x", None], "loadOlderDetail": [1]}])
     check("全是非 dict 时显示 0 个桶", "0 个会话桶" in out)
-    check("明细全是坏行时不崩", "补页明细为空" in out)
+    check("明细全是坏行时不崩", "未记录到补页明细" in out)
     out = run_print([])
     check("空 rows 不崩", "无多会话归因数据" in out and "无补页明细" in out)
     out = run_print([{"sessions": ["x"], "loadOlderDetail": []}])
