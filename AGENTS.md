@@ -89,7 +89,7 @@ ZCode app.asar 入口尾部
 - **多会话归因**：`sessionBuckets`（最多 5 个）按 `data-session-id` 分桶，`sessionMO` 是一个观察多个 pane 的 MutationObserver（目标集合不变时不重挂）；发现阶段满 5 个后额外 pane 只观察不建桶，有真实提交/滚动才淘汰最久未活跃的桶；`frames/commitRate` 只在采集周期结算，`mountedTurns/dom` 固定每 60s 采一次（新桶立即采）；暂停不改写 `lastActive`；不写 store。
 - **补页明细**：`loadOlderDetail` 是 observer 内存里的 10 条环形窗口，只记 `t/ms/ok/rowsBefore/rowsAfter/trigger`；`rows*` 只读 `rows.window.length`。只包装主 store **实例**，不碰共享原型；暂停期间不累计；明细未变化时样本发 `[]`，报告端向前找最近一次非空。
 - **检查更新**：渲染端只置内存标记 `updateCheckRequested`，随一个样本回传；主进程请求 GitHub Releases 后注入 `window.__lagfixUpdate`，不落盘、不带 token。
-- **角标位置**：每秒按 composer 的 `getBoundingClientRect()` 同步，不写进 React 树；宿主重渲染不会清掉。
+- **角标位置**：每秒按 composer 的 `getBoundingClientRect()` 同步，不写进 React 树；宿主重渲染不会清掉。同时避让 dock 内横幅与 body 级 Radix 浮层（`[data-slot="hover-card-content"]` 等），上方无余量时隐藏。
 
 所有包装必须满足：
 
