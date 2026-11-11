@@ -1,5 +1,17 @@
 /**
- * zcode-lagfix renderer 观测脚本 v0.3.0
+ * zcode-lagfix renderer 观测脚本 v0.3.1
+ *
+ * v0.3.1（O1/O1b/O2/A8/A9）：
+ *   - O1 滚动诊断：只统计「最近 200ms 内有滚动」的帧 P95、滚动事件数、
+ *     loadOlder 次数/耗时/失败、挂载 turn 数、DOM 峰值、可选 long-animation-frame。
+ *     loadOlder 只观测，不拦截、不延迟、不改返回值。
+ *   - O1b 输入延迟：keydown（输入框内）到下一帧的间隔，回答「卡顿时按键没反应」。
+ *     只测量，不修复。
+ *   - O2 滚动期临时关闭消息层 mask：滚动时给 documentElement 加 data-lagfix-scroll，
+ *     停滚 180ms 后移除；只覆盖 mask-image，不影响布局与 DOM。
+ *   - A8 角标常驻：删除「显示角标」开关，避免用户把自己锁在设置外面。
+ *   - A9 面板重排：状态条 / 观测 / 性能 / 维护，行名去掉颜色与内部术语。
+ *   - 维护页「检查更新」：点击后由主进程请求一次 GitHub Releases，不自动联网。
  *
  * v0.2.3 UI 改版（交互参照 zusage 状态条）：
  *   - 角标浮在输入框卡片上方（.chat-composer-input-surface），显示判定结论
@@ -57,6 +69,10 @@
   var ACQUIRE_TIMEOUT_MS = 10 * 60 * 1000;
   var RING_MAX = 300;
   var WINDOW_MS = 30000;            // P95 只看最近 30 秒
+  var SCROLL_HOLD_MS = 200;         // 滚动后 200ms 内的帧才算「滚动帧」
+  var SCROLL_RING_MAX = 600;
+  var MASK_IDLE_MS = 180;           // 停滚后多久恢复消息层遮罩
+  var VERSION = "0.3.1";
   var ERR_LIMIT = 50;
   var OVERLAY_ID = "lagfix-overlay-badge";
   var PANEL_ID = "lagfix-settings-panel";
@@ -66,7 +82,6 @@
 
   var DEFAULTS = {
     observe: true,      // 观测开关
-    badgeVisible: true, // 角标整体显隐
     badgeText: true,    // 角标是否显示文字（关掉只留小圆点）
     badgeMode: "simple",// 角标内容：simple=判定+帧 / detail=提交+帧+长任务+堆
     // v0.3 性能增强（全部可开关）
@@ -74,6 +89,10 @@
     switchGuardOn: true,// 切会话后 10s 内至少 250ms，避让首屏水合
     hiddenSkipOn: true, // 窗口在后台时最多 1s 通知一次
     bigSessionOn: true, // 超大历史会话不自动补拉全部旧问题
+    // v0.3.1 观测与缓解
+    scrollDiagOn: true,     // 滚动窗口观测（只读）
+    inputLagOn: true,       // 输入延迟观测（只读）
+    maskOffOnScroll: true,  // 滚动期临时关闭消息层 mask
     logMaxMB: 50,       // 观测日志总预算（MB），超过自动删最旧
     warnMs: 50,         // 帧 P95 黄阈值
     badMs: 100,         // 帧 P95 红阈值
@@ -93,13 +112,16 @@
   function mergeStored(o, s) {
     if (!o || typeof o !== "object") return s;
     if (typeof o.observe === "boolean") s.observe = o.observe;
-    if (typeof o.badgeVisible === "boolean") s.badgeVisible = o.badgeVisible;
     if (typeof o.badgeText === "boolean") s.badgeText = o.badgeText;
     if (o.badgeMode === "simple" || o.badgeMode === "detail") s.badgeMode = o.badgeMode;
     if (typeof o.adaptiveOn === "boolean") s.adaptiveOn = o.adaptiveOn;
     if (typeof o.switchGuardOn === "boolean") s.switchGuardOn = o.switchGuardOn;
     if (typeof o.hiddenSkipOn === "boolean") s.hiddenSkipOn = o.hiddenSkipOn;
     if (typeof o.bigSessionOn === "boolean") s.bigSessionOn = o.bigSessionOn;
+    // v0.3.1：A8 起 badgeVisible 不再读取（旧值直接被忽略，角标常驻显示）
+    if (typeof o.scrollDiagOn === "boolean") s.scrollDiagOn = o.scrollDiagOn;
+    if (typeof o.inputLagOn === "boolean") s.inputLagOn = o.inputLagOn;
+    if (typeof o.maskOffOnScroll === "boolean") s.maskOffOnScroll = o.maskOffOnScroll;
     if (o.logMaxMB != null) s.logMaxMB = clampNum(o.logMaxMB, 5, 1000, DEFAULTS.logMaxMB);
     if (o.warnMs != null) s.warnMs = clampNum(o.warnMs, 1, 5000, DEFAULTS.warnMs);
     if (o.badMs != null) s.badMs = clampNum(o.badMs, 2, 10000, DEFAULTS.badMs);
@@ -157,6 +179,7 @@
     switchedAt: Date.now(),    // 最近一次挂载/切会话的时间（冷静期用）
     lastEffMs: 0,              // 最近一次实际生效的节流窗口（面板展示）
     restartRequested: false,   // 只存内存：随样本回传给主进程，不落盘（防重启死循环）
+    updateCheckRequested: false, // 只存内存：随下一个样本回传一次，主进程检查 GitHub Releases
   };
 
   // rAF 真实帧间隔
@@ -167,6 +190,28 @@
   // 长任务
   var longTaskCount = 0;
   var maxLongTaskMs = 0;
+
+  // ---- v0.3.1：滚动诊断 / 输入延迟 / 遮罩 ----
+  // 环形窗口按 30s 时间窗滚动；events/lafCount 按采集周期清零。
+  var scrollRing = [];       // [{t, ms}] 滚动后 200ms 内的帧
+  var scrollEvents = 0;      // 本周期时间线滚动事件数
+  var anyScrollEvents = 0;   // 本周期所有 scroll 事件数（区分「没人滚」与「选择器失配」）
+  var lastScrollAt = 0;      // performance.now()
+  var loadOlderRing = [];    // [{t, ms}]
+  var loadOlderCalls = 0;    // 自 observer 启动累计
+  var loadOlderErrors = 0;   // 同步抛错 + promise reject
+  var loadOlderMax = 0;
+  var loadOlderTarget = null;// 当前被包装的 store 或原型（同一时刻只包一个）
+  var inputRing = [];        // [{t, ms}] keydown → 下一帧
+  var inputPendingAt = 0;    // 0 表示没有待处理按键
+  var domPeak = 0;           // 最近 30s 内采样到的最大 DOM 数
+  var domPeakAt = 0;         // 峰值窗口起点
+  var domCostMs = 0;         // 最近一次全量计数耗时（>5ms 自动退回 60s 降频）
+  var lafCount = 0;          // long-animation-frame 次数（本周期）
+  var lafMax = 0;
+  var scrollMaskTimer = null;
+  var scrollMaskDeadline = 0;
+  var lastUpdateAskAt = 0;   // 「检查更新」点击节流
   // 实际上经过我们 wrapper 的通知次数：用来判断"装了但宿主没走这条路"
   // （applied=true 却完全不增长 → 包装无效，只能靠这个看出来）
   var throttleHits = 0;
@@ -220,6 +265,12 @@
     settings.throttleOn = false;
     try { releaseThrottle(); } catch (e) {}
     try { releaseLoadAllGuard(); } catch (e) {}
+    // v0.3.1：自禁用时必须把滚动观测/遮罩一起收干净，不能留半个包装或属性。
+    try { releaseLoadOlderProbe(); } catch (e) {}
+    try { setScrollMaskActive(false); } catch (e) {}
+    try { if (lafObserver) lafObserver.disconnect(); } catch (e) {}
+    try { document.removeEventListener("scroll", onTimelineScroll, true); } catch (e) {}
+    try { inputPendingAt = 0; } catch (e) {}
     fixState.reason = "已自禁用";
     try { if (mo) mo.disconnect(); } catch (e) {}
     try { if (acquireTimer) clearInterval(acquireTimer); } catch (e) {}
@@ -291,11 +342,25 @@
             frameRing.push({ t: t, ms: Math.round(d) });
             if (frameRing.length > RING_MAX) frameRing.shift();
             if (d > frameMaxAll) frameMaxAll = Math.round(d);
+            // v0.3.1：只把「滚动后 200ms 内」的帧计入 scrollRing。
+            // 全部帧都算会被空闲帧稀释，看不出滚动到底有多卡。
+            if (settings.scrollDiagOn && lastScrollAt && t - lastScrollAt <= SCROLL_HOLD_MS) {
+              scrollRing.push({ t: t, ms: Math.round(d) });
+              if (scrollRing.length > SCROLL_RING_MAX) scrollRing.shift();
+            }
           }
         }
         rafLast = t;
+        // 输入延迟：按键后第一帧就是「界面能响应」的时刻；d=0 也算有效样本，
+        // 所以不受上面 d>0 门控影响。
+        if (settings.inputLagOn && inputPendingAt) {
+          inputRing.push({ t: t, ms: Math.round(t - inputPendingAt) });
+          if (inputRing.length > RING_MAX) inputRing.shift();
+          inputPendingAt = 0;
+        }
       } else {
         rafLast = 0;  // 后台窗口不采样，回来时重新建基线
+        inputPendingAt = 0;  // 后台不采样，避免把整段后台时长记成一次按键延迟
       }
     } catch (e) { err(); }
     if (!state.dead) requestAnimationFrame(rafTick);
@@ -324,6 +389,184 @@
       ltObserver.observe({ entryTypes: ["longtask"] });
     }
   } catch (e) { /* 浏览器不支持就静默跳过，不致命 */ }
+
+  // ---- v0.3.1：long-animation-frame（可选，不支持就静默跳过）----
+  var lafObserver = null;
+  // 开关关闭/观测暂停/自禁用/一键还原时都要断开：PerformanceObserver 是常驻
+  // 全局观察器，不能只把输出字段置 null 却在后台继续吃 entry。
+  function setLafObserving(on) {
+    if (!lafObserver) return;
+    try {
+      if (on) lafObserver.observe({ type: "long-animation-frame", buffered: false });
+      else lafObserver.disconnect();
+    } catch (e) {}
+  }
+  try {
+    if (typeof PerformanceObserver === "function") {
+      lafObserver = new PerformanceObserver(function (list) {
+        try {
+          var entries = list.getEntries();
+          for (var i = 0; i < entries.length; i++) {
+            lafCount++;
+            var ms = Math.round(entries[i].duration || 0);
+            if (ms > lafMax) lafMax = ms;
+          }
+        } catch (e) { /* 观测失败不能影响宿主 */ }
+      });
+      // 用 type 形式：浏览器不支持该 entry 类型时会抛，由外层 catch 吞掉。
+      setLafObserving(settings.scrollDiagOn && settings.observe);
+    }
+  } catch (e) { lafObserver = null; }
+
+  // ---- v0.3.1 滚动：观测 + 滚动期临时关闭消息层 mask ----
+  // 只认时间线滚动容器的 scroll 事件。capture 阶段必须开：scroll 不冒泡，
+  // 但 capture 会经过 document，能收到所有后代的 scroll。
+  function setScrollMaskActive(active) {
+    try {
+      var root = document.documentElement;
+      if (!root) return;
+      if (active && settings.maskOffOnScroll && !state.dead) {
+        root.setAttribute("data-lagfix-scroll", "1");
+        // 用 deadline + 单定时器自重排：滚动事件每秒可达 60 次，
+        // 每个事件都 clearTimeout+setTimeout 会白白制造 60 次/秒的定时器抖动。
+        scrollMaskDeadline = performance.now() + MASK_IDLE_MS;
+        if (!scrollMaskTimer) scrollMaskTimer = setTimeout(checkScrollMaskIdle, MASK_IDLE_MS);
+      } else {
+        if (scrollMaskTimer) { clearTimeout(scrollMaskTimer); scrollMaskTimer = null; }
+        scrollMaskDeadline = 0;
+        root.removeAttribute("data-lagfix-scroll");
+      }
+    } catch (e) {}
+  }
+
+  function checkScrollMaskIdle() {
+    scrollMaskTimer = null;
+    try {
+      var left = scrollMaskDeadline - performance.now();
+      if (left > 0 && !state.dead && settings.maskOffOnScroll) {
+        scrollMaskTimer = setTimeout(checkScrollMaskIdle, Math.ceil(left));
+        return;
+      }
+      scrollMaskDeadline = 0;
+      var root = document.documentElement;
+      if (root) root.removeAttribute("data-lagfix-scroll");
+    } catch (e) {}
+  }
+
+  function onTimelineScroll(ev) {
+    try {
+      if (state.dead) return;
+      if (!settings.scrollDiagOn && !settings.maskOffOnScroll) return;
+      var el = ev && ev.target;
+      // 滚动事件的 target 就是滚动容器本身，不向上 closest()；target 没有
+      // matches（合成事件/测试 stub）时直接放行，不能因此报错。
+      if (!el || typeof el.matches !== "function") return;
+      if (!el.matches('[data-v4-timeline-scroll="true"]')) {
+        // 非时间线的滚动也计数：用来区分「没人滚」与「选择器失配」（宿主改版）。
+        if (settings.scrollDiagOn) anyScrollEvents++;
+        return;
+      }
+      lastScrollAt = performance.now();
+      if (settings.scrollDiagOn) {
+        scrollEvents++;
+        anyScrollEvents++;
+      }
+      if (settings.maskOffOnScroll) setScrollMaskActive(true);
+    } catch (e) {}
+  }
+  try { document.addEventListener("scroll", onTimelineScroll, true); } catch (e) {}
+
+  // ---- v0.3.1 输入延迟：只采输入框内的按键，一次 closest，不拦截事件 ----
+  try {
+    document.addEventListener("keydown", function (ev) {
+      try {
+        if (state.dead || !settings.inputLagOn || !settings.observe) return;
+        if (inputPendingAt) return;   // 连按时只记第一个待处理按键（最坏等待）
+        var t = ev && ev.target;
+        if (!t || typeof t.closest !== "function") return;
+        if (!t.closest(".chat-composer-input-surface")) return;
+        inputPendingAt = performance.now();
+      } catch (e) {}
+    }, true);
+  } catch (e) {}
+
+  // 页面卸载时别把属性留在 DOM 上（多窗口/热重载会保留 documentElement）
+  function onPageUnload() {
+    try {
+      if (scrollMaskTimer) { clearTimeout(scrollMaskTimer); scrollMaskTimer = null; }
+      scrollMaskDeadline = 0;
+      var root = document.documentElement;
+      if (root) root.removeAttribute("data-lagfix-scroll");
+    } catch (e) {}
+  }
+  try {
+    window.addEventListener("pagehide", onPageUnload);
+    window.addEventListener("beforeunload", onPageUnload);
+  } catch (e) {}
+
+  // ---- v0.3.1 loadOlder 观测包装（只观测，不拦截） ----
+  function recordLoadOlder(t0) {
+    var now = performance.now();
+    var ms = Math.round(now - t0);
+    loadOlderRing.push({ t: now, ms: ms });
+    if (loadOlderRing.length > RING_MAX) loadOlderRing.shift();
+    if (ms > loadOlderMax) loadOlderMax = ms;
+  }
+
+  function makeProbedLoadOlder(orig) {
+    // 显式严格模式：宿主的类方法是严格函数，解构调用（无 this）时应拿到 undefined
+    // 而不是被 sloppy 规则换成 globalThis。保持与原方法完全一致的 this 语义。
+    return function () {
+      "use strict";
+      var t0 = performance.now();
+      loadOlderCalls++;
+      var ret;
+      try {
+        ret = orig.apply(this, arguments);
+      } catch (e) {
+        loadOlderErrors++;
+        throw e;   // 同步异常必须原样抛给调用方
+      }
+      if (ret && typeof ret.then === "function") {
+        // 返回**原 promise**：调用方拿到的必须和未包装时同一个引用，
+        // 否则 await/链式 .then 的时序与身份判断都会变。
+        ret.then(function () { recordLoadOlder(t0); },
+                 function () { loadOlderErrors++; recordLoadOlder(t0); });
+        return ret;
+      }
+      recordLoadOlder(t0);
+      return ret;
+    };
+  }
+
+  function applyLoadOlderProbe(store) {
+    if (!settings.scrollDiagOn || state.dead || !store) return false;
+    var target = Object.prototype.hasOwnProperty.call(store, "loadOlder")
+      ? store : Object.getPrototypeOf(store);
+    if (!target || typeof target.loadOlder !== "function") return false;
+    // 换目标（宿主重建 store / 换原型）时先把旧目标还原，避免残留在别人身上。
+    if (loadOlderTarget && loadOlderTarget !== target) releaseLoadOlderProbe();
+    if (target.__lagfixLoadOlder) {
+      loadOlderTarget = target;
+      return true;   // 已包装：复用，不套两层
+    }
+    var orig = target.loadOlder;
+    target.loadOlder = makeProbedLoadOlder(orig);
+    target.__lagfixLoadOlder = { orig: orig };
+    loadOlderTarget = target;
+    return true;
+  }
+
+  function releaseLoadOlderProbe() {
+    var target = loadOlderTarget;
+    loadOlderTarget = null;
+    if (!target) return;
+    try {
+      var rec = target.__lagfixLoadOlder;
+      if (rec && typeof rec.orig === "function") target.loadOlder = rec.orig;
+      delete target.__lagfixLoadOlder;
+    } catch (e) {}
+  }
 
   // ---- 锚点选择：primary pane 优先，其次可见面积最大 ----
   function findAnchor() {
@@ -386,7 +629,7 @@
             resetWindow();
             // 切会话可能重建 projection store；立即尝试重装一次，别等 5s 看门狗
             // （冷静期只有 10s，前 5s 的首屏水合最需要保护）。
-            if (settings.throttleOn || settings.bigSessionOn) {
+            if (settings.throttleOn || settings.bigSessionOn || settings.scrollDiagOn) {
               try { applyThrottle(); } catch (e2) {}
             }
             return;
@@ -423,7 +666,8 @@
       mo.observe(state.el, { attributes: true, attributeFilter: [ATTR, SID_ATTR] });
     } catch (e) { err(); }
     armWatchdog();    // 锚点一挂上就尝试装节流（store 只能从真实 fiber 上取，必须等挂载完成）
-    if ((settings.throttleOn && !fixState.applied) || settings.bigSessionOn) applyThrottle();
+    if ((settings.throttleOn && !fixState.applied) || settings.bigSessionOn
+      || settings.scrollDiagOn) applyThrottle();
   }
 
   function armWatchdog() {
@@ -445,7 +689,7 @@
         // 大会话保护也走同一条复核：只判 !loadTarget 的话，宿主中途换原型会让
         // 保护静默失效，而面板仍按旧目标显示"已装"。
         if ((settings.throttleOn && (fixState.applied || fixState.tries < 20))
-          || settings.bigSessionOn) {
+          || settings.bigSessionOn || settings.scrollDiagOn) {
           applyThrottle();
         }
       } catch (e) { err(); }
@@ -726,6 +970,12 @@
       "#" + PANEL_ID + " .dlg-ft{display:flex;justify-content:space-between;align-items:center;",
       "padding:10px 18px;border-top:1px solid var(--color-border,rgba(255,255,255,.1));",
       "font-size:11.5px;color:var(--color-foreground-subtle,#8791a3)}",
+      // v0.3.1 O2：滚动期临时去掉消息层上下渐隐。
+      // 只覆盖 mask-image，不覆盖 mask 简写——后者会把宿主的 mask-position/size 一起重置。
+      // 前提：宿主目前用**内联** style.maskImage 写遮罩（无 !important），
+      // 作者的 !important 样式表规则优先于普通内联声明；若宿主改成带 important 的内联，本项会失效。
+      '[data-lagfix-scroll="1"] [data-v4-timeline-message-layer="true"]{',
+      "-webkit-mask-image:none !important;mask-image:none !important}",
       // 开关
       "#" + PANEL_ID + " .sw{position:relative;display:inline-block;width:34px;height:18px;flex:0 0 auto}",
       "#" + PANEL_ID + " .sw input{position:absolute;opacity:0;width:0;height:0}",
@@ -1039,10 +1289,10 @@
       }
 
       // 只有主对话页且输入框可见时才显示角标；设置页/被覆盖时整条隐藏。
-      // 用户主动隐藏角标时不做任何 DOM 探测：大会话里 elementFromPoint +
-      // 祖先 closest 也是每秒一次的可观开销（终审 P2）。
-      var placed = settings.badgeVisible ? positionBadge() : false;
-      if (el) el.style.display = (settings.badgeVisible && placed) ? "" : "none";
+      // A8：角标常驻（用户不可关闭），这里只做布局性让位——
+      // 不再有 badgeVisible 分支，也就没有"隐藏后找不到设置入口"的死角。
+      var placed = positionBadge();
+      if (el) el.style.display = placed ? "" : "none";
       if (!placed) hideStats(true);
       if (isStatsVisible()) updateStats(fs, rmax, commitRate);
       if (state.panelOpen) renderPanelStatus();
@@ -1254,7 +1504,7 @@
     if (sub) {
       var b = document.createElement("div");
       b.className = "sub";
-      b.textContent = disabled ? sub + "（依赖订阅通知节流，当前已关闭）" : sub;
+      b.textContent = disabled ? sub + "（依赖渲染节流，当前已关闭）" : sub;
       l.appendChild(b);
     }
     if (info) {
@@ -1357,7 +1607,7 @@
     var title = document.createElement("div");
     title.textContent = "zcode-lagfix 设置";
     var sm = document.createElement("small");
-    sm.textContent = "v0.3.0";
+    sm.textContent = "v" + VERSION;
     title.appendChild(sm);
     var close = document.createElement("button");
     close.className = "dlg-close";
@@ -1377,24 +1627,21 @@
     var NAV = [
       { id: "status", label: "状态条" },
       { id: "observe", label: "观测" },
-      { id: "fix", label: "修复" },
+      { id: "fix", label: "性能" },
       { id: "maint", label: "维护" },
     ];
     var sections = {};
 
     // --- 状态条 ---
     var sStatus = section("status", "状态条",
-      "角标浮在输入框上方。鼠标悬停看统计，点齿轮回到这里；角标隐藏后按 Ctrl+Alt+L 仍可打开。");
+      "状态条常驻显示，没有关闭入口；在设置页、弹窗或被遮挡时会自动隐藏。"
+      + "鼠标悬停看统计，点齿轮回到这里。");
     var c1 = card();
-    c1.appendChild(rowEl("显示角标", "关掉后角标完全隐藏；按 Ctrl+Alt+L（Mac：Cmd+Alt+L）或控制台 __lagfixSettings() 可重新打开设置。",
-      switchEl(settings.badgeVisible, function (v) {
-        settings.badgeVisible = v; saveSettings(); rebuildPanel(); renderOverlay();
-      })));
-    c1.appendChild(rowEl("角标文字", "关掉只留一个颜色圆点，几乎不占位置。",
+    c1.appendChild(rowEl("显示文字", "关掉只留一个颜色圆点，几乎不占位置。",
       switchEl(settings.badgeText, function (v) {
         settings.badgeText = v; saveSettings(); renderOverlay();
       })));
-    c1.appendChild(rowEl("角标内容", "简洁只给结论和每帧间隔；详细再加上重绘次数、卡顿次数、内存。",
+    c1.appendChild(rowEl("信息量", "简洁只给结论和每帧间隔；详细再加上重绘次数、卡顿次数、内存。",
       (function () {
         var g = document.createElement("div");
         g.className = "seg";
@@ -1411,7 +1658,7 @@
         });
         return g;
       })()));
-    c1.appendChild(rowEl("变黄阈值", "帧 P95 超过它就变黄。50ms 起能看出掉帧。",
+    c1.appendChild(rowEl("警告阈值", "帧 P95 超过它标黄。50ms 起能看出掉帧。",
       (function () {
         var w = document.createElement("div");
         w.className = "ctl";
@@ -1423,7 +1670,7 @@
         w.appendChild(unit("ms"));
         return w;
       })()));
-    c1.appendChild(rowEl("变红阈值", "帧 P95 超过它就变红。100ms 以上是明显卡顿。",
+    c1.appendChild(rowEl("严重阈值", "帧 P95 超过它标红。100ms 以上是明显卡顿。",
       (function () {
         var w = document.createElement("div");
         w.className = "ctl";
@@ -1460,19 +1707,42 @@
     });
     c2.appendChild(rowEl("采集间隔", "多久记录一次数据。越短越细，日志也越多。", sel));
     sObs.appendChild(c2);
+
+    var capDiag = document.createElement("div");
+    capDiag.className = "cap";
+    capDiag.textContent = "诊断";
+    sObs.appendChild(capDiag);
+    var c2b = card();
+    c2b.appendChild(rowEl("滚动诊断", "记录滚动时的帧 P95、补页次数与耗时、挂载轮数、DOM 峰值。",
+      switchEl(settings.scrollDiagOn, function (v) {
+        settings.scrollDiagOn = v; saveSettings(); applyScrollSettings();
+        rebuildPanel(); renderPanelStatus();
+      }),
+      "影响：只读统计——滚动帧 P95（只算滚动后 200ms 内的帧）、滚动事件数、"
+      + "loadOlder 次数/耗时/失败、当前挂载轮数、DOM 峰值、long-animation-frame（浏览器支持时）。\n"
+      + "不影响：滚动行为、补页时机与每页行数、消息内容、会话数据。关闭后 collect 的 scroll 字段为 null，"
+      + "也不再做额外的 DOM 扫描。"));
+    c2b.appendChild(rowEl("输入延迟", "按键到下一帧的间隔，用来看输入框卡不卡。",
+      switchEl(settings.inputLagOn, function (v) {
+        settings.inputLagOn = v; saveSettings(); applyScrollSettings(); rebuildPanel();
+      }),
+      "影响：只统计输入框（.chat-composer-input-surface）内的按键，记录 keydown 到下一帧的时间。\n"
+      + "不影响：输入内容、快捷键、菜单选择与事件传播。它只负责测量，不能让输入变快；"
+      + "关闭后 collect 的 input 字段为 null。"));
+    sObs.appendChild(c2b);
     sections.observe = sObs;
 
-    // --- 修复 ---
-    var sFix = section("fix", "修复",
-      "减少流式输出与大会话加载时的卡顿。前三个开关只影响渲染通知时机；"
-      + "大会话保护只决定是否执行一次性全量补拉。都不改消息、会话数据与工具执行。"
-      + "每项标题后的「!」可展开该项影响什么、不影响什么。");
+    // --- 性能 ---
+    var sFix = section("fix", "性能",
+      "减少流式输出、大历史加载与滚动时的卡顿。渲染类开关只影响「什么时候通知 React 渲染」；"
+      + "历史类只决定是否执行一次性全量补拉；滚动类只临时去掉消息层遮罩。"
+      + "都不改消息、会话数据与工具执行。每项标题后的「!」可展开影响什么、不影响什么。");
     var capThrottle = document.createElement("div");
     capThrottle.className = "cap";
-    capThrottle.textContent = "通知节流";
+    capThrottle.textContent = "渲染";
     sFix.appendChild(capThrottle);
     var c3 = card();
-    c3.appendChild(rowEl("订阅通知节流", "关闭后立即恢复宿主原始刷新频率（会重新变卡）。",
+    c3.appendChild(rowEl("渲染节流", "合并宿主的高频通知，同一窗口内只重绘一次。",
       switchEl(settings.throttleOn, function (v) {
         settings.throttleOn = v;
         saveSettings();
@@ -1490,7 +1760,7 @@
       renderPanelStatus();
     }));
     tw.appendChild(unit("ms"));
-    c3.appendChild(rowEl("节流窗口", "两次刷新至少间隔多久。越大越省 CPU，画面也越迟。", tw,
+    c3.appendChild(rowEl("最短刷新间隔", "两次重绘至少间隔多久。越大越省 CPU，画面也越迟。", tw,
       "影响：两次通知之间的最小间隔。调大 → React 重绘更少、CPU 更省，但文字刷新更\"跳\"；"
       + "调小 → 更跟手，但流式输出时重绘更多。\n"
       + "不影响：Agent 收流、消息落盘、工具执行。它只决定\"什么时候把最新状态画出来\"。",
@@ -1501,21 +1771,16 @@
     c3.appendChild(fixStatus);
     sFix.appendChild(c3);
 
-    // 性能优化：四项都只影响"什么时候通知 React 渲染 / 要不要全量补拉"，不改宿主数据。
-    var capPerf = document.createElement("div");
-    capPerf.className = "cap";
-    capPerf.textContent = "加载与后台";
-    sFix.appendChild(capPerf);
     var c3b = card();
-    c3b.appendChild(rowEl("自适应窗口", "最近帧变差时自动把窗口加到 200–300ms，恢复后回落。",
+    c3b.appendChild(rowEl("卡顿时自动放宽", "帧变差时把间隔临时加到 200–300ms，恢复后回落。",
       switchEl(settings.adaptiveOn, function (v) {
         settings.adaptiveOn = v; saveSettings(); rebuildPanel(); renderPanelStatus();
       }),
       "影响：最近帧 P95 ≥ 80ms 时窗口至少 200ms，≥ 150ms 至少 300ms（以面板值为下限）；帧恢复后自动回到"
-      + "\"节流窗口\"里的值。卡顿时主动少画几帧，把主线程让给布局和输入。\n"
-      + "不影响：数据与会话状态；也不会改写\"节流窗口\"设置本身。帧很好时它完全不介入。",
+      + "\"最短刷新间隔\"里的值。卡顿时主动少画几帧，把主线程让给布局和输入。\n"
+      + "不影响：数据与会话状态；也不会改写\"最短刷新间隔\"设置本身。帧很好时它完全不介入。",
       !settings.throttleOn));
-    c3b.appendChild(rowEl("切会话冷静期", "刚切会话的 10 秒内至少 250ms，不和首屏加载抢主线程。",
+    c3b.appendChild(rowEl("切换会话保护", "刚切会话的 10 秒内至少 250ms，不和首屏加载抢主线程。",
       switchEl(settings.switchGuardOn, function (v) {
         settings.switchGuardOn = v; saveSettings(); rebuildPanel(); renderPanelStatus();
       }),
@@ -1523,7 +1788,7 @@
       + "历史行、跑布局和虚拟列表，少几次重绘能明显缩短白屏和输入延迟。10 秒后自动恢复正常窗口。\n"
       + "不影响：订阅关系与会话切换本身；切到小会话时只是前 10 秒刷新稍慢。",
       !settings.throttleOn));
-    c3b.appendChild(rowEl("后台降频", "窗口在后台时最多每秒通知一次，前台恢复立即追上。",
+    c3b.appendChild(rowEl("后台限制刷新", "窗口在后台时最多每秒重绘一次，前台恢复立即追上。",
       switchEl(settings.hiddenSkipOn, function (v) {
         settings.hiddenSkipOn = v; saveSettings(); rebuildPanel();
       }),
@@ -1531,7 +1796,14 @@
       + "省下看不见的重绘和 CPU。\n"
       + "不影响：Agent 执行、流式收包、日志采集；回到前台会立刻补一次最新状态，不会漏消息。",
       !settings.throttleOn));
-    c3b.appendChild(rowEl("大会话保护", "超过 800 行的会话不再自动补拉全部历史；分享时自动放行。",
+    sFix.appendChild(c3b);
+
+    var capHistory = document.createElement("div");
+    capHistory.className = "cap";
+    capHistory.textContent = "历史";
+    sFix.appendChild(capHistory);
+    var c3c = card();
+    c3c.appendChild(rowEl("大历史会话保护", "超过 800 行的会话不再自动补拉全部历史；分享时自动放行。",
       switchEl(settings.bigSessionOn, function (v) {
         settings.bigSessionOn = v; saveSettings();
         if (v) {
@@ -1549,8 +1821,24 @@
       + "（问题导航目录、分享前的目录补齐）。大会话打开时不再突然渲染几千行。\n"
       + "不影响：正常上翻分页（loadOlder）、当前可见消息、Agent 运行。分享面板打开、"
       + "选中、复制时自动放行，分享功能照常。代价是大会话的问题导航只覆盖已加载部分。\n"
-      + "与订阅通知节流相互独立：即使节流关掉，这一项仍然生效。"));
-    sFix.appendChild(c3b);
+      + "与渲染节流相互独立：即使节流关掉，这一项仍然生效。"));
+    sFix.appendChild(c3c);
+
+    var capScroll = document.createElement("div");
+    capScroll.className = "cap";
+    capScroll.textContent = "滚动";
+    sFix.appendChild(capScroll);
+    var c3d = card();
+    c3d.appendChild(rowEl("滚动期隐藏遮罩", "滚动时去掉消息层上下渐隐，停止 180ms 后恢复。",
+      switchEl(settings.maskOffOnScroll, function (v) {
+        settings.maskOffOnScroll = v; saveSettings(); applyScrollSettings(); rebuildPanel();
+      }),
+      "影响：滚动时间线时临时移除消息层（[data-v4-timeline-message-layer]）的上下渐隐遮罩，"
+      + "停止滚动 180ms 后自动恢复；只改绘制，不改布局、DOM 与滚动位置。\n"
+      + "不影响：消息内容、高度、锚定与滚动条；不改变任何会话数据。\n"
+      + "依赖宿主当前用内联 mask-image 实现遮罩；如果宿主改用 !important 内联写法，本项会失效"
+      + "（届时滚动 P95 不会改善，按日志判断即可）。"));
+    sFix.appendChild(c3d);
     sections.fix = sFix;
 
     // --- 维护 ---
@@ -1596,9 +1884,61 @@
     up.type = "button";
     up.className = "act";
     up.textContent = "检查更新";
-    up.disabled = true;   // 版本检查/自动更新尚未接入，先置灰，避免给出假的"已是最新"
-    up.title = "GitHub 已发布，但版本检查 / 自动更新尚未接入；升级请重新执行安装口令";
-    c4.appendChild(rowEl("检查更新", "版本检查 / 自动更新尚未接入；升级请重新执行安装口令。", up));
+    up.title = "只在点击后请求一次 GitHub Releases，不发送任何本机数据";
+    up.addEventListener("click", function () {
+      var now = Date.now();
+      if (now - lastUpdateAskAt < 5000) return;   // 防误连点
+      lastUpdateAskAt = now;
+      state.updateCheckRequested = true;
+      up.disabled = true;
+      up.textContent = "检查中…";
+      renderUpdateStatus();
+      // 主进程下一个采集周期（默认 ≤5s）发出请求；15s 仍无结果就恢复按钮，
+      // 避免永久卡在「检查中」（结果到了仍会显示）。
+      setTimeout(function () {
+        if (!up.parentNode) return;
+        up.disabled = false;
+        up.textContent = "检查更新";
+      }, 15000);
+    });
+    c4.appendChild(rowEl("检查更新", "只在点击后检查一次；不自动联网，不上报任何本机数据。", up));
+
+    var upLine = document.createElement("div");
+    upLine.className = "status";
+    upLine.id = PANEL_ID + "-updatestatus";
+    c4.appendChild(upLine);
+
+    var upCopy = document.createElement("button");
+    upCopy.type = "button";
+    upCopy.className = "act";
+    upCopy.textContent = "复制安装口令";
+    upCopy.title = "复制升级用的安装口令，发给 ZCode 执行";
+    upCopy.addEventListener("click", function () {
+      var text = "请安装或更新并启用 ZCode 插件：https://github.com/ck-ys/zcode-lagfix#plugin-releases\n"
+        + "完成后在新会话里执行 /lagfix install，确认补丁已注入；成功后提醒我完全退出并重新打开 ZCode"
+        + "（仅关闭窗口不算），不要自动重启。";
+      var restore = function (label) {
+        upCopy.textContent = label;
+        setTimeout(function () { upCopy.textContent = "复制安装口令"; }, 1500);
+      };
+      try {
+        var p = navigator.clipboard && navigator.clipboard.writeText
+          ? navigator.clipboard.writeText(text) : null;
+        if (p && typeof p.then === "function") {
+          // writeText 是异步的：失败时不能还显示「已复制」。
+          p.then(function () { restore("已复制"); })
+            .catch(function () { restore("复制失败"); });
+        } else {
+          restore("复制失败");
+        }
+      } catch (e) {
+        restore("复制失败");
+      }
+    });
+    var upCtl = document.createElement("div");
+    upCtl.className = "ctl";
+    upCtl.appendChild(upCopy);
+    c4.appendChild(rowEl("升级方式", "复制口令发给 ZCode 即可；不会自动下载或安装。", upCtl));
     // 日志位置与预算：路径由主进程注入（window.__lagfixDataDir），
     // 上限随采集 payload 回传，由主进程执行删除/滚动。
     var dataDir = "~/.zcode/zcode-lagfix";
@@ -1652,7 +1992,7 @@
 
     var verLine = document.createElement("div");
     verLine.className = "status";
-    verLine.textContent = "版本 v0.3.0 · 控制台 __lagfixOff() 可一键还原全部修复";
+    verLine.textContent = "版本 v" + VERSION + " · 控制台 __lagfixOff() 可一键还原全部优化项";
     c4.appendChild(verLine);
     sM.appendChild(c4);
 
@@ -1665,6 +2005,7 @@
       saveSettings();
       releaseThrottle();
       applyThrottle();
+      applyScrollSettings();   // 三个新开关也要回到默认并重新应用
       rebuildPanel();
       setObserving(settings.observe);
       renderOverlay();
@@ -1727,7 +2068,33 @@
     setPanelOpen(true);
   }
 
+  // 「检查更新」结果由主进程注入 window.__lagfixUpdate（本机不读网络）。
+  // 主进程只在收到 updateCheck=1 的样本后写一次；这里只负责展示。
+  function renderUpdateStatus() {
+    var el = document.getElementById(PANEL_ID + "-updatestatus");
+    if (!el) return;
+    var u = null;
+    try { u = window.__lagfixUpdate || null; } catch (e) {}
+    // 「正在检查」优先：第二次点击时不能还显示上一次的结论。
+    if (state.updateCheckRequested) {
+      el.textContent = "正在检查…（主进程下一个采集周期发出请求）";
+      return;
+    }
+    if (!u || typeof u !== "object") {
+      el.textContent = "尚未检查。点击「检查更新」会请求一次 GitHub Releases。";
+      return;
+    }
+    if (u.status === "ok") {
+      el.textContent = u.newer
+        ? "发现新版本 v" + u.latest + "（当前 v" + u.current + "）。用下方「复制安装口令」升级。"
+        : "已是最新（v" + u.current + "）。";
+      return;
+    }
+    el.textContent = "检查失败：" + (u.message || "未知原因");
+  }
+
   function renderPanelStatus() {
+    renderUpdateStatus();
     var s = document.getElementById(PANEL_ID + "-fixstatus");
     if (!s) return;
     try {
@@ -1740,8 +2107,8 @@
             ? "节流：待生效（" + (f.reason || "等待会话挂载") + "）"
             : "节流：已关闭");
       var bigLine = settings.bigSessionOn
-        ? "大会话保护：" + (f.loadTarget ? "已装" : "待装") + "（拦下 " + bigBlocked + " 次全量补拉）"
-        : "大会话保护：关";
+        ? "大历史会话保护：" + (f.loadTarget ? "已装" : "待装") + "（拦下 " + bigBlocked + " 次全量补拉）"
+        : "大历史会话保护：关";
       s.textContent = "会话 " + (state.sid ? state.sid.slice(0, 12) : "未挂载")
         + " · 帧采样 " + fs.n + " 个 · 卡顿 " + longTaskCount + " 次 · " + line + " · " + bigLine
         + (state.restartRequested ? " · 重启已请求，最多 " + settings.collectSec + "s 后执行" : "")
@@ -2157,6 +2524,9 @@
     if (store) {
       if (settings.bigSessionOn) applyLoadAllGuard(store);
       else releaseLoadAllGuard();
+      // v0.3.1：滚动诊断只观测 loadOlder，与「节流」开关无关——
+      // 只要诊断开着就装，关掉诊断由 applyScrollSettings 释放。
+      applyLoadOlderProbe(store);
     } else if (!settings.bigSessionOn) {
       releaseLoadAllGuard();
     }
@@ -2217,6 +2587,34 @@
     fixState.orig = null;
   }
 
+  // v0.3.1：两个观测开关与遮罩开关的唯一应用点。
+  // 面板、跨窗口 storage、恢复默认、一键还原都走这里，避免四条路径各写一份清理。
+  function applyScrollSettings() {
+    if (!settings.scrollDiagOn || state.dead) {
+      releaseLoadOlderProbe();
+      scrollRing.length = 0;
+      loadOlderRing.length = 0;
+      scrollEvents = 0;
+      anyScrollEvents = 0;
+      loadOlderCalls = 0;
+      loadOlderErrors = 0;
+      loadOlderMax = 0;
+      lafCount = 0;
+      lafMax = 0;
+      lastScrollAt = 0;
+    } else {
+      // 诊断刚打开：立即尝试装到当前 store（不必等 5s 看门狗）
+      try { applyThrottle(); } catch (e) {}
+    }
+    if (!settings.inputLagOn || state.dead) {
+      inputRing.length = 0;
+      inputPendingAt = 0;
+    }
+    if (!settings.maskOffOnScroll || state.dead) setScrollMaskActive(false);
+    // long-animation-frame 属于滚动诊断：诊断关掉就断开观察器。
+    setLafObserving(settings.scrollDiagOn && settings.observe && !state.dead);
+  }
+
   // 一键还原（控制台 / 出问题时）
   window.__lagfixOff = function () {
     try {
@@ -2225,9 +2623,28 @@
       var wasBig = settings.bigSessionOn;
       settings.throttleOn = false;
       settings.bigSessionOn = false;
+      // v0.3.1：一键还原必须把两项观测和遮罩也一起关掉，不能留下"看不见的采样"。
+      settings.scrollDiagOn = false;
+      settings.inputLagOn = false;
+      settings.maskOffOnScroll = false;
       saveSettings();
       releaseThrottle();
       releaseLoadAllGuard();
+      releaseLoadOlderProbe();
+      setScrollMaskActive(false);
+      try { if (lafObserver) lafObserver.disconnect(); } catch (e) {}
+      scrollRing.length = 0;
+      loadOlderRing.length = 0;
+      inputRing.length = 0;
+      inputPendingAt = 0;
+      scrollEvents = 0;
+      anyScrollEvents = 0;
+      loadOlderCalls = 0;
+      loadOlderErrors = 0;
+      loadOlderMax = 0;
+      lafCount = 0;
+      lafMax = 0;
+      lastScrollAt = 0;
       if (wasBig && bigBlocked !== bigBlockedMark) resumeFullHistory();
       fixState.reason = "已手动关闭";
       renderPanelStatus();
@@ -2288,6 +2705,7 @@
       try { if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; } } catch (e) {}
       try { if (slowRetryTimer) { clearTimeout(slowRetryTimer); slowRetryTimer = null; } } catch (e) {}
     }
+    setLafObserving(settings.observe && settings.scrollDiagOn);
     renderOverlay();
     renderPanelStatus();
   }
@@ -2307,9 +2725,16 @@
     if (!o || typeof o !== "object") return;
     var wasObserve = settings.observe;
     var wasBig = settings.bigSessionOn;
+    var wasScrollDiag = settings.scrollDiagOn;
+    var wasInputLag = settings.inputLagOn;
+    var wasMask = settings.maskOffOnScroll;
     mergeStored(o, settings);
     if (settings.badMs <= settings.warnMs) settings.badMs = settings.warnMs + 1;
     if (settings.observe !== wasObserve) setObserving(settings.observe, true);
+    if (settings.scrollDiagOn !== wasScrollDiag || settings.inputLagOn !== wasInputLag
+      || settings.maskOffOnScroll !== wasMask) {
+      applyScrollSettings();
+    }
     if (settings.throttleOn) {
       if (!fixState.applied) applyThrottle();
     } else {
@@ -2350,13 +2775,68 @@
   // ---- 采集入口（主进程每 N 秒调用）----
   function settingsSnapshot() {
     return {
-      observe: settings.observe, badgeVisible: settings.badgeVisible,
+      observe: settings.observe,
       badgeText: settings.badgeText, badgeMode: settings.badgeMode,
       adaptiveOn: settings.adaptiveOn, switchGuardOn: settings.switchGuardOn,
       hiddenSkipOn: settings.hiddenSkipOn, bigSessionOn: settings.bigSessionOn,
+      scrollDiagOn: settings.scrollDiagOn, inputLagOn: settings.inputLagOn,
+      maskOffOnScroll: settings.maskOffOnScroll,
       logMaxMB: settings.logMaxMB,
       warnMs: settings.warnMs, badMs: settings.badMs, collectSec: settings.collectSec,
     };
+  }
+
+  // ---- v0.3.1 观测快照 ----
+  function ringMax(ring, now) {
+    var vals = windowValues(ring, now);
+    var m = null;
+    for (var i = 0; i < vals.length; i++) if (m === null || vals[i] > m) m = vals[i];
+    return m;
+  }
+
+  function scrollSnapshot(now) {
+    if (!settings.scrollDiagOn) return null;
+    var vals = windowValues(scrollRing, now);
+    var loVals = windowValues(loadOlderRing, now);
+    // DOM 每周期采样一次；单次全量计数 >5ms 就退回 60s 降频 ——
+    // 观测器不能成为新的长任务源（9k 节点下全量计数本身就是可观测成本）。
+    var gap = domCostMs > 5 ? 60000 : 0;
+    if (!domAt || now - domAt > gap) {
+      var t0 = performance.now();
+      var n = null;
+      try { n = document.getElementsByTagName("*").length; } catch (e) {}
+      domCostMs = performance.now() - t0;
+      domAt = now;
+      if (n !== null) {
+        if (!domPeakAt || now - domPeakAt > WINDOW_MS) { domPeak = n; domPeakAt = now; }
+        else if (n > domPeak) domPeak = n;
+        domCount = n;
+      }
+    }
+    var turns = 0;
+    try { turns = document.querySelectorAll('[data-v4-turn-unit="true"]').length; } catch (e) {}
+    return {
+      p95: pctOf(vals, 0.95),
+      max: ringMax(scrollRing, now),
+      events: scrollEvents,
+      anyEvents: anyScrollEvents,
+      frames: vals.length,
+      mismatch: anyScrollEvents > 0 && scrollEvents === 0,
+      loadOlderCalls: loadOlderCalls,
+      loadOlderP95: pctOf(loVals, 0.95),
+      loadOlderMax: loadOlderMax || null,
+      loadOlderErrors: loadOlderErrors,
+      mountedTurns: turns,
+      domPeak: domPeak || null,
+      lafCount: lafCount,
+      lafMax: lafMax || null,
+    };
+  }
+
+  function inputSnapshot(now) {
+    if (!settings.inputLagOn) return null;
+    var vals = windowValues(inputRing, now);
+    return { p95: pctOf(vals, 0.95), max: ringMax(inputRing, now), samples: vals.length };
   }
 
   function fixSnapshot() {
@@ -2382,6 +2862,9 @@
         hidden: document.hidden, dead: true,
         miss: state.missedReason || true, errs: state.errCount,
         settings: cfg, fix: fixSnapshot(),
+        // schema 稳定：dead 样本也带这两个字段，消费端不必判 undefined
+        scroll: null, input: null,
+        ver: VERSION, updateCheck: 0,
         restart: state.restartRequested ? 1 : 0,
       });
     }
@@ -2389,6 +2872,10 @@
     if (!settings.observe) {
       state.frames = 0;
       longTaskCount = 0;
+      // 暂停不影响手动「检查更新」：标记随本样本回传一次后立即清掉，
+      // 否则暂停期间每个周期都会重复请求。
+      var pausedAsk = state.updateCheckRequested ? 1 : 0;
+      state.updateCheckRequested = false;
       return JSON.stringify({
         sid: state.sid, frames: 0, dt: 0,
         commitP50: null, commitP95: null, frameP50: null, frameP95: null,
@@ -2396,6 +2883,8 @@
         hidden: document.hidden, dead: false, paused: true,
         miss: false, errs: state.errCount,
         settings: cfg, fix: fixSnapshot(),
+        scroll: null, input: null,
+        ver: VERSION, updateCheck: pausedAsk,
         restart: state.restartRequested ? 1 : 0,
       });
     }
@@ -2446,16 +2935,27 @@
         errs: state.errCount,
         settings: settingsSnapshot(),
         fix: fixSnapshot(),
+        scroll: scrollSnapshot(now),
+        input: inputSnapshot(now),
+        ver: VERSION,
+        updateCheck: state.updateCheckRequested ? 1 : 0,
         restart: state.restartRequested ? 1 : 0,
       };
       return JSON.stringify(out);
     } catch (e) {
       err();
       return JSON.stringify({ sid: state.sid, frames: 0, dt: 0, dead: false, errs: state.errCount,
+        scroll: null, input: null, ver: VERSION,
         restart: state.restartRequested ? 1 : 0 });
     } finally {
       state.frames = 0;   // 异常路径也要清零，否则下次会跨窗口累计上报
       longTaskCount = 0;
+      // 周期计数一律清零；30s 环形窗口（scrollRing/loadOlderRing/inputRing）不清。
+      scrollEvents = 0;
+      anyScrollEvents = 0;
+      lafCount = 0;
+      // 检查更新请求只随一个样本回传：主进程收到后就会去查，不需要重发。
+      state.updateCheckRequested = false;
     }
   };
 
@@ -2467,6 +2967,11 @@
       samples: state.ring.length, frameSamples: frameRing.length,
       allTimeMax: state.allTimeMax, frameMaxAll: frameMaxAll,
       longTaskCount: longTaskCount, maxLongTaskMs: maxLongTaskMs,
+      scrollFrames: scrollRing.length, loadOlderCalls: loadOlderCalls,
+      loadOlderErrors: loadOlderErrors, inputSamples: inputRing.length,
+      maskAttr: (function () {
+        try { return document.documentElement.getAttribute("data-lagfix-scroll"); } catch (e) { return null; }
+      })(),
       errs: state.errCount,
     };
   };
