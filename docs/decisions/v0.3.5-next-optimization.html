@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>zcode-lagfix 下一版本拍板 · v0.3.5 定时器归因与滚动期合并</title>
+<title>zcode-lagfix 下一版本拍板 · v0.3.5 面板期归因与合并</title>
 <style>
   :root {
     --bg: #0b1017;
@@ -228,20 +228,20 @@
 
   <header class="hero">
     <div class="hero-main">
-      <div class="eyebrow"><span class="dot" style="background:var(--blue);box-shadow:0 0 0 5px rgba(88,166,255,.12)"></span>NEXT RELEASE · v0.3.5</div>
-      <h1>下一项优化 <span>先解开「定时器」归因歧义</span></h1>
-      <p class="lede">v0.3.4 上线后，18:50–22:25 共 4273 条样本出现了两条不同的卡顿路径。其中 22:12–22:22 这条：长帧中位 118ms、约 2 次/秒、DOM 只有 1.2k，脚本归属<b>全部</b>是 <code>TimerHandler</code>——但本插件的节流补发同样用 <code>setTimeout</code>，现在无法区分「宿主定时器」和「我们自己的补发」。v0.3.5 先补上下文归因，再上唯一一项低风险实验。</p>
+      <div class="eyebrow"><span class="dot" style="background:var(--red);box-shadow:0 0 0 5px rgba(248,81,73,.12)"></span>NEXT RELEASE · v0.3.5</div>
+      <h1>下一项优化 <span>先分清「谁在占主线程」</span></h1>
+      <p class="lede">你复现的路径是：<b>长会话正在运行/回复 + 右侧面板打开一个 HTML + 在面板里高频上下滑动</b>。日志显示这段时间<b>聊天区零滚动、零投影提交</b>，主线程仍持续每秒产生 3–10 个 100ms+ 长帧。插件能改的只有自己那部分；先把归因做准，再决定值不值得做缓解。</p>
       <div class="meta">
         <span class="chip">状态 <b>研究完成 · 待拍板</b></span>
-        <span class="chip">样本 <b>4273 条 / 18:50–22:25</b></span>
+        <span class="chip">样本 <b>496 条带长帧归因（22:11–22:35）</b></span>
         <span class="chip">候选 <b>4 项</b></span>
-        <span class="chip">建议 <b>P0 + O5（实验，默认关）</b></span>
+        <span class="chip">建议 <b>P0 + O5，O3b 后置</b></span>
       </div>
     </div>
     <aside class="hero-side">
       <div class="verdict-box">
-        <div class="big">建议 v0.3.5 = P0 归因补强 + O5 滚动期合并</div>
-        <p>P0 只读、默认开，用来判定长帧到底由谁触发；O5 作为唯一实验、默认关，只改通知时机。O6 与上游建议不在本版动手。</p>
+        <div class="big">建议 v0.3.5 = P0 归因补强 + O5 面板期合并（实验，默认关）</div>
+        <p>P0 只读、默认开：给每条长帧标出触发来源与面板状态。O5 默认关：面板打开时把通知合并抬到 400ms。webview 自身的绘制成本，插件修不了，只能如实写进上游建议。</p>
       </div>
       <div class="version-line">基于 v0.3.4（2026-11-11 已发布）· 本页只定路线</div>
     </aside>
@@ -250,61 +250,61 @@
   <section>
     <div class="sec-head">
       <h2>01 · 已确认的事实</h2>
-      <p>只写日志与源码能证明的事；结论以样本数和时间窗标注。</p>
+      <p>只写日志与源码能证明的事；结论标注样本数与时间窗。</p>
     </div>
     <div class="grid-3">
       <div class="card">
-        <h3>存在两条卡顿路径</h3>
-        <p><b>A 大 DOM 上翻</b>：19:13:20–19:14:29，<code>frameP95</code> 152→588ms、<code>scrollP95</code> 212→861ms、DOM 3952→8678、补页累计 430→487 次。这正是 O3/O4 的目标场景。</p>
+        <h3>面板期长帧：最硬的一组数据</h3>
+        <p>22:33:02–22:33:41：<b>时间线滚动 0 次、投影提交 0 次</b>，仍出现每 3 秒 <b>20–33 个</b> ≥100ms 长帧（中位 139ms、P90 345ms、最大 1501ms），强制布局中位 65ms。侧栏此时 722px 打开。</p>
       </div>
       <div class="card">
-        <h3>B 小 DOM 定时器长帧</h3>
-        <p>22:11–22:22：254 个 ≥100ms 长帧，中位 <b>118ms</b>、P90 141ms、最大 302ms；95% 与滚动事件共现，但 DOM 只有 ~1200，且<b>侧栏全程关闭</b>（254/254）。</p>
+        <h3>面板期在日志里的占比</h3>
+        <p>带长帧归因的 496 条样本中，面板打开 115 条；其中 70 条「无时间线滚动」。这 70 条里有 <b>17 条</b>长帧数 ≥10，全部集中在 22:30–22:39（中位 16.5、最大 33）。</p>
       </div>
       <div class="card">
-        <h3>这批长帧不是补页造成的</h3>
-        <p>254 个长帧里只有 <b>2 个</b>落在 <code>loadOlder</code> 前后 2 秒内（中位距离 231 秒）。O3 降频对路径 B 基本不生效，不能把 B 说成 O3 已解决。</p>
+        <h3>长会话滚动本身也很重</h3>
+        <p>22:32:29–22:32:56：40 秒内补页 <b>+78 次</b>，单次 P95 <b>561ms</b>、最长 <b>1517ms</b>；frameP95 从 12 升到 <b>158ms</b>；DOM 3k→<b>9.9k</b>。</p>
       </div>
       <div class="card">
-        <h3>强制布局真实存在，但不是主因</h3>
-        <p>246 帧里 198 帧 <code>styleMs &gt; 0</code>，中位 <b>22ms</b>；脚本耗时最高单帧 114ms。布局是成本的一部分，剩下主要是脚本。</p>
+        <h3>O3 降频基本没覆盖到</h3>
+        <p>约 200 次补页里，只有 <b>4 次</b>落在 scroll 派发栈内（<code>pace.allowed/skipped = 4/0</code>）。绝大多数补页来自 <code>SessionPane.tsx:4870</code> 的 effect 自动补齐，O3 按设计不拦它。</p>
       </div>
       <div class="card">
-        <h3>两项实验已开但还没数据</h3>
-        <p><code>settings.json</code> 显示三个开关均为 true；<code>pace.allowed/skipped = 0/0</code>，说明开启后还没有「滚动触发 + 窗口 &gt;3000 行」的补页被计数。A/B 仍需按场景补。</p>
+        <h3>O4 开着也压不住屏内成本</h3>
+        <p>面板期这段 <code>turnContentVisOn=true</code>（<code>data-lagfix-cv</code> 生效），长帧中位仍 139ms。它只省屏外绘制，对屏内内容与 webview 合成无效。</p>
       </div>
       <div class="card">
-        <h3>空闲态是正常的</h3>
-        <p>22:25 的样本 <code>frameP95</code> 18–61ms、<code>eff=120</code>、DOM 3571；长帧只在活动期出现，不是一直卡。</p>
+        <h3>宿主面板是 webview</h3>
+        <p><code>UnifiedBrowserView.tsx:41</code>：网页像素由 renderer 内的 <code>&lt;webview&gt;</code> guest 直接渲染、在 DOM 内合成。也就是说面板 HTML 的滚动绘制成本落在宿主合成层上，插件没有任何 API 能改它。</p>
       </div>
     </div>
     <div class="callout">
       <div class="icon">!</div>
-      <p><b>路径 A 与 B 要分开优化。</b>A 是 DOM/补页成本（O3/O4 已针对，等 A/B 结论）；B 是「渲染频率 / 渲染成本」，现有开关都没有直接作用在它上面。</p>
+      <p><b>这条路径的瓶颈很可能不在插件管辖范围内。</b>插件能做的只有：把归因做准（谁触发、面板期还是聊天期），以及在面板交互期降低<b>我们自己</b>和宿主通知链路的竞争成本。面板 webview 的绘制开销不能包装成「已优化」。</p>
     </div>
   </section>
 
   <section>
     <div class="sec-head">
-      <h2>02 · 关键疑点：TimerHandler 不等于宿主定时器</h2>
-      <p>这是必须先补归因的原因；不解决它，下一步优化只能靠猜。</p>
+      <h2>02 · 两个必须先解开的歧义</h2>
+      <p>不解决它们，任何缓解都只能靠猜。</p>
     </div>
     <div class="grid-2">
       <div class="card hot-card">
-        <h3>我们自己的节流补发就是 setTimeout</h3>
-        <p><code>makeThrottledSubscribe</code> 在窗口未到期时用 <code>setTimeout(fire, wait)</code> 合并通知；<code>fire()</code> 里同步调用 React 的订阅回调，整段渲染都会被 LoAF 归到 <code>TimerHandler:setTimeout</code>。也就是说：现在看到的「定时器长帧」<b>可能就是我们自己延迟掉的渲染</b>。</p>
+        <h3>歧义一：TimerHandler ≠ 宿主定时器</h3>
+        <p>本插件节流补发就是 <code>setTimeout(fire, wait)</code>，<code>fire()</code> 里同步跑 React 订阅回调，整段渲染都会被 LoAF 记成 <code>TimerHandler:setTimeout</code>。宿主还有 <code>ConversationTimeline.tsx:721</code> 的 1 秒 <code>liveNowMs</code> 整树时钟。现在无法区分这三者。</p>
       </div>
       <div class="card">
-        <h3>宿主也有整树定时器</h3>
-        <p><code>ConversationTimeline.tsx:721</code> 在有运行中回合时每 <b>1000ms</b> <code>setLiveNowMs(Date.now())</code>，<code>liveNowMs</code> 是时间线顶层 state；<code>ConversationTimeline.tsx:1353</code> 还有一个内容宽度 settle 的 <code>setTimeout</code>。两者都会重新渲染时间线。</p>
+        <h3>歧义二：面板滚动我们看不见</h3>
+        <p>插件的滚动计数只认 <code>[data-v4-timeline-scroll]</code> 和会话 pane；webview 内部的滚动事件不会冒泡到宿主文档。所以「面板在滑」在样本里表现为「滚动 0、提交 0」——和你实际的操作对不上。</p>
       </div>
       <div class="card">
-        <h3>宿主脚本 URL 全空</h3>
-        <p>实机 449 条脚本条目 <code>sourceURL</code> 全为空，只能看到 <code>invoker</code>。已在上一个提交把报告展示名回退到调用点（文件名 → 调用点 → ?），但「是哪个函数」仍然拿不到。</p>
+        <h3>解决方式：时间上下文 + 面板标记</h3>
+        <p>长帧开始时记下距「上次通知 / 上次节流补发 / 上次时间线滚动 / 上次投影提交」的毫秒数，按最近者分类；样本额外记 <code>paneOpen</code> 与「面板打开且无时间线滚动」的 <code>panelQuiet</code> 标记。</p>
       </div>
       <div class="card">
-        <h3>因此需要「时间上下文」</h3>
-        <p>不 patch 宿主、不开 CDP 的前提下，最可靠的办法是记录长帧开始时距离<b>上次通知、上次节流补发、上次滚动、上次投影提交</b>各多少毫秒，再按最近者分类。</p>
+        <h3>边界：不能声称测到了 webview 内部</h3>
+        <p><code>panelQuiet</code> 只代表「面板开着且聊天区没滚」，不能证明 webview 正在滚。报告与文档必须按这个口径写，避免把相关性说成因果。</p>
       </div>
     </div>
   </section>
@@ -312,97 +312,90 @@
   <section>
     <div class="sec-head">
       <h2>03 · 候选方案</h2>
-      <p>全部遵守同一约束：独立开关、默认值有理由、关闭即回到 v0.3.4 行为、不读会话内容。</p>
+      <p>全部遵守：独立开关、默认值有理由、关闭即回到 v0.3.4、不读会话内容。</p>
     </div>
     <table class="accept-table">
       <thead><tr><th>编号</th><th>做什么</th><th>开关 / 默认</th><th>代价与边界</th><th>验收门槛</th></tr></thead>
       <tbody>
         <tr>
           <td data-label="编号"><b>P0</b></td>
-          <td data-label="做什么">长帧上下文归因：每条 ≥100ms 长帧记录 <code>sinceNotify / sinceFlush / sinceScroll / sinceCommit</code>，并给出分类 <code>flush / notify / scroll / unknown</code>；报告新增分类计数。</td>
+          <td data-label="做什么">长帧上下文：每条 ≥100ms 长帧记录 <code>sinceNotify / sinceFlush / sinceScroll / sinceCommit</code>，分类 <code>flush / notify / scroll / other</code>；样本加 <code>paneOpen</code> 与 <code>panelQuiet</code>；报告新增分类计数。</td>
           <td data-label="开关"><code>lafCtxOn</code><br><b>默认开</b>（只读）</td>
-          <td data-label="代价">每帧多 4 个整数、4 个模块级时间戳；不新增监听器、不改宿主、不改样本既有字段语义。</td>
-          <td data-label="验收">≥90% 长帧能归入四类之一；<code>unknown</code> &lt;20%；关闭后 <code>laf</code> 恢复 v0.3.4 形状。</td>
+          <td data-label="代价">每帧多 4 个整数；4 个模块级时间戳；不新增监听器、不改宿主。面板 webview 内部状态仍不可见。</td>
+          <td data-label="验收">≥90% 长帧可归入四类；<code>other</code> &lt;30%；关闭后 <code>laf</code> 恢复 v0.3.4 形状。</td>
         </tr>
         <tr>
           <td data-label="编号"><b>O5</b></td>
-          <td data-label="做什么">滚动期通知合并加严：滚动进行中把通知窗口下限抬到 <b>250ms</b>；停止滚动 400ms 后回到用户设定（含自适应下限）。只影响通知时机。</td>
-          <td data-label="开关"><code>scrollMergeOn</code><br><b>默认关</b>（实验）</td>
-          <td data-label="代价">滚动中内容更新最多晚 250ms；不动数据、不动补页、不改 store；关掉立即恢复。</td>
-          <td data-label="验收">同场景 A/B：<code>scrollP95</code> 或长任务数下降 ≥20%（长任务下降 ≥30% 亦可），顶部空白时间不变差，滚动中仍持续有提交。</td>
+          <td data-label="做什么">面板期合并：<code>paneOpen</code> 时通知窗口下限从 300ms 抬到 <b>400ms</b>，角标定位降到每 3 秒一次；面板关闭立即恢复。</td>
+          <td data-label="开关"><code>panelQuietOn</code><br><b>默认关</b>（实验）</td>
+          <td data-label="代价">面板开着时长会话内容更新最多晚 400ms；不碰 webview、不改布局；关掉即恢复。收益可能有限，必须先 A/B。</td>
+          <td data-label="验收">同场景（长会话运行 + 面板 HTML 快速滑动）A/B：长帧数或 <code>scrollP95</code> 下降 ≥20%；不过就永久默认关。</td>
         </tr>
         <tr>
-          <td data-label="编号"><b>O6</b></td>
-          <td data-label="做什么">隐藏 pane 的 store 通知降频：按 store 实例识别所属 pane，不可见时把窗口抬到 500ms 或暂停。</td>
+          <td data-label="编号"><b>O3b</b></td>
+          <td data-label="做什么">自动补拉降频：对 effect 自动补齐也做限流（同一会话 800ms 内只放行一次），并保留首 turn 完整性闸门。</td>
           <td data-label="开关">待定<br><b>本版不做</b></td>
-          <td data-label="代价">需要 store→pane 映射（fiber 向上找 <code>[data-session-id]</code>），映射错了会误伤可见会话；风险高于收益。</td>
-          <td data-label="验收">等 P0 数据证明隐藏 pane 仍在渲染，再单独拍板。</td>
+          <td data-label="代价">跳过自动补拉会让首 turn header 延迟出现；闸门设计错就会留下永久缺口。风险高于当前收益。</td>
+          <td data-label="验收">等 P0 证明面板期长帧与自动补拉相关，再单独拍板。</td>
         </tr>
         <tr>
           <td data-label="编号"><b>U1</b></td>
-          <td data-label="做什么">上游建议（只写文档，不改宿主）：把运行中 1 秒时钟收敛到局部组件；把 <code>syncMessageLayerMask</code> 移出滚动同步路径。</td>
+          <td data-label="做什么">上游建议（只写文档）：面板 HTML 预览的滚动绘制落在宿主合成层；建议改用独立 BrowserView/进程隔离，或限制预览页的动画与超大内容。</td>
           <td data-label="开关">—<br><b>文档</b></td>
-          <td data-label="代价">无代码风险；是否被采纳取决于宿主团队。</td>
-          <td data-label="验收">产出可复现的样本与源码位置，不提「插件已解决」。</td>
+          <td data-label="代价">无代码风险；采纳与否取决于宿主团队。</td>
+          <td data-label="验收">附样本时间窗、长帧分布与源码位置；不把「插件观测到」写成「插件已解决」。</td>
         </tr>
       </tbody>
     </table>
     <div class="callout">
       <div class="icon">→</div>
-      <p><b>为什么 O5 而不是 O6：</b>O5 只改我们已有的节流窗口，失败可立即回退；O6 需要猜 store 与 pane 的对应关系，一旦映射错会把可见会话也降频。先做低风险、可度量的那一个。</p>
+      <p><b>为什么不是 O3b：</b>它直接动补页完整性，而当前证据还不能证明面板期长帧来自自动补拉。先让 P0 把「面板期长帧到底由谁触发」测出来，再决定要不要冒这个险。</p>
     </div>
   </section>
 
   <section>
     <div class="sec-head">
-      <h2>04 · 推荐路线</h2>
-      <p>一个只读归因 + 一个实验，不允许再加第三项。</p>
+      <h2>04 · 推荐路线与验收</h2>
+      <p>一个只读归因 + 一个低风险实验，不加第三项。</p>
     </div>
     <div class="grid-2">
       <div class="card">
-        <h3>顺序</h3>
-        <p>先实现 P0 并收集一轮数据（1–2 天）；用 /lagfix report 的分类计数确认长帧主体。O5 与 P0 同版发布，但默认关，等你按 A/B 场景手动开启。</p>
+        <h3>发布内容</h3>
+        <p>P0 默认开；O5 默认关；U1 只出文档。O3b 与「隐藏 pane 降频」留到拿到 P0 分类数据之后。</p>
       </div>
       <div class="card">
-        <h3>不做什么</h3>
-        <p>不 patch 宿主定时器与 React、不注入 CDP、不折叠或隐藏消息、不改 <code>loadOlder</code> 返回值（O3 已定稿）、不把 O6 塞进本版、不因为「感觉更快」就宣布改善。</p>
+        <h3>你的复现路径 A/B</h3>
+        <p>同一长会话保持回复中，面板打开同一个 HTML：<b>关 O5 快速滑 30 秒 → 开 O5 快速滑 30 秒 → 再关</b>。对比长帧数、<code>frameP95</code>、强制布局时长与主观跟手度。</p>
       </div>
       <div class="card">
         <h3>数据口径</h3>
-        <p>P0 的 <code>since*</code> 用 <code>performance.now()</code> 与 LoAF <code>entry.startTime</code> 对齐；时间戳只在内存环形缓冲，随样本上报毫秒差，不落原始时间序列。</p>
+        <p>P0 的 <code>since*</code> 用 <code>performance.now()</code> 与 LoAF <code>entry.startTime</code> 对齐；只在内存环形缓冲，样本上报毫秒差，不落原始时间序列、不含任何页面内容。</p>
       </div>
       <div class="card">
         <h3>回退路径</h3>
-        <p>P0 关闭 → <code>laf.detail</code> 恢复 v0.3.4 字段；O5 关闭 → 通知窗口回到 <code>120ms / 自适应 / 面板常开 / 回前台</code> 现有规则；<code>__lagfixOff()</code>、自禁用、暂停三条路径都要清掉新时间戳与开关。</p>
+        <p>P0 关闭 → <code>laf.detail</code> 恢复 v0.3.4 字段；O5 关闭 → 回到 P2 的 300ms 规则；<code>__lagfixOff()</code>、自禁用、暂停三条路径都清掉新时间戳与标记。</p>
       </div>
-    </div>
-  </section>
-
-  <section>
-    <div class="sec-head">
-      <h2>05 · 验收场景</h2>
-      <p>同一台机器、同一批会话；每项至少 2 轮，先看中位数再看极值。</p>
     </div>
     <table class="accept-table">
       <thead><tr><th>场景</th><th>怎么操作</th><th>重点看什么</th><th>用来判断</th></tr></thead>
       <tbody>
         <tr>
-          <td data-label="场景"><b>P0 归因</b></td>
-          <td data-label="操作">正常使用 10 分钟以上，覆盖：空闲、流式输出、快速上翻、面板开关。</td>
-          <td data-label="指标">报告里 <code>flush / notify / scroll / unknown</code> 四类计数与占比。</td>
-          <td data-label="判断">长帧主体是「我们延迟的渲染」「直通通知」「滚动处理」还是「宿主定时器」。</td>
+          <td data-label="场景"><b>A 面板 HTML 滑动</b></td>
+          <td data-label="操作">长会话保持运行/回复中，右侧面板打开一个 HTML，快速上下滑动 30 秒；O5 关/开各一轮。</td>
+          <td data-label="指标"><code>laf.count</code>、<code>laf.detail[].since*</code>、<code>paneOpen/panelQuiet</code>、<code>frameP95</code>、<code>longTasks</code>。</td>
+          <td data-label="判断">长帧是插件补发、宿主定时器、还是面板期其它来源；O5 是否过 20% 门槛。</td>
         </tr>
         <tr>
-          <td data-label="场景"><b>O5 A/B</b></td>
-          <td data-label="操作">同一超长会话、同一段历史、同样速度上翻 3 次：O5 关 → 开 → 关。</td>
-          <td data-label="指标"><code>scrollP95</code>、<code>frameP95</code>、长任务数、顶部空白时间、滚动中 <code>frames</code> 是否持续。</td>
-          <td data-label="判断">是否过 ≥20% 门槛；不过就永久默认关并如实标注。</td>
+          <td data-label="场景"><b>B 长会话上翻</b></td>
+          <td data-label="操作">面板关闭，同一段历史快速上翻 3 次。</td>
+          <td data-label="指标"><code>loadOlderP95/max</code>、<code>pace.allowed/skipped</code>、DOM 峰值、顶部空白时间。</td>
+          <td data-label="判断">O3 的 4/200 覆盖率是否要重定义（O3b）。</td>
         </tr>
         <tr>
-          <td data-label="场景"><b>O3/O4 补测</b></td>
-          <td data-label="操作">按 v0.3.4 发布说明的 A/B 步骤各做一轮。</td>
-          <td data-label="指标"><code>pace.allowed/skipped</code>、DOM 峰值、锚点漂移、首 turn header 是否出现。</td>
-          <td data-label="判断">两项实验是保留、调参，还是永久默认关。</td>
+          <td data-label="场景"><b>C 静止对照</b></td>
+          <td data-label="操作">同样的长会话，面板关闭、不做任何操作 30 秒。</td>
+          <td data-label="指标">长帧计数与 <code>frameP95</code>。</td>
+          <td data-label="判断">区分「面板交互成本」与「大 DOM 底噪」。</td>
         </tr>
       </tbody>
     </table>
@@ -410,31 +403,31 @@
 
   <section>
     <div class="sec-head">
-      <h2>06 · 需要你拍板</h2>
-      <p>回复一句话即可，我按选项开工；实现前不会再改代码。</p>
+      <h2>05 · 需要你拍板</h2>
+      <p>回复一句话即可；实现前不会再改代码。</p>
     </div>
     <div class="grid-2">
       <div class="card">
         <h3>A（推荐）</h3>
-        <p>P0 归因补强（默认开、只读）+ O5 滚动期合并（实验、默认关），同版发布；O6/U1 不做。</p>
+        <p>P0 归因补强（默认开）+ O5 面板期合并（实验、默认关）+ U1 上游文档；O3b 后置。</p>
       </div>
       <div class="card">
         <h3>B</h3>
-        <p>只做 P0 归因，拿到一轮分类数据后再定缓解项；v0.3.5 不带任何实验。</p>
+        <p>只做 P0 归因，先拿到面板期分类数据，再决定做不做 O5。</p>
       </div>
       <div class="card">
         <h3>C</h3>
-        <p>跳过归因，直接做 O5 + O6 两项实验（风险更高，数据解释力弱）。</p>
+        <p>P0 + O5 + O3b 三项一起上（O3b 有首 turn 完整性风险，需要更长的验收）。</p>
       </div>
       <div class="card">
         <h3>D</h3>
-        <p>先把 v0.3.4 的 O3/O4 A/B 做完，再决定 v0.3.5 做什么。</p>
+        <p>先不写代码：我把这段证据整理成上游问题说明，由宿主侧评估 webview 合成成本。</p>
       </div>
     </div>
   </section>
 
   <div class="footnote">
-    本页只定路线与验收，不写实现代码。数据来自 <code>~/.zcode/zcode-lagfix/observe-20261111.jsonl*</code>（4273 条样本，18:50–22:25）与 ZCode v3.17.2 源码；不读会话正文。相关文件：<code>docs/specs/v0.3.4-loadolder-dom.md</code>、<code>docs/releases/v0.3.4.md</code>、<code>docs/decisions/v0.3.4-route.html</code>。
+    本页只定路线与验收，不写实现代码。数据来自 <code>~/.zcode/zcode-lagfix/observe-20261111.jsonl*</code>（带长帧归因样本 496 条，22:11–22:35）与 ZCode v3.17.2 源码；不读会话正文。相关文件：<code>docs/specs/v0.3.4-loadolder-dom.md</code>、<code>docs/releases/v0.3.4.md</code>、<code>docs/decisions/v0.3.4-route.html</code>。
   </div>
 </div>
 
