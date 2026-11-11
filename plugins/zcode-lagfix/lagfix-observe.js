@@ -1,5 +1,15 @@
 /**
- * zcode-lagfix renderer 观测脚本 v0.3.2
+ * zcode-lagfix renderer 观测脚本 v0.3.3
+ *
+ * v0.3.3（侧栏开合 / 面板常开期 / 回前台，默认开、可单独关）：
+ *   - P0 归因：pane.detected/open/panelPx/switches/switchP95/switchMax/guardHits；
+ *     refocus.hiddenMs/sinceVisibleMs/p95/max/flushes/guardHits。只读，不写 store。
+ *   - P1 开合 420ms：data-lagfix-pane-switch 停 [data-panel] 过渡、关消息层 mask、
+ *     暂停角标定位；把 200ms flex 动画变成一次跳变。
+ *   - P2 面板常开期：data-lagfix-pane-open 关消息层 mask；通知窗口至少 300ms；
+ *     角标定位最多 1 次/1.8s。
+ *   - P3 回前台：visibilitychange + focus/blur；120ms 合并补发后台通知；
+ *     700ms 内通知窗口至少 400ms；前 300ms 不定位角标。
  *
  * v0.3.2（多会话归因 + loadOlder 明细，只读）：
  *   - 按 data-session-id 分桶（最多 5 个）：每个会话的投影提交次数/速率、
@@ -87,7 +97,18 @@
   var LOAD_OLDER_SCROLL_WINDOW_MS = 2000;
   var LOAD_OLDER_INITIAL_WINDOW_MS = 5000;
   var MASK_IDLE_MS = 180;           // 停滚后多久恢复消息层遮罩
-  var VERSION = "0.3.2";
+  // v0.3.3：侧栏开合 / 面板常开 / 回前台保护
+  var PANE_GUARD_MS = 420;          // 200ms flex 过渡 + 220ms 重内容 settle
+  var PANE_SWITCH_WINDOW_MS = 800; // 开合后帧窗口
+  var PANE_HOLD_FLOOR_MS = 300;    // 面板常开期节流下限
+  var PANE_BADGE_MIN_MS = 1800;    // 面板常开期角标定位上限频率
+  var REFOCUS_DELAY_MS = 120;      // 回前台合并补发延迟
+  var REFOCUS_GUARD_MS = 700;      // 回前台节流下限窗口
+  var REFOCUS_BADGE_SKIP_MS = 300; // 回前台前 300ms 不定位角标
+  var REFOCUS_WINDOW_MS = 800;     // 回前台帧窗口
+  var PANE_SWITCH_DEDUPE_MS = 150; // aria-hidden 与 class 双信号去重
+  var REFOCUS_DEDUPE_MS = 500;     // visibilitychange 与 focus 双信号去重
+  var VERSION = "0.3.3";
   var ERR_LIMIT = 50;
   var OVERLAY_ID = "lagfix-overlay-badge";
   // 宿主浮层（Radix portal）：上下文容量、模型/工具菜单、对话框等。
@@ -114,6 +135,11 @@
     sessionDiagOn: true,    // v0.3.2 多会话归因（只读）
     inputLagOn: true,       // 输入延迟观测（只读）
     maskOffOnScroll: true,  // 滚动期临时关闭消息层 mask
+    // v0.3.3 侧栏与回前台（全部可单独关闭）
+    paneDiagOn: true,          // 侧栏开合 + 回前台归因（只读）
+    paneSwitchGuardOn: true,   // 开合 420ms 过渡/mask/角标保护
+    paneHoldOn: true,          // 面板常开期 mask/节流/角标保护
+    refocusGuardOn: true,      // 回前台 120ms 合并 + 700ms 保护
     logMaxMB: 50,       // 观测日志总预算（MB），超过自动删最旧
     warnMs: 50,         // 帧 P95 黄阈值
     badMs: 100,         // 帧 P95 红阈值
@@ -144,6 +170,11 @@
     if (typeof o.sessionDiagOn === "boolean") s.sessionDiagOn = o.sessionDiagOn;
     if (typeof o.inputLagOn === "boolean") s.inputLagOn = o.inputLagOn;
     if (typeof o.maskOffOnScroll === "boolean") s.maskOffOnScroll = o.maskOffOnScroll;
+    // v0.3.3：四项独立开关，只接受布尔值。
+    if (typeof o.paneDiagOn === "boolean") s.paneDiagOn = o.paneDiagOn;
+    if (typeof o.paneSwitchGuardOn === "boolean") s.paneSwitchGuardOn = o.paneSwitchGuardOn;
+    if (typeof o.paneHoldOn === "boolean") s.paneHoldOn = o.paneHoldOn;
+    if (typeof o.refocusGuardOn === "boolean") s.refocusGuardOn = o.refocusGuardOn;
     if (o.logMaxMB != null) s.logMaxMB = clampNum(o.logMaxMB, 5, 1000, DEFAULTS.logMaxMB);
     if (o.warnMs != null) s.warnMs = clampNum(o.warnMs, 1, 5000, DEFAULTS.warnMs);
     if (o.badMs != null) s.badMs = clampNum(o.badMs, 2, 10000, DEFAULTS.badMs);
@@ -252,25 +283,409 @@
   var bigBlocked = 0;        // 大会话保护拦下的全量补拉次数
   var bigBlockedMark = 0;    // 本轮保护启用时的拦截计数快照（只有真拦过才在关闭时补拉）
   var loadAllInFlightAt = 0; // 关闭保护后的补拉去重：防止快速关/开/关并发跑两遍
-  var bgFlushers = [];       // 后台挂起的通知：回前台立即补发（见 visibilitychange）
-  // 后台降频只保证"最多 1s 一次"，但窗口不可见时 Chromium 会把定时器降到 1/min。
-  // 回到前台必须立刻补一次，否则流式刚结束时界面可能停在旧状态。
-  try {
-    document.addEventListener("visibilitychange", function () {
+  var bgFlushers = [];       // 后台挂起的通知：回前台合并补发（见 visibilitychange）
+
+  // ---- v0.3.3：侧栏开合 / 面板常开期 / 回前台 ----
+  // 这些状态只存在 observer 内存；属性只加在 documentElement 上，不改宿主 React 树。
+  var paneFrame = null;          // [data-workspace-side-frame="true"]
+  var panePanel = null;          // frame.closest('[data-panel]')
+  var paneMO = null;             // 同时观察 frame aria-hidden 与 panel class
+  var paneDetected = false;
+  var paneOpen = false;
+  var paneSwitches = 0;
+  var paneGuardHits = 0;
+  var paneGuardUntil = 0;        // performance.now()
+  var paneGuardTimer = null;
+  var paneLastSwitchAt = 0;      // 双信号去重
+  var paneLastSignal = "";       // 上一次开合来自 aria-hidden 还是 class
+  var paneSwitchRing = [];       // [{t, ms}] 最近一次开合后 800ms
+  var paneSwitchWindowUntil = 0;
+  var paneLastBadgeAt = 0;       // 面板常开期角标定位频率
+
+  var refocusRing = [];          // [{t, ms}] 最近一次回前台后 800ms
+  var refocusWindowUntil = 0;
+  var refocusGuardUntil = 0;     // performance.now()
+  var refocusBadgeUntil = 0;
+  var refocusFlushTimer = null;
+  var refocusFlushes = 0;
+  var refocusGuardHits = 0;
+  var refocusBound = false;
+  var visibilityBound = false;
+  var lastHiddenAt = 0;
+  var hiddenMs = null;
+  var sinceVisibleAt = 0;
+  var lastBlurAt = 0;
+  var lastRefocusAt = 0;
+
+  function paneWatchNeeded() {
+    return !state.dead && settings.observe
+      && (settings.paneDiagOn || settings.paneSwitchGuardOn || settings.paneHoldOn);
+  }
+
+  function refocusWatchNeeded() {
+    return !state.dead && settings.observe
+      && (settings.paneDiagOn || settings.refocusGuardOn);
+  }
+
+  function readPaneOpen() {
+    // 宿主用 aria-hidden={!isVisible}，正常只会是 "true"/"false"。
+    // 属性缺失或值异常时按“不知道”处理，宁可不加常开保护，也不永久关闭渐隐/抬节流。
+    try { return !!paneFrame && paneFrame.getAttribute("aria-hidden") === "false"; } catch (e) { return false; }
+  }
+
+  function applyPaneHoldAttribute() {
+    try {
+      var root = document.documentElement;
+      if (!root) return;
+      var want = settings.paneHoldOn && settings.observe && !state.dead && paneDetected && paneOpen;
+      var cur = root.getAttribute("data-lagfix-pane-open") === "1";
+      if (want && !cur) root.setAttribute("data-lagfix-pane-open", "1");
+      else if (!want && cur) root.removeAttribute("data-lagfix-pane-open");
+      if (want !== cur) effCache.at = -1e9;
+    } catch (e) {}
+  }
+
+  function stopPaneGuard() {
+    if (paneGuardTimer) { clearTimeout(paneGuardTimer); paneGuardTimer = null; }
+    paneGuardUntil = 0;
+    try {
+      var root = document.documentElement;
+      if (root) root.removeAttribute("data-lagfix-pane-switch");
+    } catch (e) {}
+  }
+
+  function startPaneGuard(now) {
+    paneGuardHits++;
+    paneGuardUntil = now + PANE_GUARD_MS;
+    try {
+      var root = document.documentElement;
+      if (root) root.setAttribute("data-lagfix-pane-switch", "1");
+    } catch (e) {}
+    if (paneGuardTimer) { clearTimeout(paneGuardTimer); paneGuardTimer = null; }
+    paneGuardTimer = setTimeout(function () {
+      paneGuardTimer = null;
+      paneGuardUntil = 0;
+      try {
+        var el = document.documentElement;
+        if (el) el.removeAttribute("data-lagfix-pane-switch");
+      } catch (e) {}
+      effCache.at = -1e9;
+    }, PANE_GUARD_MS);
+  }
+
+  function onPaneSwitch(source) {
+    var now = performance.now();
+    // 同一次开合会同时改 aria-hidden 和 panel class：150ms 内只认一个来源。
+    // 同来源再次出现视为用户又开合了一次（快速连点也算），保护窗口重新计时。
+    if (now - paneLastSwitchAt < PANE_SWITCH_DEDUPE_MS
+      && paneLastSignal && source && paneLastSignal !== source) {
+      applyPaneHoldAttribute();
+      return;
+    }
+    paneLastSwitchAt = now;
+    if (source) paneLastSignal = source;
+    // 新一次开合：允许保护结束后立即定位一次，不用等上一轮的 1.8s 配额。
+    paneLastBadgeAt = 0;
+    if (settings.paneDiagOn) {
+      paneSwitches++;
+      paneSwitchRing.length = 0;
+      paneSwitchWindowUntil = now + PANE_SWITCH_WINDOW_MS;
+    }
+    if (settings.paneSwitchGuardOn && !state.dead) startPaneGuard(now);
+    applyPaneHoldAttribute();
+    effCache.at = -1e9;
+  }
+
+  function onPaneMutation(records) {
+    try {
+      if (!paneFrame) return;
+      var sawAria = false;
+      var sawClass = false;
+      for (var i = 0; i < records.length; i++) {
+        var rec = records[i];
+        if (rec.target === paneFrame && rec.attributeName === "aria-hidden") {
+          var open = readPaneOpen();
+          if (open !== paneOpen) { paneOpen = open; sawAria = true; }
+        } else if (panePanel && rec.target === panePanel && rec.attributeName === "class") {
+          var cls = panePanel.getAttribute("class") || "";
+          var old = rec.oldValue || "";
+          // 宿主只在显式展开/收起时加 transition-[flex-grow]；拖拽改宽不加。
+          if (cls.indexOf("transition-[flex-grow]") >= 0
+            && old.indexOf("transition-[flex-grow]") < 0) {
+            var open2 = readPaneOpen();
+            if (open2 !== paneOpen) paneOpen = open2;
+            sawClass = true;
+          }
+        }
+      }
+      if (sawAria || sawClass) onPaneSwitch(sawAria ? "aria" : "class");
+      else applyPaneHoldAttribute();
+    } catch (e) { err(); }
+  }
+
+  function releasePaneProbe() {
+    try { if (paneMO) paneMO.disconnect(); } catch (e) {}
+    paneFrame = null;
+    panePanel = null;
+    paneDetected = false;
+    paneOpen = false;
+    stopPaneGuard();
+    applyPaneHoldAttribute();
+  }
+
+  function resetPaneDiagnostics() {
+    paneSwitches = 0;
+    paneGuardHits = 0;
+    paneSwitchRing.length = 0;
+    paneSwitchWindowUntil = 0;
+    paneLastSwitchAt = 0;
+    paneLastSignal = "";
+  }
+
+  function resetRefocusDiagnostics() {
+    // 只清“输出计数”，不动 P3 仍需要的 lastHiddenAt/lastBlurAt/保护截止时间。
+    refocusRing.length = 0;
+    refocusWindowUntil = 0;
+    refocusFlushes = 0;
+    refocusGuardHits = 0;
+    hiddenMs = null;
+    sinceVisibleAt = 0;
+  }
+
+  function resetRefocusRuntime() {
+    resetRefocusDiagnostics();
+    refocusGuardUntil = 0;
+    refocusBadgeUntil = 0;
+    lastHiddenAt = 0;
+    lastBlurAt = 0;
+    lastRefocusAt = 0;
+    if (refocusFlushTimer) { clearTimeout(refocusFlushTimer); refocusFlushTimer = null; }
+  }
+
+  function syncPaneProbe() {
+    if (!paneWatchNeeded()) { releasePaneProbe(); return; }
+    var frame = null;
+    try { frame = document.querySelector('[data-workspace-side-frame="true"]'); } catch (e) {}
+    if (!frame || frame.isConnected === false) {
+      var had = paneDetected;
+      if (paneFrame) releasePaneProbe();
+      else applyPaneHoldAttribute();
+      paneDetected = false;
+      paneOpen = false;
+      if (had) resetPaneDiagnostics();
+      return;
+    }
+    var panel = null;
+    try { panel = frame.closest ? frame.closest('[data-panel]') : null; } catch (e) {}
+    if (frame !== paneFrame || panel !== panePanel) {
+      paneFrame = frame;
+      panePanel = panel;
+      paneDetected = true;
+      if (!paneMO && typeof MutationObserver === "function") {
+        paneMO = new MutationObserver(onPaneMutation);
+      }
+      try { if (paneMO) paneMO.disconnect(); } catch (e) {}
+      try {
+        if (paneMO) paneMO.observe(frame, {
+          attributes: true, attributeFilter: ["aria-hidden"], attributeOldValue: true,
+        });
+      } catch (e) {}
+      try {
+        if (paneMO && panel) paneMO.observe(panel, {
+          attributes: true, attributeFilter: ["class"], attributeOldValue: true,
+        });
+      } catch (e) {}
+      paneOpen = readPaneOpen();
+      paneLastSwitchAt = 0;
+    }
+    applyPaneHoldAttribute();
+  }
+
+  function flushBackgroundNow() {
+    var list = bgFlushers.slice();
+    var n = 0;
+    for (var i = 0; i < list.length; i++) {
+      try { if (list[i]() === true) n++; } catch (e) {}
+    }
+    if (settings.paneDiagOn) refocusFlushes = n;
+    return n;
+  }
+
+  function onRefocus(source, now) {
+    try {
+      if (state.dead || !settings.observe) return;
+      now = now || performance.now();
+      // 500ms 内重复到达的 visible/focus 只算一次事件；但补发不能因此丢掉。
+      var fresh = !(now - lastRefocusAt < REFOCUS_DEDUPE_MS);
+      if (fresh) {
+        lastRefocusAt = now;
+        sinceVisibleAt = now;
+        if (settings.paneDiagOn) {
+          refocusRing.length = 0;
+          refocusWindowUntil = now + REFOCUS_WINDOW_MS;
+        }
+        if (settings.refocusGuardOn) {
+          if (settings.paneDiagOn) refocusGuardHits++;
+          refocusGuardUntil = now + REFOCUS_GUARD_MS;
+          refocusBadgeUntil = now + REFOCUS_BADGE_SKIP_MS;
+        }
+        effCache.at = -1e9;
+      }
+      if (settings.refocusGuardOn) {
+        // 不再在 visibilitychange 里同步遍历所有 flusher：先让窗口完成恢复/首帧，
+        // 120ms 后把所有 pending 合并到同一任务里补发一次。
+        if (!refocusFlushTimer) {
+          refocusFlushTimer = setTimeout(function () {
+            refocusFlushTimer = null;
+            flushBackgroundNow();
+          }, REFOCUS_DELAY_MS);
+        }
+      } else {
+        flushBackgroundNow();
+      }
+    } catch (e) { err(); }
+  }
+
+  function onVisibilityChange() {
+    try {
       if (document.hidden) {
         // 后台 rAF 基本不跑；不清掉会把整段后台时长记成一次按键延迟。
         inputPendingAt = 0;
+        rafLast = 0;
+        if (settings.paneDiagOn) lastHiddenAt = performance.now();
         return;
       }
+      var now = performance.now();
+      rafLast = 0;
       // 后台 overlay 定时器会被降到 1/min；回前台的第一个 tick 不能拿几十秒的
       // dt 去算 stallMs，否则角标会闪一下"卡死"。
       lastTickAt = 0;
-      var list = bgFlushers.slice();
-      for (var i = 0; i < list.length; i++) {
-        try { list[i](); } catch (e) {}
+      if (settings.paneDiagOn && lastHiddenAt) {
+        hiddenMs = Math.max(0, Math.round(now - lastHiddenAt));
       }
-    });
-  } catch (e) {}
+      lastHiddenAt = 0;
+      if (settings.paneDiagOn || settings.refocusGuardOn) {
+        onRefocus("visible", now);
+      } else {
+        // v0.3.2 基线：两个新开关都关掉时，回前台仍然立即补发挂起通知。
+        flushBackgroundNow();
+      }
+    } catch (e) { err(); }
+  }
+
+  function onWindowBlur() {
+    try { lastBlurAt = performance.now(); } catch (e) {}
+  }
+
+  function onWindowFocus() {
+    try {
+      if (document.hidden) return;
+      if (!lastBlurAt) return;   // 首次加载的 focus 没有前置 blur
+      var now = performance.now();
+      var gap = Math.max(0, Math.round(now - lastBlurAt));
+      lastBlurAt = 0;
+      // 可见但失焦的 Alt-Tab：用失焦时长补 hiddenMs，避免报告沿用上一次最小化的旧值。
+      if (settings.paneDiagOn && gap > 0) hiddenMs = gap;
+      onRefocus("focus", now);
+    } catch (e) { err(); }
+  }
+
+  function setVisibilityListener(on) {
+    try {
+      if (on && !visibilityBound) {
+        visibilityBound = true;
+        document.addEventListener("visibilitychange", onVisibilityChange);
+      } else if (!on && visibilityBound) {
+        visibilityBound = false;
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      }
+    } catch (e) {}
+  }
+
+  function setFocusListeners(on) {
+    try {
+      if (on && !refocusBound) {
+        refocusBound = true;
+        window.addEventListener("blur", onWindowBlur);
+        window.addEventListener("focus", onWindowFocus);
+      } else if (!on && refocusBound) {
+        refocusBound = false;
+        window.removeEventListener("blur", onWindowBlur);
+        window.removeEventListener("focus", onWindowFocus);
+      }
+    } catch (e) {}
+  }
+
+  function setRefocusListeners() {
+    // visibilitychange 是 v0.3.2 的基线：只要观测在跑就保留，负责重置 rAF 基线
+    // 和回前台补发。P3 只额外挂 blur/focus 并接管补发时机。
+    setVisibilityListener(!state.dead && settings.observe);
+    setFocusListeners(refocusWatchNeeded());
+    if (state.dead || !settings.observe || !settings.refocusGuardOn) {
+      if (refocusFlushTimer) { clearTimeout(refocusFlushTimer); refocusFlushTimer = null; }
+    }
+  }
+
+  function applyPaneSettings() {
+    if (!settings.observe || state.dead) {
+      resetPaneDiagnostics();
+      resetRefocusRuntime();
+    } else if (!settings.paneDiagOn) {
+      resetPaneDiagnostics();
+      resetRefocusDiagnostics();
+    }
+    if (!settings.paneSwitchGuardOn) stopPaneGuard();
+    if (!settings.paneHoldOn) applyPaneHoldAttribute();
+    if (!settings.refocusGuardOn) {
+      refocusGuardHits = 0;
+      refocusGuardUntil = 0;
+      refocusBadgeUntil = 0;
+      if (refocusFlushTimer) { clearTimeout(refocusFlushTimer); refocusFlushTimer = null; }
+    }
+    if (paneWatchNeeded()) syncPaneProbe();
+    else releasePaneProbe();
+    applyPaneHoldAttribute();
+    setRefocusListeners();
+    effCache.at = -1e9;
+  }
+
+  function paneSnapshot(now) {
+    if (!settings.paneDiagOn || state.dead) return null;
+    var px = null;
+    if (paneDetected && paneFrame) {
+      try {
+        var r = paneFrame.getBoundingClientRect();
+        if (r && isFinite(r.width)) px = Math.round(r.width);
+      } catch (e) {}
+    }
+    var vals = [];
+    for (var i = 0; i < paneSwitchRing.length; i++) vals.push(paneSwitchRing[i].ms);
+    return {
+      detected: paneDetected,
+      open: paneDetected ? paneOpen : false,
+      panelPx: paneDetected ? px : null,
+      switches: paneSwitches,
+      switchP95: pctOf(vals, 0.95),
+      switchMax: vals.length ? Math.max.apply(null, vals) : null,
+      guardHits: paneGuardHits,
+    };
+  }
+
+  function refocusSnapshot(now) {
+    if (!settings.paneDiagOn || state.dead) return null;
+    var vals = [];
+    for (var i = 0; i < refocusRing.length; i++) vals.push(refocusRing[i].ms);
+    return {
+      hiddenMs: hiddenMs,
+      sinceVisibleMs: sinceVisibleAt ? Math.round(now - sinceVisibleAt) : null,
+      p95: pctOf(vals, 0.95),
+      max: vals.length ? Math.max.apply(null, vals) : null,
+      flushes: refocusFlushes,
+      guardHits: refocusGuardHits,
+    };
+  }
+
+  setRefocusListeners();
 
   // DOM 计数（降频）
   var domCount = null;
@@ -305,6 +720,11 @@
     // v0.3.1：自禁用时必须把滚动观测/遮罩一起收干净，不能留半个包装或属性。
     try { releaseLoadOlderProbe(); } catch (e) {}
     try { releaseSessionProbe(); } catch (e) {}
+    // v0.3.3：自禁用不能留下侧栏/回前台属性、观察器或监听。
+    try { releasePaneProbe(); } catch (e) {}
+    try { setRefocusListeners(); } catch (e) {}
+    resetPaneDiagnostics();
+    resetRefocusRuntime();
     try { setScrollMaskActive(false); } catch (e) {}
     try { if (lafObserver) lafObserver.disconnect(); } catch (e) {}
     try { setScrollListener(false); } catch (e) {}
@@ -439,6 +859,16 @@
                 }
               }
             }
+            // v0.3.3：开合/回前台后的 800ms 帧窗口。窗口内只记帧间隔，
+            // 不改变任何宿主行为；下一次开合/回前台会清空重开。
+            if (settings.paneDiagOn && paneSwitchWindowUntil && t <= paneSwitchWindowUntil) {
+              paneSwitchRing.push({ t: t, ms: Math.round(d) });
+              if (paneSwitchRing.length > 240) paneSwitchRing.shift();
+            }
+            if (settings.paneDiagOn && refocusWindowUntil && t <= refocusWindowUntil) {
+              refocusRing.push({ t: t, ms: Math.round(d) });
+              if (refocusRing.length > 240) refocusRing.shift();
+            }
           }
         }
         rafLast = t;
@@ -461,11 +891,8 @@
     if (!state.dead && settings.observe) scheduleRafTick(rafGen);
     else stopRaf();
   }
-  // 后台期间 rAF 通常整段挂起，rafLast 停在进入后台前；不显式归零的话，
-  // 回到前台的第一帧会把整段后台时长当成"一帧"记录（角标变红、P95 被污染）。
-  try {
-    document.addEventListener("visibilitychange", function () { rafLast = 0; });
-  } catch (e) {}
+  // 后台期间 rAF 通常整段挂起，rafLast 停在进入后台前；onVisibilityChange
+  // 会在 hidden/visible 两边都归零，避免把整段后台时长记成一帧。
 
   // ---- 长任务：主线程被单次阻塞 ----
   try {
@@ -659,7 +1086,11 @@
       if (scrollMaskTimer) { clearTimeout(scrollMaskTimer); scrollMaskTimer = null; }
       scrollMaskDeadline = 0;
       var root = document.documentElement;
-      if (root) root.removeAttribute("data-lagfix-scroll");
+      if (root) {
+        root.removeAttribute("data-lagfix-scroll");
+        root.removeAttribute("data-lagfix-pane-switch");
+        root.removeAttribute("data-lagfix-pane-open");
+      }
     } catch (e) {}
   }
   function setPageUnloadListener(on) {
@@ -673,7 +1104,7 @@
       }
     } catch (e) {}
   }
-  setPageUnloadListener(settings.scrollDiagOn || settings.maskOffOnScroll);
+  setPageUnloadListener(!state.dead && settings.observe);
 
   // ---- v0.3.1 loadOlder 观测包装（只观测，不拦截） ----
   // generation：释放/关闭后递增；在途 promise 的回调据此丢弃，
@@ -1350,6 +1781,8 @@
       mo.observe(state.el, { attributes: true, attributeFilter: [ATTR, SID_ATTR] });
     } catch (e) { err(); }
     try { syncSessionPanes(); } catch (e) {}
+    // v0.3.3：锚点挂上后立即确认侧栏标记，不必等第一轮 collect（5s）。
+    try { syncPaneProbe(); } catch (e) {}
     armWatchdog();    // 锚点一挂上就尝试装节流（store 只能从真实 fiber 上取，必须等挂载完成）
     if ((settings.throttleOn && !fixState.applied) || settings.bigSessionOn
       || settings.scrollDiagOn) applyThrottle();
@@ -1667,6 +2100,14 @@
       // 作者的 !important 样式表规则优先于普通内联声明；若宿主改成带 important 的内联，本项会失效。
       '[data-lagfix-scroll="1"] [data-v4-timeline-message-layer="true"]{',
       "-webkit-mask-image:none !important;mask-image:none !important}",
+      // v0.3.3 P1：开合 420ms 内停掉宿主的 flex-grow 过渡，把 12 帧连续重排
+      // 变成一次跳变；同时临时去掉消息层遮罩。只覆盖 mask-image，不覆盖 mask 简写。
+      '[data-lagfix-pane-switch="1"] [data-panel]:has([data-workspace-side-frame="true"]){transition-duration:0s !important}',
+      '[data-lagfix-pane-switch="1"] [data-v4-timeline-message-layer="true"]{',
+      "-webkit-mask-image:none !important;mask-image:none !important}",
+      // v0.3.3 P2：面板常开期只关消息层遮罩，不隐藏内容、不改布局。
+      '[data-lagfix-pane-open="1"] [data-v4-timeline-message-layer="true"]{',
+      "-webkit-mask-image:none !important;mask-image:none !important}",
       // 开关
       "#" + PANEL_ID + " .sw{position:relative;display:inline-block;width:34px;height:18px;flex:0 0 auto}",
       "#" + PANEL_ID + " .sw input{position:absolute;opacity:0;width:0;height:0}",
@@ -1692,8 +2133,8 @@
     el = document.createElement("div");
     el.id = OVERLAY_ID;
     el.setAttribute("data-lagfix-overlay", "1");
-    el.title = "点开看统计：每帧=画面刷新间隔（越小越顺），重绘=对话区每秒重画几次，"
-      + "卡顿=主线程被占住>50ms 的次数。齿轮进设置。";
+    el.title = "点开看统计：每帧=两次画面更新隔多久（越小越顺），刷新=对话区每秒重画几次，"
+      + "卡顿=画面卡住超过 50ms 的次数。点齿轮进设置。";
 
     var dot = document.createElement("span");
     dot.className = "lg-dot";
@@ -1843,6 +2284,17 @@
     // 自家设置弹窗打开时直接让位：遮罩 z-index 高于角标，继续定位只会
     // 让用户在黑色遮罩后看到一层变暗的角标（与 A8「弹窗内自动隐藏」不符）。
     if (state.panelOpen) return false;
+    // v0.3.3：保护窗口内不再做 composerSurface/elementsFromPoint/多次 rect
+    // 读取，避免 surfaceRO 在面板动画每一帧触发强制布局。返回当前可见性，
+    // 让 renderOverlay 保持原显示状态，而不是把角标闪隐 420ms。
+    var now = performance.now();
+    var keepVisible = el.style.display !== "none";
+    if (settings.paneSwitchGuardOn && paneGuardUntil && now < paneGuardUntil) return keepVisible;
+    if (settings.refocusGuardOn && refocusBadgeUntil && now < refocusBadgeUntil) return keepVisible;
+    if (settings.paneHoldOn && paneOpen && keepVisible) {
+      if (paneLastBadgeAt && now - paneLastBadgeAt < PANE_BADGE_MIN_MS) return true;
+      paneLastBadgeAt = now;
+    }
     var surface = composerSurface();
     if (surface !== observedSurface) {
       observedSurface = surface;
@@ -1980,7 +2432,7 @@
           parts.push("观测已暂停");
         } else if (settings.badgeMode === "detail") {
           // 四项都用大白话：用户看不懂"提交/长任务"这种内部指标名。
-          parts.push("重绘 " + commitRate + "次/秒");
+          parts.push("刷新 " + commitRate + "次/秒");
           parts.push("每帧 " + (fs.p95 === null ? "-" : fs.p95 + "ms"));
           parts.push("卡顿 " + longTaskCount + "次");
           var hp = heapMB();
@@ -1988,7 +2440,7 @@
         } else {
           parts.push("每帧 " + (fs.p95 === null ? "-" : fs.p95 + "ms"));
           if (longTaskCount > 0) parts.push("卡顿 " + longTaskCount + "次");
-          if (stallMs > 500) parts.push("主线程停顿 " + stallMs + "ms");
+          if (stallMs > 500) parts.push("画面卡住 " + stallMs + "ms");
         }
         mEl.textContent = parts.join(" · ");
       }
@@ -2103,7 +2555,7 @@
     var html = '<div class="st-hd"><span>lagfix 性能</span>'
       + '<span class="st-tier" style="color:' + color + '">' + (tier ? tier.label : "无数据") + '</span></div>'
       + '<div class="st-big"><b style="color:' + color + '">' + p95txt + '</b>'
-      + '<span>ms · 每帧间隔 P95（越小越流畅，最近 30 秒）</span></div>'
+      + '<span>ms · 每帧耗时：95% 的帧不超过这个数（越小越流畅，最近 30 秒）</span></div>'
       + '<div class="st-chart" id="' + STATS_ID + '-chart"></div>'
       + '<div class="st-peaks"><span>最差 <b id="' + STATS_ID + '-pk">—</b></span>'
       + '<span>最好 <b id="' + STATS_ID + '-lo">—</b></span>'
@@ -2115,8 +2567,8 @@
       html += '<em><i style="background:' + t.color + '"></i>' + range + " " + t.label + "</em>";
     }
     html += '</div>'
-      + '<div class="st-help">每帧 = 连续两帧的间隔，越大越卡；重绘 = 对话区每秒重新画几次；'
-      + '卡顿 = 主线程被占住超过 50ms 的次数；内存 = 渲染进程 JS 堆。</div>'
+      + '<div class="st-help">每帧 = 连续两次画面更新的间隔，越大越卡；刷新 = 对话区每秒重新画几次；'
+      + '卡顿 = 画面更新被卡住超过 50ms 的次数；内存 = ZCode 界面占用的内存。</div>'
       + '<div class="st-foot" id="' + STATS_ID + '-foot"></div>';
     el.innerHTML = html;
 
@@ -2153,7 +2605,7 @@
     var foot = document.getElementById(STATS_ID + "-foot");
     if (foot) {
       var hp = heapMB();
-      foot.textContent = "对话区重绘 " + rate + " 次/秒 · 主线程卡顿 " + longTaskCount + " 次"
+      foot.textContent = "对话区每秒重画 " + rate + " 次 · 画面卡住超过 50ms 共 " + longTaskCount + " 次"
         + (rmax !== null ? " · 最近最差一帧 " + rmax + "ms" : "")
         + (hp !== null ? " · 内存 " + hp + "MB" : "");
     }
@@ -2209,7 +2661,7 @@
     if (sub) {
       var b = document.createElement("div");
       b.className = "sub";
-      b.textContent = disabled ? sub + "（依赖渲染节流，当前已关闭）" : sub;
+      b.textContent = disabled ? sub + "（需要先打开「合并刷新」）" : sub;
       l.appendChild(b);
     }
     if (info) {
@@ -2346,7 +2798,7 @@
       switchEl(settings.badgeText, function (v) {
         settings.badgeText = v; saveSettings(); renderOverlay();
       })));
-    c1.appendChild(rowEl("信息量", "简洁只给结论和每帧间隔；详细再加上重绘次数、卡顿次数、内存。",
+    c1.appendChild(rowEl("信息量", "简洁只显示结论、每帧耗时和卡顿次数；详细会多显示刷新次数和内存占用。",
       (function () {
         var g = document.createElement("div");
         g.className = "seg";
@@ -2363,7 +2815,7 @@
         });
         return g;
       })()));
-    c1.appendChild(rowEl("警告阈值", "帧 P95 超过它标黄。50ms 起能看出掉帧。",
+    c1.appendChild(rowEl("警告阈值", "把最近 30 秒的帧按快慢排队，最慢的 5% 超过这个数时标黄。50ms 起就能看出不流畅。",
       (function () {
         var w = document.createElement("div");
         w.className = "ctl";
@@ -2375,7 +2827,7 @@
         w.appendChild(unit("ms"));
         return w;
       })()));
-    c1.appendChild(rowEl("严重阈值", "帧 P95 超过它标红。100ms 以上是明显卡顿。",
+    c1.appendChild(rowEl("严重阈值", "最慢的 5% 超过这个数时标红。100ms 以上是明显卡顿。",
       (function () {
         var w = document.createElement("div");
         w.className = "ctl";
@@ -2391,9 +2843,9 @@
 
     // --- 观测 ---
     var sObs = section("observe", "观测",
-      "只读采样，不改宿主行为。数据写入 ~/.zcode/zcode-lagfix/observe-YYYYMMDD.jsonl。");
+      "只记录数据，不会改变 ZCode 的行为。记录保存在插件自己的数据文件夹里（路径见「维护」页）。");
     var c2 = card();
-    c2.appendChild(rowEl("开启观测", "关闭后不再采样帧间隔与长任务，角标变灰。",
+    c2.appendChild(rowEl("开启观测", "关闭后不再记录每帧耗时和卡顿，角标会变灰。",
       switchEl(settings.observe, function (v) { setObserving(v); rebuildPanel(); })));
     var sel = document.createElement("select");
     var secs = [1, 3, 5, 10, 30];
@@ -2410,7 +2862,7 @@
       settings.collectSec = clampNum(sel.value, 1, 120, DEFAULTS.collectSec);
       saveSettings();
     });
-    c2.appendChild(rowEl("采集间隔", "多久记录一次数据。越短越细，日志也越多。", sel));
+    c2.appendChild(rowEl("采集间隔", "多久保存一次数据。越短越详细，日志也越大。", sel));
     sObs.appendChild(c2);
 
     var capDiag = document.createElement("div");
@@ -2418,54 +2870,52 @@
     capDiag.textContent = "诊断";
     sObs.appendChild(capDiag);
     var c2b = card();
-    c2b.appendChild(rowEl("滚动诊断", "记录滚动时的帧 P95、补页次数与耗时、挂载轮数、DOM 峰值。",
+    c2b.appendChild(rowEl("滚动诊断", "记录滚动是否流畅、加载更早消息的次数和耗时、已显示的消息轮数与页面元素数量。",
       switchEl(settings.scrollDiagOn, function (v) {
         settings.scrollDiagOn = v; saveSettings(); applyScrollSettings();
         rebuildPanel(); renderPanelStatus();
       }),
-      "影响：只读统计——滚动帧 P95（只算滚动后 200ms 内的帧）、滚动事件数、"
-      + "loadOlder 次数/耗时/失败、当前挂载轮数、DOM 峰值、long-animation-frame（浏览器支持时）。\n"
-      + "不影响：滚动行为、补页时机与每页行数、消息内容、会话数据。关闭后 collect 的 scroll 字段为 null，"
-      + "也不再做额外的 DOM 扫描。"));
-    c2b.appendChild(rowEl("输入延迟", "按键到下一帧的间隔，用来看输入框卡不卡。",
+      "会做什么：只记录——滚动聊天区时画面是否流畅、上翻加载更早消息用了几次和多久、"
+      + "当前显示了多少轮消息、页面元素有多少。\n"
+      + "不会做什么：不改变滚动、加载时机、每页消息数或任何消息内容。关掉后不再记录这些数据，"
+      + "也不会额外检查页面元素。"));
+    c2b.appendChild(rowEl("输入延迟", "按下按键到画面更新的时间，用来看输入框跟不跟手。",
       switchEl(settings.inputLagOn, function (v) {
         settings.inputLagOn = v; saveSettings(); applyScrollSettings(); rebuildPanel();
       }),
-      "影响：只统计输入框（.chat-composer-input-surface）内的按键，记录 keydown 到下一帧的时间。\n"
-      + "不影响：输入内容、快捷键、菜单选择与事件传播。它只负责测量，不能让输入变快；"
-      + "关闭后 collect 的 input 字段为 null。"));
-    c2b.appendChild(rowEl("多会话归因", "按会话记录提交/帧、DOM、挂载轮数与滚动 P95。",
+      "会做什么：只记录在输入框里按下按键到画面更新用了多久，用来判断输入卡不卡。\n"
+      + "不会做什么：不改输入内容、快捷键、菜单选择，也不会让输入变快；它只负责测量。关掉后不再记录。"));
+    c2b.appendChild(rowEl("多会话分别统计", "按会话分别记录刷新次数、页面元素数量、已显示的消息轮数和滚动流畅度。",
       switchEl(settings.sessionDiagOn, function (v) {
         settings.sessionDiagOn = v; saveSettings(); applySessionSettings();
         rebuildPanel(); renderPanelStatus();
       }),
-      "影响：只读统计——按 data-session-id 分桶（最多 5 个），记录每个会话的投影提交次数/速率、"
-      + "DOM 节点数、挂载 turn 数与滚动帧 P95；后台 pane 也会记录并标记 visible=false。\n"
-      + "不影响：不读消息正文、不写 store、不改补页与渲染。关闭后 collect 的 sessions 字段为 null，"
-      + "也不再遍历会话 pane。"));
+      "会做什么：只记录每个会话的画面刷新次数、页面元素数量、已显示的消息轮数和滚动是否流畅；"
+      + "后台会话也会记录，并标注为不可见。最多同时保留 5 个会话，更多会话要有新动静才会替换最久没动静的那个。\n"
+      + "不会做什么：不读消息内容，不改会话数据，也不改变加载和显示方式。关掉后不再分别统计，"
+      + "也不再逐个检查会话窗口。"));
     sObs.appendChild(c2b);
     sections.observe = sObs;
 
     // --- 性能 ---
     var sFix = section("fix", "性能",
-      "减少流式输出、大历史加载与滚动时的卡顿。渲染类开关只影响「什么时候通知 React 渲染」；"
-      + "历史类只决定是否执行一次性全量补拉；滚动类只临时去掉消息层遮罩。"
-      + "都不改消息、会话数据与工具执行。每项标题后的「!」可展开影响什么、不影响什么。");
+      "减少回答输出、加载长历史、滚动和打开右侧面板时的卡顿。每项只改变刷新或加载的时机，"
+      + "不改消息内容，也不影响工具执行。点标题后的「!」可以看它会做什么、不会做什么。");
     var capThrottle = document.createElement("div");
     capThrottle.className = "cap";
-    capThrottle.textContent = "渲染";
+    capThrottle.textContent = "刷新";
     sFix.appendChild(capThrottle);
     var c3 = card();
-    c3.appendChild(rowEl("渲染节流", "合并宿主的高频通知，同一窗口内只重绘一次。",
+    c3.appendChild(rowEl("合并刷新", "把 ZCode 短时间内连续发来的刷新通知合并成一次。",
       switchEl(settings.throttleOn, function (v) {
         settings.throttleOn = v;
         saveSettings();
         if (v) applyThrottle(); else releaseThrottle();
         rebuildPanel(); renderOverlay();
       }),
-      "影响：宿主会话 store 的 subscribe 通知频率——同一窗口内的多次通知合并成一次，"
-      + "流式输出、工具状态、思考过程的刷新最多晚一个窗口。\n"
-      + "不影响：消息内容、会话数据、工具执行与任务队列。关闭后立即回到宿主原始频率。"));
+      "会做什么：ZCode 在很短时间内连续要求刷新时，只真正刷新一次，其余合并到下一次。"
+      + "回答逐字输出、工具状态变化时，画面最多晚一个刷新间隔。\n"
+      + "不会做什么：不改消息内容、会话数据、工具执行或任务队列。关掉后立刻恢复 ZCode 原本的刷新频率。"));
     var tw = document.createElement("div");
     tw.className = "ctl";
     tw.appendChild(numberInput(settings.throttleMs, 30, 1000, function (v) {
@@ -2474,10 +2924,10 @@
       renderPanelStatus();
     }));
     tw.appendChild(unit("ms"));
-    c3.appendChild(rowEl("最短刷新间隔", "两次重绘至少间隔多久。越大越省 CPU，画面也越迟。", tw,
-      "影响：两次通知之间的最小间隔。调大 → React 重绘更少、CPU 更省，但文字刷新更\"跳\"；"
-      + "调小 → 更跟手，但流式输出时重绘更多。\n"
-      + "不影响：Agent 收流、消息落盘、工具执行。它只决定\"什么时候把最新状态画出来\"。",
+    c3.appendChild(rowEl("最短刷新间隔", "两次刷新至少隔多久。调大更省 CPU，但文字更新会慢一点；面板常开时实际至少 300ms。", tw,
+      "会做什么：控制两次刷新之间至少隔多久。调大：刷新更少、更省 CPU，但文字更新会一顿一顿；"
+      + "调小：更跟手，但回答输出时刷新更频繁。\n"
+      + "不会做什么：不影响回复接收、消息保存和工具执行，只决定画面什么时候更新。",
       !settings.throttleOn));
     var fixStatus = document.createElement("div");
     fixStatus.className = "status";
@@ -2486,29 +2936,29 @@
     sFix.appendChild(c3);
 
     var c3b = card();
-    c3b.appendChild(rowEl("卡顿时自动放宽", "帧变差时把间隔临时加到 200–300ms，恢复后回落。",
+    c3b.appendChild(rowEl("卡顿时自动放慢", "画面变卡时自动把刷新间隔加到 200–300ms，恢复后再降回来。",
       switchEl(settings.adaptiveOn, function (v) {
         settings.adaptiveOn = v; saveSettings(); rebuildPanel(); renderPanelStatus();
       }),
-      "影响：最近帧 P95 ≥ 80ms 时窗口至少 200ms，≥ 150ms 至少 300ms（以面板值为下限）；帧恢复后自动回到"
-      + "\"最短刷新间隔\"里的值。卡顿时主动少画几帧，把主线程让给布局和输入。\n"
-      + "不影响：数据与会话状态；也不会改写\"最短刷新间隔\"设置本身。帧很好时它完全不介入。",
+      "会做什么：最近画面明显变卡时，自动把刷新间隔临时拉长到 200–300ms；画面恢复后自动回到"
+      + "「最短刷新间隔」里的值。卡的时候少画几帧，把资源让给输入和画面排版。\n"
+      + "不会做什么：不改数据或会话状态，也不会改掉你自己设的「最短刷新间隔」。画面流畅时它完全不介入。",
       !settings.throttleOn));
-    c3b.appendChild(rowEl("切换会话保护", "刚切会话的 10 秒内至少 250ms，不和首屏加载抢主线程。",
+    c3b.appendChild(rowEl("切换会话时放慢", "刚切换会话的 10 秒内，刷新间隔至少 250ms，不和首屏加载抢资源。",
       switchEl(settings.switchGuardOn, function (v) {
         settings.switchGuardOn = v; saveSettings(); rebuildPanel(); renderPanelStatus();
       }),
-      "影响：切会话/新建会话后的 10 秒内，通知窗口不低于 250ms。这段时间宿主正在挂载"
-      + "历史行、跑布局和虚拟列表，少几次重绘能明显缩短白屏和输入延迟。10 秒后自动恢复正常窗口。\n"
-      + "不影响：订阅关系与会话切换本身；切到小会话时只是前 10 秒刷新稍慢。",
+      "会做什么：切换或新建会话后的 10 秒内，刷新间隔不低于 250ms。这段时间 ZCode 正在加载历史消息和排版，"
+      + "少刷新几次能缩短白屏和输入卡顿。10 秒后自动恢复。\n"
+      + "不会做什么：不改变会话切换本身，也不影响消息加载。\n"
+      + "代价：切到小会话时，前 10 秒画面更新会稍慢。",
       !settings.throttleOn));
-    c3b.appendChild(rowEl("后台限制刷新", "窗口在后台时最多每秒重绘一次，前台恢复立即追上。",
+    c3b.appendChild(rowEl("后台时减少刷新", "ZCode 在后台时最多每秒刷新一次，切回来会立刻补上。",
       switchEl(settings.hiddenSkipOn, function (v) {
         settings.hiddenSkipOn = v; saveSettings(); rebuildPanel();
       }),
-      "影响：窗口不可见（最小化、切到别的应用、其他标签页）时，通知最多 1 秒 1 次，"
-      + "省下看不见的重绘和 CPU。\n"
-      + "不影响：Agent 执行、流式收包、日志采集；回到前台会立刻补一次最新状态，不会漏消息。",
+      "会做什么：ZCode 窗口不在前台（最小化、被别的应用盖住）时，最多每秒刷新一次，省下看不见的刷新和 CPU。\n"
+      + "不会做什么：不影响回复接收、工具执行和日志记录；切回前台会马上刷新到最新状态，不会漏消息。",
       !settings.throttleOn));
     sFix.appendChild(c3b);
 
@@ -2517,7 +2967,7 @@
     capHistory.textContent = "历史";
     sFix.appendChild(capHistory);
     var c3c = card();
-    c3c.appendChild(rowEl("大历史会话保护", "超过 800 行的会话不再自动补拉全部历史；分享时自动放行。",
+    c3c.appendChild(rowEl("大历史会话保护", "超过 800 行的会话不再一次性加载全部历史；分享时会自动放行。",
       switchEl(settings.bigSessionOn, function (v) {
         settings.bigSessionOn = v; saveSettings();
         if (v) {
@@ -2531,11 +2981,12 @@
         }
         rebuildPanel(); renderPanelStatus();
       }),
-      "影响：会话总行数 ≥ 800 且只加载了一部分时，拦下宿主的\"一次性补拉全部历史\""
-      + "（问题导航目录、分享前的目录补齐）。大会话打开时不再突然渲染几千行。\n"
-      + "不影响：正常上翻分页（loadOlder）、当前可见消息、Agent 运行。分享面板打开、"
-      + "选中、复制时自动放行，分享功能照常。代价是大会话的问题导航只覆盖已加载部分。\n"
-      + "与渲染节流相互独立：即使节流关掉，这一项仍然生效。"));
+      "会做什么：会话超过 800 行且只加载了一部分时，阻止 ZCode 一次性把全部历史拉进来"
+      + "（例如打开问题导航、分享前补目录）。大会话打开时不会再突然显示几千行。\n"
+      + "不会做什么：正常上翻加载更早消息不受影响，当前看到的和正在运行的回复也不受影响。"
+      + "打开分享面板、选中或复制时会自动放行，分享照常。\n"
+      + "代价：大会话的问题导航只包含已经加载的部分。和「合并刷新」互不影响："
+      + "即使合并刷新关掉，这一项仍然生效。"));
     sFix.appendChild(c3c);
 
     var capScroll = document.createElement("div");
@@ -2543,16 +2994,60 @@
     capScroll.textContent = "滚动";
     sFix.appendChild(capScroll);
     var c3d = card();
-    c3d.appendChild(rowEl("滚动期隐藏遮罩", "滚动时去掉消息层上下渐隐，停止 180ms 后恢复。",
+    c3d.appendChild(rowEl("滚动时去掉渐隐", "滚动聊天区时暂时去掉上下边缘的渐隐，停止 180ms 后恢复。",
       switchEl(settings.maskOffOnScroll, function (v) {
         settings.maskOffOnScroll = v; saveSettings(); applyScrollSettings(); rebuildPanel();
       }),
-      "影响：滚动时间线时临时移除消息层（[data-v4-timeline-message-layer]）的上下渐隐遮罩，"
-      + "停止滚动 180ms 后自动恢复；只改绘制，不改布局、DOM 与滚动位置。\n"
-      + "不影响：消息内容、高度、锚定与滚动条；不改变任何会话数据。\n"
-      + "依赖宿主当前用内联 mask-image 实现遮罩；如果宿主改用 !important 内联写法，本项会失效"
-      + "（届时滚动 P95 不会改善，按日志判断即可）。"));
+      "会做什么：滚动聊天区时，暂时去掉消息上下边缘的渐隐；停止滚动 180ms 后自动恢复。"
+      + "只改变画面效果，不改变消息位置和高度。\n"
+      + "不会做什么：不影响消息内容、滚动位置和滚动条，也不改任何会话数据。\n"
+      + "注意：这项依赖 ZCode 当前使用的渐隐实现；如果以后 ZCode 改了写法，这一项会失效，"
+      + "届时滚动流畅度不会改善。"));
     sFix.appendChild(c3d);
+
+    var capPane = document.createElement("div");
+    capPane.className = "cap";
+    capPane.textContent = "侧栏与回前台";
+    sFix.appendChild(capPane);
+    var c3e = card();
+    c3e.appendChild(rowEl("侧栏与回前台统计", "记录侧栏开合次数、开合时的流畅度、面板宽度，以及切回 ZCode 后的卡顿。",
+      switchEl(settings.paneDiagOn, function (v) {
+        settings.paneDiagOn = v; saveSettings(); applyPaneSettings();
+        rebuildPanel(); renderPanelStatus();
+      }),
+      "会做什么：只记录侧栏打开/收起过几次、开合后画面是否流畅、面板有多宽；"
+      + "从别的应用切回 ZCode 前在后台待了多久、切回后画面是否流畅、积压的刷新合并了几次。\n"
+      + "不会做什么：不改变面板内容、开合方式、消息或会话数据。关掉后不再记录这两组数据；"
+      + "如果下面的保护还开着，只会保留判断开合所需的最小信息。"));
+    c3e.appendChild(rowEl("侧栏开合保护", "开合后的 420ms 内取消面板滑动动画和聊天区上下边缘的渐隐，并暂停移动角标。",
+      switchEl(settings.paneSwitchGuardOn, function (v) {
+        settings.paneSwitchGuardOn = v; saveSettings(); applyPaneSettings();
+        rebuildPanel(); renderPanelStatus();
+      }),
+      "会做什么：你点开或点关右侧面板后的 420ms 内（拖动边框只改宽度，不算开合），"
+      + "面板直接出现或消失，不再做 200ms 滑动；聊天区上下边缘的渐隐暂时去掉；"
+      + "角标停在原地不动。420ms 后自动恢复。\n"
+      + "不会做什么：不改变面板宽度、内容、滚动位置或会话数据。\n"
+      + "代价：开合少了滑动感；不想要就关掉这一项，其它三项仍可用。"));
+    c3e.appendChild(rowEl("面板常开保护", "面板开着时取消聊天区渐隐，刷新间隔至少 300ms，角标最多每 1.8 秒移动一次。",
+      switchEl(settings.paneHoldOn, function (v) {
+        settings.paneHoldOn = v; saveSettings(); applyPaneSettings();
+        rebuildPanel(); renderPanelStatus();
+      }),
+      "会做什么：右侧面板保持打开时，聊天区去掉上下渐隐，刷新间隔不低于 300ms，"
+      + "角标最多每 1.8 秒移动一次。面板一关就恢复原样。\n"
+      + "不会做什么：不影响回复接收、工具执行、消息保存和面板内容。\n"
+      + "代价：聊天文字最多晚 300ms 更新。"));
+    c3e.appendChild(rowEl("回前台保护", "切回 ZCode 时把积压的刷新合并成一次，前 700ms 放慢刷新。",
+      switchEl(settings.refocusGuardOn, function (v) {
+        settings.refocusGuardOn = v; saveSettings(); applyPaneSettings();
+        rebuildPanel(); renderPanelStatus();
+      }),
+      "会做什么：从别的应用切回 ZCode（或标签页重新可见）时，把后台期间积压的刷新合并成一次，"
+      + "700ms 内刷新间隔不低于 400ms，前 300ms 不移动角标。\n"
+      + "不会做什么：不拦截 ZCode 自己的回前台刷新，也不影响回复接收和消息状态。\n"
+      + "代价：画面最多晚 120ms 追上最新状态。"));
+    sFix.appendChild(c3e);
     sections.fix = sFix;
 
     // --- 维护 ---
@@ -2584,16 +3079,16 @@
       // 不写 localStorage —— 进程重启后标记自然消失，不会无限重启。
       state.restartRequested = true;
       rz.disabled = true;
-      rz.textContent = "已请求重启，等待主进程…";
+      rz.textContent = "已请求重启，正在等待 ZCode 响应…";
       renderPanelStatus();
       setTimeout(function () {
         if (!rz.parentNode || !state.restartRequested) return;
         rz.disabled = false;
         rz.textContent = "重启 ZCode（上次未生效，可再试）";
-        rz.title = "主进程可能未收到请求（看 ~/.zcode/zcode-lagfix/main.log），可再点一次";
+        rz.title = "重启请求可能没送达（到日志文件夹看 main.log），可以再点一次";
       }, 60000);
     });
-    c4.appendChild(rowEl("重启 ZCode", "宿主清理超过 15s 才会强制结束；请求不落盘。", rz));
+    c4.appendChild(rowEl("重启 ZCode", "ZCode 清理超过 15 秒才会强制结束；这次请求不会被保存。", rz));
     var up = document.createElement("button");
     up.type = "button";
     up.className = "act";
@@ -2673,7 +3168,7 @@
     var logCtl = document.createElement("div");
     logCtl.className = "ctl";
     logCtl.appendChild(copyBtn);
-    c4.appendChild(rowEl("日志存储路径", "observe-*.jsonl / main.log / inject.log 都在这里。", logCtl));
+    c4.appendChild(rowEl("日志存储路径", "观测记录和运行日志都在这个文件夹。", logCtl));
     var logPathRow = document.createElement("div");
     logPathRow.className = "status";
     logPathRow.style.marginTop = "2px";
@@ -2702,13 +3197,13 @@
       saveSettings();
       refreshLogStats();   // 上限文案立即跟上，不用关面板重开
     });
-    c4.appendChild(rowEl("日志上限", "超过上限自动删最旧的日志；今天正在写的文件会先滚动再删。", logSel));
+    c4.appendChild(rowEl("日志上限", "超过上限后自动删最旧的日志；今天正在写的文件会先分段保存再删旧段。", logSel));
 
     var verEl = document.createElement("span");
     verEl.className = "ver";
     verEl.textContent = "v" + VERSION;
     c4.appendChild(rowEl("版本",
-      "本机只读诊断与缓解；不修改会话内容，不联网上报。", verEl));
+      "只在本机记录和缓解卡顿；不修改会话内容，不联网上报。", verEl));
     sM.appendChild(c4);
 
     var reset = document.createElement("button");
@@ -2721,6 +3216,7 @@
       releaseThrottle();
       applyThrottle();
       applyScrollSettings();   // 三个新开关也要回到默认并重新应用
+      applyPaneSettings();     // v0.3.3 侧栏/回前台四项
       rebuildPanel();
       setObserving(settings.observe);
       renderOverlay();
@@ -2830,16 +3326,18 @@
       var fs = frameStats();
       var f = fixState;
       var line = f.applied
-        ? "节流：已生效（基础 " + settings.throttleMs + "ms / 当前 "
-          + (state.lastEffMs || settings.throttleMs) + "ms，经过 " + throttleHits + " 次通知）"
+        ? "合并刷新：已生效（你设 " + settings.throttleMs + "ms / 实际 "
+          + (state.lastEffMs || settings.throttleMs) + "ms，已合并 " + throttleHits + " 次）"
         : (settings.throttleOn
-            ? "节流：待生效（" + (f.reason || "等待会话挂载") + "）"
-            : "节流：已关闭");
+            ? "合并刷新：还没生效（" + (f.reason || "等 ZCode 的会话加载好") + "）"
+            : "合并刷新：已关闭");
       var bigLine = settings.bigSessionOn
-        ? "大历史会话保护：" + (f.loadTarget ? "已装" : "待装") + "（拦下 " + bigBlocked + " 次全量补拉）"
-        : "大历史会话保护：关";
+        ? "大历史会话保护：" + (f.loadTarget ? "已生效" : "等待生效")
+          + "（拦下 " + bigBlocked + " 次一次性加载全部历史）"
+        : "大历史会话保护：已关闭";
       s.textContent = "会话 " + (state.sid ? state.sid.slice(0, 12) : "未挂载")
-        + " · 帧采样 " + fs.n + " 个 · 卡顿 " + longTaskCount + " 次 · " + line + " · " + bigLine
+        + " · 已记录 " + fs.n + " 次画面更新 · 画面卡住超过 50ms " + longTaskCount + " 次 · "
+        + line + " · " + bigLine
         + (state.restartRequested ? " · 重启已请求，最多 " + settings.collectSec + "s 后执行" : "")
         + (saveFailed ? " · ⚠ 设置未能写入本地存储（仅本次生效）" : "");
     } catch (e) {}
@@ -2863,6 +3361,9 @@
       renderPanelStatus();
     } else {
       if (mask) mask.style.display = "none";
+      // 弹窗期间 positionBadge 早退、角标被隐藏；关窗后立即允许下一次定位，
+      // 不被面板常开期的 1.8s 配额多压最多 2 秒。
+      paneLastBadgeAt = 0;
       document.removeEventListener("mousedown", onDocDown, true);
       document.removeEventListener("keydown", onKeydown, true);
       uiBound = false;
@@ -2990,17 +3491,29 @@
   // 若从 0 开始会被"1 秒缓存"误判成命中，前 1 秒窗口变成 0（不节流）。
   var effCache = { at: -1e9, ms: 0 };
   function effectiveThrottleMs(now) {
-    if (now - effCache.at < 1000) return effCache.ms;
-    var ms = settings.throttleMs;
-    if (settings.adaptiveOn && !state.dead) {
-      var p = frameStats().p95;
-      if (p !== null && p >= 150) ms = Math.max(ms, 300);
-      else if (p !== null && p >= 80) ms = Math.max(ms, 200);
+    var ms;
+    if (now - effCache.at < 1000) {
+      ms = effCache.ms;
+    } else {
+      ms = settings.throttleMs;
+      if (settings.adaptiveOn && !state.dead) {
+        var p = frameStats().p95;
+        if (p !== null && p >= 150) ms = Math.max(ms, 300);
+        else if (p !== null && p >= 80) ms = Math.max(ms, 200);
+      }
+      if (settings.switchGuardOn && Date.now() - state.switchedAt < 10000) {
+        ms = Math.max(ms, 250);
+      }
+      // v0.3.3：面板常开期把窗口抬到 300ms。
+      if (settings.paneHoldOn && paneOpen && !state.dead) {
+        ms = Math.max(ms, PANE_HOLD_FLOOR_MS);
+      }
+      effCache = { at: now, ms: ms };
     }
-    if (settings.switchGuardOn && Date.now() - state.switchedAt < 10000) {
-      ms = Math.max(ms, 250);
+    // 回前台 700ms 的下限不进入 1s 缓存，否则窗口结束后还会多拖最多 1s。
+    if (settings.refocusGuardOn && refocusGuardUntil && now < refocusGuardUntil) {
+      ms = Math.max(ms, 400);
     }
-    effCache = { at: now, ms: ms };
     state.lastEffMs = ms;
     return ms;
   }
@@ -3062,13 +3575,15 @@
           timer = setTimeout(function () { timer = null; pending = false; fire(); }, wait);
         }
       }
-      // 回前台立即补发：只处理本订阅自己的 pending，不影响其它订阅。
+      // 回前台合并补发：只处理本订阅自己的 pending，不影响其它订阅。
+      // 返回 true 表示这次真的补发了一个挂起通知，P3 的 flushes 以此计数。
       var flushOnVisible = function () {
-        if (!pending || !timer) return;
+        if (!pending || !timer) return false;
         clearTimeout(timer);
         timer = null;
         pending = false;
         fire();
+        return true;
       };
       bgFlushers.push(flushOnVisible);
       var un = origSubscribe.call(self, wrapped);
@@ -3084,7 +3599,7 @@
   function scheduleThrottleRetry() {
     if (fixState.retryTimer || state.dead || !settings.throttleOn || fixState.applied) return;
     if (fixState.tries >= 20) {
-      fixState.reason = "未找到 store（已停止重试）";
+      fixState.reason = "ZCode 的会话还没加载好（已停止重试）";
       return;
     }
     fixState.retryTimer = setTimeout(function () {
@@ -3266,7 +3781,7 @@
     if (!store) {
       // 已经装好一个目标时不要把它降级成"未生效"：宿主可能只是临时卸了锚点
       if (!fixState.applied) {
-        fixState.reason = "未找到 store";
+        fixState.reason = "ZCode 的会话还没加载好";
         fixState.tries++;
         scheduleThrottleRetry();
       }
@@ -3352,7 +3867,7 @@
     setLafObserving(settings.scrollDiagOn && settings.observe && !state.dead);
     // 监听器按当前开关装卸；关闭后不再空转，重新开启时这里会挂回来。
     setScrollListener(scrollWatchNeeded());
-    setPageUnloadListener((settings.scrollDiagOn || settings.maskOffOnScroll) && !state.dead);
+    setPageUnloadListener(!state.dead && settings.observe);
     setInputListener(settings.inputLagOn && settings.observe && !state.dead);
     // 多会话归因有自己的开关；这一处统一处理 panel/storage/恢复默认三条路径。
     try { applySessionSettings(); } catch (e) {}
@@ -3371,11 +3886,17 @@
       settings.sessionDiagOn = false;
       settings.inputLagOn = false;
       settings.maskOffOnScroll = false;
+      // v0.3.3：四项一起关；属性/监听/定时器由 applyPaneSettings 统一清理。
+      settings.paneDiagOn = false;
+      settings.paneSwitchGuardOn = false;
+      settings.paneHoldOn = false;
+      settings.refocusGuardOn = false;
       saveSettings();
       releaseThrottle();
       releaseLoadAllGuard();
       releaseLoadOlderProbe();
       releaseSessionProbe();
+      try { applyPaneSettings(); } catch (e) {}
       setScrollMaskActive(false);
       try { if (lafObserver) lafObserver.disconnect(); } catch (e) {}
       setScrollListener(false);
@@ -3444,6 +3965,7 @@
       try { if (ltObserver) ltObserver.observe({ entryTypes: ["longtask"] }); } catch (e) {}
       frameRing.length = 0;
       rafLast = 0;
+      lastTickAt = 0;   // 暂停期间可能最小化过，恢复后第一 tick 不能算成卡死
       startRaf();
       try { syncSessionPanes(); } catch (e) {}
       // 恢复后从当前时刻起算全局 commitRate，分母不包含整段暂停时长。
@@ -3472,6 +3994,8 @@
     setLafObserving(settings.observe && settings.scrollDiagOn);
     setInputListener(settings.inputLagOn && settings.observe && !state.dead);
     setScrollListener(scrollWatchNeeded());
+    // v0.3.3：暂停时移除侧栏属性/监听，恢复时重新发现侧栏并挂回。
+    try { applyPaneSettings(); } catch (e) { err(); }
     renderOverlay();
     renderPanelStatus();
   }
@@ -3495,6 +4019,10 @@
     var wasSessionDiag = settings.sessionDiagOn;
     var wasInputLag = settings.inputLagOn;
     var wasMask = settings.maskOffOnScroll;
+    var wasPaneDiag = settings.paneDiagOn;
+    var wasPaneGuard = settings.paneSwitchGuardOn;
+    var wasPaneHold = settings.paneHoldOn;
+    var wasRefocusGuard = settings.refocusGuardOn;
     mergeStored(o, settings);
     if (settings.badMs <= settings.warnMs) settings.badMs = settings.warnMs + 1;
     if (settings.observe !== wasObserve) setObserving(settings.observe, true);
@@ -3503,6 +4031,12 @@
       applyScrollSettings();
     }
     if (settings.sessionDiagOn !== wasSessionDiag) applySessionSettings();
+    if (settings.paneDiagOn !== wasPaneDiag
+      || settings.paneSwitchGuardOn !== wasPaneGuard
+      || settings.paneHoldOn !== wasPaneHold
+      || settings.refocusGuardOn !== wasRefocusGuard) {
+      applyPaneSettings();
+    }
     if (settings.throttleOn) {
       if (!fixState.applied) applyThrottle();
     } else {
@@ -3550,6 +4084,10 @@
       scrollDiagOn: settings.scrollDiagOn, inputLagOn: settings.inputLagOn,
       sessionDiagOn: settings.sessionDiagOn,
       maskOffOnScroll: settings.maskOffOnScroll,
+      paneDiagOn: settings.paneDiagOn,
+      paneSwitchGuardOn: settings.paneSwitchGuardOn,
+      paneHoldOn: settings.paneHoldOn,
+      refocusGuardOn: settings.refocusGuardOn,
       logMaxMB: settings.logMaxMB,
       warnMs: settings.warnMs, badMs: settings.badMs, collectSec: settings.collectSec,
     };
@@ -3640,6 +4178,7 @@
         settings: cfg, fix: fixSnapshot(),
         // schema 稳定：dead 样本也带这些字段，消费端不必判 undefined
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
+        pane: null, refocus: null,
         ver: VERSION, updateCheck: 0,
         restart: state.restartRequested ? 1 : 0,
       });
@@ -3666,10 +4205,13 @@
         miss: false, errs: state.errCount,
         settings: cfg, fix: fixSnapshot(),
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
+        pane: null, refocus: null,
         ver: VERSION, updateCheck: pausedAsk,
         restart: state.restartRequested ? 1 : 0,
       });
     }
+    // v0.3.3：每轮采集重新确认侧栏标记（宿主可能改版/切布局），并更新常开属性。
+    try { syncPaneProbe(); } catch (e) {}
     var now = performance.now();
     var askUpdate = state.updateCheckRequested ? 1 : 0;
     var dtS = state.lastCollectAt ? (now - state.lastCollectAt) / 1000 : 0;
@@ -3733,6 +4275,8 @@
         input: inputSnapshot(now),
         sessions: sessionSnap,
         loadOlderDetail: detailSnap,
+        pane: paneSnapshot(now),
+        refocus: refocusSnapshot(now),
         ver: VERSION,
         updateCheck: askUpdate,
         restart: state.restartRequested ? 1 : 0,
@@ -3742,7 +4286,8 @@
       err();
       return JSON.stringify({ sid: state.sid, frames: 0, dt: 0, dead: false, errs: state.errCount,
         settings: cfg, fix: fixSnapshot(),
-        scroll: null, input: null, sessions: null, loadOlderDetail: null, ver: VERSION,
+        scroll: null, input: null, sessions: null, loadOlderDetail: null,
+        pane: null, refocus: null, ver: VERSION,
         updateCheck: askUpdate,
         restart: state.restartRequested ? 1 : 0 });
     } finally {
@@ -3771,6 +4316,17 @@
       loadOlderErrors: loadOlderErrors, inputSamples: inputRing.length,
       sessionBuckets: sessionBuckets.length, sessionPanes: sessionPanes.length,
       loadOlderDetail: loadOlderDetail.length,
+      paneDetected: paneDetected, paneOpen: paneOpen, paneSwitches: paneSwitches,
+      paneGuardHits: paneGuardHits,
+      paneSwitchFrames: paneSwitchRing.length,
+      refocusSamples: refocusRing.length, refocusFlushes: refocusFlushes,
+      refocusGuardHits: refocusGuardHits, hiddenMs: hiddenMs,
+      paneGuardAttr: (function () {
+        try { return document.documentElement.getAttribute("data-lagfix-pane-switch"); } catch (e) { return null; }
+      })(),
+      paneOpenAttr: (function () {
+        try { return document.documentElement.getAttribute("data-lagfix-pane-open"); } catch (e) { return null; }
+      })(),
       maskAttr: (function () {
         try { return document.documentElement.getAttribute("data-lagfix-scroll"); } catch (e) { return null; }
       })(),

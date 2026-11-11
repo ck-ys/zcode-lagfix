@@ -719,7 +719,18 @@ check("paused payload 的 sessions 为 null", pausedPayload.sessions === null,
   `sessions=${JSON.stringify(pausedPayload.sessions)}`);
 check("paused payload 的 loadOlderDetail 为 null", pausedPayload.loadOlderDetail === null,
   `detail=${JSON.stringify(pausedPayload.loadOlderDetail)}`);
+check("paused payload 的 pane/refocus 为 null",
+  pausedPayload.pane === null && pausedPayload.refocus === null,
+  `pane=${JSON.stringify(pausedPayload.pane)} refocus=${JSON.stringify(pausedPayload.refocus)}`);
+check("暂停时移除 visibility/focus/blur 监听",
+  (documentStub._listeners.visibilitychange || []).length === 0
+    && (window._listeners.focus || []).length === 0
+    && (window._listeners.blur || []).length === 0);
 writeSettings({ observe: true });
+check("恢复观测后 visibility/focus/blur 监听回来",
+  (documentStub._listeners.visibilitychange || []).length === 1
+    && (window._listeners.focus || []).length === 1
+    && (window._listeners.blur || []).length === 1);
 const resumedScroll = JSON.parse(window.__lagfixCollect()).scroll;
 check("恢复观测后 scroll 回到对象",
   resumedScroll && typeof resumedScroll === "object", JSON.stringify(resumedScroll));
@@ -1242,9 +1253,9 @@ const stats = documentStub.getElementById("lagfix-stats");
 check("点击角标创建统计浮层", !!stats);
 check("统计浮层可见", !!stats && stats.style.display === "block");
 const statsHtml = stats ? String(stats.innerHTML || "") : "";
-check("统计含标题与每帧间隔 P95",
-  statsHtml.includes("lagfix 性能") && statsHtml.includes("每帧间隔 P95"));
-check("统计含四项大白话解释", statsHtml.includes("重绘") && statsHtml.includes("卡顿")
+check("统计含标题与每帧耗时说明",
+  statsHtml.includes("lagfix 性能") && statsHtml.includes("每帧耗时：95% 的帧不超过这个数"));
+check("统计含四项大白话解释", statsHtml.includes("刷新") && statsHtml.includes("卡顿")
   && statsHtml.includes("内存"));
 check("统计含六档位图例", ["极流畅", "流畅", "正常", "轻微", "很卡"].every((t) => statsHtml.includes(t)));
 check("统计含柱状图容器", statsHtml.includes("lagfix-stats-chart"));
@@ -1271,28 +1282,31 @@ const panelText = panel ? allText(panel) : "";
 check("弹窗有左侧分类：状态条/观测/性能/维护",
   ["状态条", "观测", "性能", "维护"].every((t) => panelText.includes(t)));
 check("分类不再叫「修复」", !panelText.includes("修复"));
-check("面板含「渲染节流」", panelText.includes("渲染节流"));
+check("面板含「合并刷新」", panelText.includes("合并刷新"));
 check("面板含「重启 ZCode」", panelText.includes("重启 ZCode"));
 check("面板含「检查更新」", panelText.includes("检查更新"));
 check("底部说明「设置修改后自动保存」", panelText.includes("设置修改后自动保存"));
 check("维护页有正式版本行",
-  panelText.includes("版本") && panelText.includes("本机只读诊断与缓解"));
+  panelText.includes("版本") && panelText.includes("只在本机记录和缓解卡顿"));
 check("面板不再出现控制台 __lagfixOff 提示", !panelText.includes("__lagfixOff"));
 check("状态条页改用「显示文字 / 信息量 / 警告阈值 / 严重阈值」",
   ["显示文字", "信息量", "警告阈值", "严重阈值"].every((t) => panelText.includes(t)));
 check("旧的颜色式阈值命名已消失",
   !panelText.includes("变黄阈值") && !panelText.includes("变红阈值"));
-check("性能页按 渲染 / 历史 / 滚动 三组展示",
-  ["渲染节流", "最短刷新间隔", "卡顿时自动放宽", "切换会话保护", "后台限制刷新",
-    "大历史会话保护", "滚动期隐藏遮罩"].every((t) => panelText.includes(t)));
+check("性能页按 刷新 / 历史 / 滚动 三组展示",
+  ["合并刷新", "最短刷新间隔", "卡顿时自动放慢", "切换会话时放慢", "后台时减少刷新",
+    "大历史会话保护", "滚动时去掉渐隐"].every((t) => panelText.includes(t)));
 check("旧行名已消失",
   ["订阅通知节流", "节流窗口", "自适应窗口", "切会话冷静期", "后台降频", "大会话保护"]
     .every((t) => !panelText.includes(t)));
-check("观测页含「滚动诊断」「输入延迟」「多会话归因」",
+check("观测页含「滚动诊断」「输入延迟」「多会话分别统计」",
   panelText.includes("滚动诊断") && panelText.includes("输入延迟")
-  && panelText.includes("多会话归因"));
+  && panelText.includes("多会话分别统计"));
 check("A8：面板不再提供「显示角标」开关", !panelText.includes("显示角标"));
-check("面板版本行是 v0.3.2", panelText.includes("v0.3.2"));
+check("性能页含「侧栏与回前台」四项",
+  ["侧栏与回前台统计", "侧栏开合保护", "面板常开保护", "回前台保护"]
+    .every((t) => panelText.includes(t)));
+check("面板版本行是 v0.3.3", panelText.includes("v0.3.3"));
 check("面板不再出现版本号式标题", !panelText.includes("v0.3 性能增强"));
 check("维护页写明日志路径与上限",
   panelText.includes("日志存储路径") && panelText.includes("日志上限"));
@@ -1345,8 +1359,8 @@ if (infoBtn) {
   check("影响说明默认收起", !!note && note.style.display === "none");
   (infoBtn._listeners.click || [])[0]({ stopPropagation() {} });
   check("点「!」展开影响说明", !!note && note.style.display === "block");
-  check("说明同时写了影响与不影响",
-    !!note && note.textContent.includes("影响：") && note.textContent.includes("不影响："));
+  check("说明同时写了会做什么与不会做什么",
+    !!note && note.textContent.includes("会做什么：") && note.textContent.includes("不会做什么："));
 }
 
 const p0 = JSON.parse(window.__lagfixCollect());
@@ -1403,6 +1417,339 @@ check("旧 store 实例的 loadOlder 观测已还原",
 check("换 store 后旧会话补页明细不混入新会话",
   window.__lagfixDiag().loadOlderDetail === 0,
   `n=${window.__lagfixDiag().loadOlderDetail}`);
+
+console.log("-- v0.3.3 侧栏：默认值、检测与 420ms 保护 --");
+// 宿主形状：frame 始终挂载，aria-hidden 表示开合；外层是 react-resizable-panels
+// 的 [data-panel]，显式开合时 class 会短暂加 transition-[flex-grow]。
+const paneFrame = makeEl("div");
+paneFrame.setAttribute("data-workspace-side-frame", "true");
+paneFrame.setAttribute("aria-hidden", "true");
+paneFrame._rect = { left: 900, top: 0, right: 1440, bottom: 900, width: 540, height: 900 };
+const panePanel = makeEl("div");
+panePanel.setAttribute("data-panel", "");
+panePanel.setAttribute("class", "");
+paneFrame.closest = (sel) => (String(sel).includes("data-panel") ? panePanel : null);
+let sidePaneFrame = paneFrame;
+
+// 只在本段包一层查询：不重写前面已有的 querySelector 链，避免影响角标/会话用例。
+const prevQS = documentStub.querySelector;
+const prevQSA = documentStub.querySelectorAll;
+documentStub.querySelector = (sel) => {
+  if (String(sel).includes("data-workspace-side-frame")) return sidePaneFrame;
+  return prevQS ? prevQS(sel) : null;
+};
+documentStub.querySelectorAll = (sel) => {
+  if (String(sel).includes("data-workspace-side-frame")) return sidePaneFrame ? [sidePaneFrame] : [];
+  return prevQSA ? prevQSA(sel) : [];
+};
+const paneOf = () => collect().pane || {};
+const refocusOf = () => collect().refocus || {};
+
+const paneDefaults = collect();
+check("v0.3.3 四个开关默认开",
+  paneDefaults.settings.paneDiagOn === true
+    && paneDefaults.settings.paneSwitchGuardOn === true
+    && paneDefaults.settings.paneHoldOn === true
+    && paneDefaults.settings.refocusGuardOn === true,
+  JSON.stringify({
+    paneDiagOn: paneDefaults.settings.paneDiagOn,
+    paneSwitchGuardOn: paneDefaults.settings.paneSwitchGuardOn,
+    paneHoldOn: paneDefaults.settings.paneHoldOn,
+    refocusGuardOn: paneDefaults.settings.refocusGuardOn,
+  }));
+check("检测到侧栏并读到收起状态",
+  paneOf() && paneOf().detected === true && paneOf().open === false,
+  JSON.stringify(paneOf()));
+check("panelPx 取 frame 宽度", paneOf() && paneOf().panelPx === 540, `panelPx=${paneOf() && paneOf().panelPx}`);
+check("未开合时 switchP95/switchMax 为 null",
+  paneOf() && paneOf().switchP95 === null && paneOf().switchMax === null);
+check("未回前台时 refocus 为稳定空结构",
+  refocusOf() && refocusOf().hiddenMs === null && refocusOf().sinceVisibleMs === null
+    && refocusOf().p95 === null && refocusOf().flushes === 0 && refocusOf().guardHits === 0,
+  JSON.stringify(refocusOf()));
+
+const paneStyleText = String((documentStub.getElementById("lagfix-style") || {}).textContent || "");
+check("样式包含开合期停 [data-panel] 过渡的规则",
+  paneStyleText.includes('[data-lagfix-pane-switch="1"] [data-panel]:has([data-workspace-side-frame="true"])'));
+check("样式包含常开期关 mask 的规则",
+  paneStyleText.includes('[data-lagfix-pane-open="1"] [data-v4-timeline-message-layer="true"]'));
+
+// 打开：aria-hidden true → false，应同时触发开关计数、420ms 保护和常开期属性。
+const badgeLeftBeforeSwitch = badge.style.left;
+mainSurface._rect = { left: 400, top: 500, right: 1000, bottom: 620, width: 600, height: 120 };
+paneFrame.setAttribute("aria-hidden", "false");
+fireMutation(paneFrame, "aria-hidden", "true");
+const paneOpenSnap = paneOf();
+check("打开侧栏后 pane.open=true", paneOpenSnap && paneOpenSnap.open === true,
+  JSON.stringify(paneOpenSnap));
+check("打开侧栏记一次 switch", paneOpenSnap && paneOpenSnap.switches === 1,
+  `switches=${paneOpenSnap && paneOpenSnap.switches}`);
+check("打开侧栏加 data-lagfix-pane-switch",
+  docEl.getAttribute("data-lagfix-pane-switch") === "1",
+  `attr=${docEl.getAttribute("data-lagfix-pane-switch")}`);
+check("打开侧栏加 data-lagfix-pane-open",
+  docEl.getAttribute("data-lagfix-pane-open") === "1",
+  `attr=${docEl.getAttribute("data-lagfix-pane-open")}`);
+check("P1 guardHits 随真实开合递增", paneOf() && paneOf().guardHits === 1,
+  `guardHits=${paneOf() && paneOf().guardHits}`);
+
+// 保护窗口内角标不能再定位：否则 surfaceRO 会在动画每一帧做强制布局。
+tickOverlay();
+check("420ms 保护窗口内 positionBadge 不更新角标",
+  badge.style.left === badgeLeftBeforeSwitch,
+  `before=${badgeLeftBeforeSwitch} now=${badge.style.left}`);
+await wait(460);
+check("420ms 后移除 data-lagfix-pane-switch",
+  docEl.getAttribute("data-lagfix-pane-switch") === null,
+  `attr=${docEl.getAttribute("data-lagfix-pane-switch")}`);
+tickOverlay();
+check("保护结束后角标恢复定位（right=1000 → left=704）",
+  badge.style.left === "704px", `left=${badge.style.left}`);
+
+// 常开期：角标定位最多 1 次 / 1.8s；消息层 mask 由常开期属性关闭。
+const paneHoldLeft = badge.style.left;
+mainSurface._rect = { left: 500, top: 500, right: 1100, bottom: 620, width: 600, height: 120 };
+tickOverlay();
+check("面板常开期 1.8s 内第二次定位被跳过",
+  badge.style.left === paneHoldLeft, `before=${paneHoldLeft} now=${badge.style.left}`);
+await wait(1900);
+tickOverlay();
+check("1.8s 后角标恢复定位（right=1100 → left=804）",
+  badge.style.left === "804px", `left=${badge.style.left}`);
+
+// 常开期节流下限：面板打开时至少 300ms。
+let paneNotify = 0;
+const unPaneNotify = s3.store.subscribe(() => { paneNotify++; });
+s3.store.emit();
+check("面板常开期 effectiveThrottleMs 至少 300ms",
+  collect().fix.eff >= 300, `eff=${collect().fix.eff}`);
+
+// P2 独立关闭：属性立即移除、下限回落。
+writeSettings({ paneHoldOn: false });
+check("paneHoldOn=false 立即移除 data-lagfix-pane-open",
+  docEl.getAttribute("data-lagfix-pane-open") === null,
+  `attr=${docEl.getAttribute("data-lagfix-pane-open")}`);
+s3.store.emit();
+check("paneHoldOn=false 时节流下限回落到 120ms",
+  collect().fix.eff < 300, `eff=${collect().fix.eff}`);
+writeSettings({ paneHoldOn: true });
+check("重新开启 P2 属性回来",
+  docEl.getAttribute("data-lagfix-pane-open") === "1",
+  `attr=${docEl.getAttribute("data-lagfix-pane-open")}`);
+
+// P1 独立关闭：不加 420ms 属性，但 P0/P2 仍然工作。
+writeSettings({ paneSwitchGuardOn: false });
+paneFrame.setAttribute("aria-hidden", "true");
+fireMutation(paneFrame, "aria-hidden", "false");
+await wait(160);
+paneFrame.setAttribute("aria-hidden", "false");
+fireMutation(paneFrame, "aria-hidden", "true");
+check("paneSwitchGuardOn=false 不加 data-lagfix-pane-switch",
+  docEl.getAttribute("data-lagfix-pane-switch") === null,
+  `attr=${docEl.getAttribute("data-lagfix-pane-switch")}`);
+check("关 P1 不影响 P2 常开期属性",
+  docEl.getAttribute("data-lagfix-pane-open") === "1");
+writeSettings({ paneSwitchGuardOn: true });
+paneFrame.setAttribute("aria-hidden", "true");
+fireMutation(paneFrame, "aria-hidden", "false");
+await wait(160);
+paneFrame.setAttribute("aria-hidden", "false");
+fireMutation(paneFrame, "aria-hidden", "true");
+check("重新开启 P1 后开合属性回来",
+  docEl.getAttribute("data-lagfix-pane-switch") === "1",
+  `attr=${docEl.getAttribute("data-lagfix-pane-switch")}`);
+
+// class 信号：aria-hidden 未变时也必须单独记一次（超过 150ms 双信号去重窗口）。
+await wait(200);
+const switchesBeforeClass = (paneOf() || {}).switches;
+panePanel.setAttribute("class", "transition-[flex-grow] duration-200 ease-out");
+fireMutation(panePanel, "class", "");
+check("class-only 信号也记一次 switch",
+  (paneOf() || {}).switches === switchesBeforeClass + 1,
+  `before=${switchesBeforeClass} after=${(paneOf() || {}).switches}`);
+
+// 同一轮 aria-hidden + class 两个信号只记一次。
+const switchesBeforeDual = (paneOf() || {}).switches;
+paneFrame.setAttribute("aria-hidden", "true");
+fireMutation(paneFrame, "aria-hidden", "false");
+panePanel.setAttribute("class", "");
+fireMutation(panePanel, "class", "transition-[flex-grow] duration-200 ease-out");
+panePanel.setAttribute("class", "transition-[flex-grow] duration-200 ease-out");
+fireMutation(panePanel, "class", "");
+check("同一轮 aria-hidden + class 双信号只记一次 switch",
+  (paneOf() || {}).switches === switchesBeforeDual + 1,
+  `before=${switchesBeforeDual} after=${(paneOf() || {}).switches}`);
+
+// P0 独立关闭：先保持面板打开，验证 P2 不受 P0 关闭影响。
+paneFrame.setAttribute("aria-hidden", "false");
+fireMutation(paneFrame, "aria-hidden", "true");
+check("P0 关闭前常开属性存在（前置条件）",
+  docEl.getAttribute("data-lagfix-pane-open") === "1");
+writeSettings({ paneDiagOn: false });
+const paneDiagOff = collect();
+check("paneDiagOn=false 时 pane/refocus 为 null",
+  paneDiagOff.pane === null && paneDiagOff.refocus === null,
+  `pane=${JSON.stringify(paneDiagOff.pane)} refocus=${JSON.stringify(paneDiagOff.refocus)}`);
+check("关 P0 不影响 P2 常开期属性",
+  docEl.getAttribute("data-lagfix-pane-open") === "1");
+writeSettings({ paneDiagOn: true });
+check("重新开启 P0 后 pane 字段回来", !!paneOf() && paneOf().detected === true);
+
+// 宿主标记缺失：detected=false，不猜、不加保护属性。
+sidePaneFrame = null;
+const paneMissing = collect();
+const paneMissingData = paneMissing.pane || {};
+check("侧栏标记缺失时 detected=false",
+  paneMissingData.detected === false,
+  JSON.stringify(paneMissingData));
+check("侧栏标记缺失时 panelPx=null 且保护属性移除",
+  paneMissingData.panelPx === null
+    && docEl.getAttribute("data-lagfix-pane-open") === null
+    && docEl.getAttribute("data-lagfix-pane-switch") === null,
+  `panelPx=${paneMissingData.panelPx} open=${docEl.getAttribute("data-lagfix-pane-open")}`);
+sidePaneFrame = paneFrame;
+const paneBack = collect();
+check("标记回来后重新检测到侧栏", (paneBack.pane || {}).detected === true);
+
+// 收起面板，等保护窗口结束，给回前台用例一个干净基线。
+paneFrame.setAttribute("aria-hidden", "true");
+fireMutation(paneFrame, "aria-hidden", "false");
+check("关闭面板立即移除常开期属性",
+  docEl.getAttribute("data-lagfix-pane-open") === null,
+  `attr=${docEl.getAttribute("data-lagfix-pane-open")}`);
+await wait(460);
+
+console.log("-- v0.3.3 回前台：合并补发、700ms 下限、角标跳过 --");
+const visListeners = () => documentStub._listeners.visibilitychange || [];
+check("注册了 visibilitychange / focus / blur",
+  visListeners().length >= 1
+    && (window._listeners.focus || []).length >= 1
+    && (window._listeners.blur || []).length >= 1,
+  `vis=${visListeners().length} focus=${(window._listeners.focus || []).length} blur=${(window._listeners.blur || []).length}`);
+
+let refocusHits = 0;
+const unRefocus = s3.store.subscribe(() => { refocusHits++; });
+const guardsBeforeFocus = refocusOf().guardHits;
+(window._listeners.focus || []).forEach((fn) => fn({}));
+check("首次 window.focus（无前置 blur）不算回前台",
+  refocusOf().guardHits === guardsBeforeFocus,
+  `guardHits=${refocusOf().guardHits}`);
+
+// 后台→前台：pending 通知不能在 visibilitychange 里同步补发。
+documentStub.hidden = true;
+visListeners().forEach((fn) => fn({}));
+await wait(60);
+s3.store.emit();   // hiddenSkipOn：挂起，1s 定时器
+check("后台挂起期间不立即补发", refocusHits === 0, `hits=${refocusHits}`);
+documentStub.hidden = false;
+visListeners().forEach((fn) => fn({}));
+check("回前台后 120ms 内不补发", refocusHits === 0, `hits=${refocusHits}`);
+await wait(150);
+check("回前台 120ms 后补发一次", refocusHits === 1, `hits=${refocusHits}`);
+const afterVisible = refocusOf();
+check("refocus.hiddenMs 记录后台时长", typeof afterVisible.hiddenMs === "number" && afterVisible.hiddenMs >= 50,
+  `hiddenMs=${afterVisible.hiddenMs}`);
+check("refocus.sinceVisibleMs 为数值", typeof afterVisible.sinceVisibleMs === "number",
+  `sinceVisibleMs=${afterVisible.sinceVisibleMs}`);
+check("refocus.flushes 只计有 pending 的订阅", afterVisible.flushes >= 1,
+  `flushes=${afterVisible.flushes}`);
+check("refocus.guardHits 递增", afterVisible.guardHits === guardsBeforeFocus + 1,
+  `guardHits=${afterVisible.guardHits}`);
+
+// 回前台 800ms 帧窗口。
+const r0 = performance.now();
+driveFrame(r0);
+driveFrame(r0 + 16);
+driveFrame(r0 + 48);
+driveFrame(r0 + 90);
+const afterFrames = refocusOf();
+check("refocus.p95/max 来自回前台后帧窗口",
+  typeof afterFrames.p95 === "number" && typeof afterFrames.max === "number" && afterFrames.max >= afterFrames.p95,
+  `p95=${afterFrames.p95} max=${afterFrames.max}`);
+
+// 700ms 内至少 400ms。
+s3.store.emit();
+check("回前台 700ms 内 effectiveThrottleMs 至少 400ms",
+  collect().fix.eff >= 400, `eff=${collect().fix.eff}`);
+await wait(1100);
+s3.store.emit();
+check("回前台保护结束后节流下限回落", collect().fix.eff < 400, `eff=${collect().fix.eff}`);
+driveFrame(performance.now());
+
+// blur→focus 路径（Alt-Tab 不一定改 document.hidden）。
+await wait(520);
+const guardsBeforeBlur = refocusOf().guardHits;
+const badgeLeftBeforeRefocus = badge.style.left;
+mainSurface._rect = { left: 600, top: 500, right: 1200, bottom: 620, width: 600, height: 120 };
+(window._listeners.blur || []).forEach((fn) => fn({}));
+(window._listeners.focus || []).forEach((fn) => fn({}));
+tickOverlay();
+check("回前台前 300ms 不更新角标",
+  badge.style.left === badgeLeftBeforeRefocus,
+  `before=${badgeLeftBeforeRefocus} now=${badge.style.left}`);
+check("blur→focus 记一次回前台", refocusOf().guardHits === guardsBeforeBlur + 1,
+  `guardHits=${refocusOf().guardHits}`);
+(window._listeners.focus || []).forEach((fn) => fn({}));
+check("没有新的 blur 时重复 focus 不再计数",
+  refocusOf().guardHits === guardsBeforeBlur + 1,
+  `guardHits=${refocusOf().guardHits}`);
+await wait(340);
+tickOverlay();
+check("回前台 300ms 后角标恢复定位（right=1200 → left=904）",
+  badge.style.left === "904px", `left=${badge.style.left}`);
+mainSurface._rect = { left: 300, top: 500, right: 900, bottom: 620, width: 600, height: 120 };
+
+// P3 独立关闭：同步补发、不抬下限、不跳过角标。
+await wait(520);
+writeSettings({ refocusGuardOn: false });
+const hitsBeforeOff = refocusHits;
+documentStub.hidden = true;
+visListeners().forEach((fn) => fn({}));
+await wait(20);
+s3.store.emit();
+documentStub.hidden = false;
+visListeners().forEach((fn) => fn({}));
+check("refocusGuardOn=false 时同步补发", refocusHits > hitsBeforeOff,
+  `before=${hitsBeforeOff} after=${refocusHits}`);
+check("refocusGuardOn=false 时 guardHits 归零", refocusOf().guardHits === 0,
+  `guardHits=${refocusOf().guardHits}`);
+s3.store.emit();
+check("refocusGuardOn=false 时不抬 400ms 下限",
+  collect().fix.eff < 400, `eff=${collect().fix.eff}`);
+writeSettings({ refocusGuardOn: true });
+unRefocus();
+unPaneNotify();
+
+// P0+P3 都关：visibilitychange 基线必须保留，回前台仍要立即补发。
+writeSettings({ paneDiagOn: false, refocusGuardOn: false });
+check("P0+P3 关闭后仍保留 visibilitychange 基线",
+  visListeners().length === 1
+    && (window._listeners.focus || []).length === 0
+    && (window._listeners.blur || []).length === 0,
+  `vis=${visListeners().length} focus=${(window._listeners.focus || []).length} blur=${(window._listeners.blur || []).length}`);
+let baselineHits = 0;
+const unBaseline = s3.store.subscribe(() => { baselineHits++; });
+documentStub.hidden = true;
+visListeners().forEach((fn) => fn({}));
+await wait(20);
+s3.store.emit();
+documentStub.hidden = false;
+visListeners().forEach((fn) => fn({}));
+check("P0+P3 关闭后回前台仍同步补发", baselineHits === 1, `hits=${baselineHits}`);
+unBaseline();
+writeSettings({ paneDiagOn: true, refocusGuardOn: true });
+check("重新开启后 visibility/focus/blur 都回来",
+  visListeners().length === 1
+    && (window._listeners.focus || []).length === 1
+    && (window._listeners.blur || []).length === 1);
+
+// 给下面的 __lagfixOff 清理用例留一个已打开、保护属性在身上的现场。
+paneFrame.setAttribute("aria-hidden", "false");
+fireMutation(paneFrame, "aria-hidden", "true");
+check("__lagfixOff 前置：开合/常开属性都在",
+  docEl.getAttribute("data-lagfix-pane-switch") === "1"
+    && docEl.getAttribute("data-lagfix-pane-open") === "1",
+  `switch=${docEl.getAttribute("data-lagfix-pane-switch")} open=${docEl.getAttribute("data-lagfix-pane-open")}`);
 
 console.log("-- 关闭后已订阅的 wrapper 立即直通 --");
 let dd = 0;
@@ -1461,6 +1808,22 @@ check("__lagfixOff 清空会话桶与 pane 映射", window.__lagfixDiag().sessio
   && window.__lagfixDiag().sessionPanes === 0,
   `buckets=${window.__lagfixDiag().sessionBuckets} panes=${window.__lagfixDiag().sessionPanes}`);
 check("__lagfixOff 清空 loadOlder 明细", window.__lagfixDiag().loadOlderDetail === 0);
+check("__lagfixOff 移除侧栏保护属性",
+  docEl.getAttribute("data-lagfix-pane-switch") === null
+    && docEl.getAttribute("data-lagfix-pane-open") === null,
+  `switch=${docEl.getAttribute("data-lagfix-pane-switch")} open=${docEl.getAttribute("data-lagfix-pane-open")}`);
+check("__lagfixOff 移除 P3 focus/blur，保留 v0.3.2 回前台基线 visibility",
+  (documentStub._listeners.visibilitychange || []).length === 1
+    && (window._listeners.focus || []).length === 0
+    && (window._listeners.blur || []).length === 0,
+  `vis=${(documentStub._listeners.visibilitychange || []).length} focus=${(window._listeners.focus || []).length} blur=${(window._listeners.blur || []).length}`);
+check("__lagfixOff 后 pane/refocus 为 null",
+  collect().pane === null && collect().refocus === null,
+  `pane=${JSON.stringify(collect().pane)} refocus=${JSON.stringify(collect().refocus)}`);
+check("__lagfixOff 清空侧栏状态", window.__lagfixDiag().paneDetected === false
+  && window.__lagfixDiag().paneSwitches === 0,
+  JSON.stringify({ detected: window.__lagfixDiag().paneDetected,
+    switches: window.__lagfixDiag().paneSwitches }));
 
 const saved = JSON.parse(localStorage.getItem("lagfix.settings.v1") || "{}");
 check("设置已持久化到独立 key", saved.throttleOn === false, JSON.stringify(saved).slice(0, 90));
@@ -1469,6 +1832,10 @@ check("一键还原同时关掉滚动诊断/输入延迟/遮罩/多会话归因"
   saved.scrollDiagOn === false && saved.inputLagOn === false && saved.maskOffOnScroll === false
   && saved.sessionDiagOn === false,
   `scrollDiagOn=${saved.scrollDiagOn} inputLagOn=${saved.inputLagOn} mask=${saved.maskOffOnScroll} session=${saved.sessionDiagOn}`);
+check("一键还原同时关掉侧栏/回前台四项",
+  saved.paneDiagOn === false && saved.paneSwitchGuardOn === false
+    && saved.paneHoldOn === false && saved.refocusGuardOn === false,
+  `paneDiagOn=${saved.paneDiagOn} guard=${saved.paneSwitchGuardOn} hold=${saved.paneHoldOn} refocus=${saved.refocusGuardOn}`);
 check("日志上限默认 50MB 并已持久化", saved.logMaxMB === 50, `logMaxMB=${saved.logMaxMB}`);
 check("没有污染宿主 localStorage 的其它 key",
   Object.keys(localStorage._d).every((k) => k === "lagfix.settings.v1"), Object.keys(localStorage._d).join(","));
@@ -1478,7 +1845,8 @@ console.log("-- __lagfixOff：补拉被拦过的历史 --");
 const beforeOffToggle = JSON.parse(localStorage.getItem("lagfix.settings.v1") || "{}");
 localStorage.setItem("lagfix.settings.v1",
   JSON.stringify({ ...beforeOffToggle, throttleOn: true, bigSessionOn: true,
-    scrollDiagOn: true, inputLagOn: true, maskOffOnScroll: true, sessionDiagOn: true }));
+    scrollDiagOn: true, inputLagOn: true, maskOffOnScroll: true, sessionDiagOn: true,
+    paneDiagOn: true, paneSwitchGuardOn: true, paneHoldOn: true, refocusGuardOn: true }));
 onStorage({ key: "lagfix.settings.v1" });
 await wait(50);
 check("重新开启后大会话保护装到当前原型", !!s3.proto.__lagfixLoadAll);
@@ -1492,6 +1860,14 @@ check("重新开启后多会话归因回到数组",
 check("重新开启后 pagehide 监听挂回来",
   (window._listeners.pagehide || []).length === 1,
   `count=${(window._listeners.pagehide || []).length}`);
+check("重新开启后 visibility/focus/blur 监听挂回来",
+  (documentStub._listeners.visibilitychange || []).length === 1
+    && (window._listeners.focus || []).length === 1
+    && (window._listeners.blur || []).length === 1,
+  `vis=${(documentStub._listeners.visibilitychange || []).length} focus=${(window._listeners.focus || []).length} blur=${(window._listeners.blur || []).length}`);
+const rePane = JSON.parse(window.__lagfixCollect()).pane;
+check("重新开启后侧栏检测回来", rePane && rePane.detected === true,
+  `pane=${JSON.stringify(rePane)}`);
 const callsBeforeReenable = JSON.parse(window.__lagfixCollect()).scroll.loadOlderCalls;
 await s3.store.loadOlder();
 const reenabledPayload = JSON.parse(window.__lagfixCollect());
@@ -1521,8 +1897,8 @@ const offRows = [];
 })(panel2);
 check("节流关闭后：窗口 + 自适应 + 冷静期 + 后台降频 四行变灰",
   offRows.length === 4, `offRows=${offRows.length}`);
-check("大历史会话保护不跟着变灰（与节流独立）",
-  !!panel2 && allText(panel2).includes("与渲染节流相互独立"));
+check("大历史会话保护不跟着变灰（与合并刷新独立）",
+  !!panel2 && allText(panel2).includes("和「合并刷新」互不影响"));
 
 console.log("-- A8 角标常驻 + 设置入口兜底 --");
 function findRow(root, text) {
@@ -1542,7 +1918,7 @@ function findInput(root) {
   }
   return null;
 }
-const throttleRow = findRow(documentStub.getElementById("lagfix-settings-panel"), "渲染节流");
+const throttleRow = findRow(documentStub.getElementById("lagfix-settings-panel"), "合并刷新");
 const throttleCb = findInput(throttleRow);
 check("节流关闭后开关仍然存在（能再次点击开启）", !!throttleCb, "switch input missing");
 check("节流关闭后开关没有被禁用", !!throttleCb && throttleCb.disabled !== true);
