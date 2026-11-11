@@ -90,6 +90,11 @@
   var VERSION = "0.3.2";
   var ERR_LIMIT = 50;
   var OVERLAY_ID = "lagfix-overlay-badge";
+  // 宿主浮层（Radix portal）：上下文容量、模型/工具菜单、对话框等。
+  // 这些内容不在 composer dock 子树里，必须单独查，否则角标会盖在面板上。
+  var HOST_FLOATING_SEL = '[data-slot="hover-card-content"],[data-slot="popover-content"],'
+    + '[data-slot="dropdown-menu-content"],[data-slot="select-content"],'
+    + '[data-slot="dialog-content"],[role="dialog"][data-state="open"]';
   var PANEL_ID = "lagfix-settings-panel";
   var SETTINGS_KEY = "lagfix.settings.v1";
   var OVERLAY_TICK_MS = 1000;
@@ -1922,6 +1927,17 @@
         }
       }
     } catch (e) {}
+    // 上下文容量/模型菜单等宿主浮层是 body 级 portal，不在 composer 兄弟链里。
+    // 与角标带相交时同样让到浮层上沿；上方没有余量就由下面的 top<8 分支隐藏。
+    try {
+      var pops = document.querySelectorAll(HOST_FLOATING_SEL);
+      for (var pi = 0; pi < pops.length; pi++) {
+        var pop = pops[pi];
+        if (!pop || (pop.closest && pop.closest("#" + PANEL_ID + ",#" + STATS_ID + ",#" + MASK_ID))) continue;
+        var popLift = liftOver(pop);
+        if (popLift !== null && popLift < top) top = popLift;
+      }
+    } catch (e3) {}
     // 上方连 8px 余量都没有（队列顶到视口顶端）：宁可不显示，也不压任何控件。
     if (top < 8) return false;
     el.style.right = "auto";

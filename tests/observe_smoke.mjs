@@ -1079,11 +1079,13 @@ store.state.snapshot.rows.window = [{ rowId: 1 }];   // 还原，避免影响后
 console.log("-- 角标可见性：设置页 / 被遮挡 / 多个输入框 --");const badgeClick = (badge._listeners.click || [])[0];
 check("角标绑定了 click", typeof badgeClick === "function");
 
+let hostPopovers = [];
 function setSurfaces(list) {
   documentStub.querySelectorAll = (sel) => {
     if (String(sel).includes("data-projection-seq")) return [anchor];
     if (String(sel).includes("data-session-id")) { sessionQueryCount++; return sessionPaneList; }
     if (String(sel).includes("chat-composer-input-surface")) return list;
+    if (String(sel).includes("hover-card-content")) return hostPopovers;
     return [];
   };
   documentStub.querySelector = (sel) => {
@@ -1204,6 +1206,24 @@ await wait(1100);
 check("额度横幅压到角标带时，让到横幅上沿（top=408）",
   badge.style.display === "" && badge.style.top === "408px",
   `display=${badge.style.display} top=${badge.style.top}`);
+
+console.log("-- 宿主浮层（上下文容量等）：角标不压面板 --");
+// 上下文容量是 Radix HoverCard 的 body 级 portal，不在 composer 兄弟链里；
+// 之前的 dock 扫描看不到它，角标会直接盖在面板上。
+const hostPopover = makeEl("div");
+hostPopover._rect = { left: 550, top: 300, right: 920, bottom: 490, width: 370, height: 190 };
+hostPopovers = [hostPopover];
+setSurfaces([mainSurface]);
+documentStub.elementFromPoint = () => mainSurface;
+await wait(1100);
+check("宿主浮层压到角标带时让到浮层上沿（top=268）",
+  badge.style.display === "" && badge.style.top === "268px",
+  `display=${badge.style.display} top=${badge.style.top}`);
+hostPopover._rect = { left: 550, top: 20, right: 920, bottom: 490, width: 370, height: 190 };
+await wait(1100);
+check("宿主浮层顶到视口顶端时角标隐藏", badge.style.display === "none",
+  `display=${badge.style.display} top=${badge.style.top}`);
+hostPopovers = [];
 // 恢复 fallback 语义：不删掉 closest/兄弟节点，后面的用例会误走 dock 分支。
 delete dockSurface.closest;
 delete dockSurface.previousElementSibling;
