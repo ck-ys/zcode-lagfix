@@ -419,7 +419,7 @@
     <div class="flow">
       <div class="flow-step"><b>① 宿主触发补页</b><small>滚动预取（约 2 个视口）或首 turn 缺 header 的自动补拉，调用 <code>store.loadOlder()</code>，通常不传参数。</small></div>
       <div class="flow-arrow">↓</div>
-      <div class="flow-step measure"><b>② 插件包装器判定</b><small>开关关闭、调用带显式 limit、或已暂停/自禁用 → 原样 <code>orig.apply(this, arguments)</code>。只有「开关开 + 无参数」才替换为 200。</small></div>
+      <div class="flow-step measure"><b>② 插件包装器判定</b><small>开关关闭、调用带显式 limit、或已自禁用 → 原样 <code>orig.apply(this, arguments)</code>。只有「开关开 + 无参数」才替换为 200；暂停观测不关闭替换。</small></div>
       <div class="flow-arrow">↓</div>
       <div class="flow-step"><b>③ 宿主请求一页 200 行</b><small><code>rowsRange</code> 协议上限就是 200；<code>mergeOlderRows</code>、epoch 校验、游标校验全部走原路径。</small></div>
       <div class="flow-arrow">↓</div>
@@ -449,7 +449,7 @@
       </div>
       <div class="card">
         <h3>回滚</h3>
-        <p>关闭开关即恢复 60 行默认路径；<code>__lagfixOff()</code>、暂停、自禁用三条路径都必须恢复原方法；A/B 未过线则永久默认关闭并在 README/发布说明标注。</p>
+        <p>关闭开关即恢复 60 行默认路径；<code>__lagfixOff()</code>、自禁用两条路径必须恢复原方法；暂停观测不关闭替换（缓解与观测独立），A/B 未过线则永久默认关闭并在 README/发布说明标注。</p>
       </div>
     </div>
   </section>
