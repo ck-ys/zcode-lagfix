@@ -1537,7 +1537,7 @@ window.__lagfixLogStats = { bytes: 3.4 * 1048576, files: 12 };
 const gear = documentStub.getElementById("lagfix-gear");
 check("角标末尾有齿轮按钮", !!gear);
 gear.click();
-const panel = documentStub.getElementById("lagfix-settings-panel");
+let panel = documentStub.getElementById("lagfix-settings-panel");
 const mask = documentStub.getElementById("lagfix-modal-mask");
 check("点齿轮才创建设置弹窗", !!panel && !!mask);
 check("弹窗铺在遮罩上（居中 modal）", !!mask && mask.style.display === "flex");
@@ -1575,7 +1575,7 @@ check("A8：面板不再提供「显示角标」开关", !panelText.includes("�
 check("性能页含「侧栏与回前台」四项",
   ["侧栏与回前台统计", "侧栏开合保护", "面板常开保护", "回前台保护"]
     .every((t) => panelText.includes(t)));
-check("面板版本行是 v0.3.6", panelText.includes("v0.3.6"));
+check("面板版本行是 v0.3.7", panelText.includes("v0.3.7"));
 check("面板不再出现版本号式标题", !panelText.includes("v0.3 性能增强"));
 check("维护页写明日志路径与上限",
   panelText.includes("日志存储路径") && panelText.includes("日志上限"));
@@ -1587,6 +1587,106 @@ window.__lagfixLogStats = { bytes: 800 * 1024, files: 2 };
 window.__lagfixCollect();
 check("日志量不足 1MB 时按 KB 显示并实时更新",
   allText(panel).includes("800 KB") && allText(panel).includes("2 个文件"));
+
+console.log("-- v0.3.7 自动检查更新与小红点 --");
+const UPDATE_KEY = "lagfix.update.v1";
+localStorage.removeItem(UPDATE_KEY);
+check("自动检查默认关闭", collect().settings.autoUpdateCheckOn === false);
+const idleUpdate = collect();
+check("默认关闭时不主动请求更新",
+  idleUpdate.updateCheck === 0 && idleUpdate.updateAuto === 0,
+  `updateCheck=${idleUpdate.updateCheck} updateAuto=${idleUpdate.updateAuto}`);
+let badgeDot = documentStub.getElementById("lagfix-overlay-badge-update-dot");
+let panelDot = documentStub.getElementById("lagfix-settings-panel-updatedot");
+check("角标有更新小红点且默认隐藏", !!badgeDot && badgeDot.style.display === "none");
+check("维护页「检查更新」行有小红点且默认隐藏", !!panelDot && panelDot.style.display === "none");
+check("维护页含「自动检查更新」并说明 24 小时一次",
+  allText(panel).includes("自动检查更新") && allText(panel).includes("24 小时"));
+
+writeSettings({ autoUpdateCheckOn: true });
+panel = documentStub.getElementById("lagfix-settings-panel");
+panelDot = documentStub.getElementById("lagfix-settings-panel-updatedot");
+localStorage.setItem(UPDATE_KEY, JSON.stringify({ checkedAt: Date.now() }));
+const autoRecent = collect();
+check("开启后设置快照同步 autoUpdateCheckOn=true", autoRecent.settings.autoUpdateCheckOn === true);
+check("24 小时内到期判断为假", autoRecent.updateCheck === 0,
+  `updateCheck=${autoRecent.updateCheck}`);
+localStorage.setItem(UPDATE_KEY, JSON.stringify({ checkedAt: Date.now() - 25 * 60 * 60 * 1000 }));
+const autoFirst = collect();
+check("超过 24 小时后自动检查随样本请求一次",
+  autoFirst.updateCheck === 1 && autoFirst.updateAuto === 1,
+  `updateCheck=${autoFirst.updateCheck} updateAuto=${autoFirst.updateAuto}`);
+const autoSecond = collect();
+check("自动检查发出后本周期不重复", autoSecond.updateCheck === 0 && autoSecond.updateAuto === 0,
+  `updateCheck=${autoSecond.updateCheck} updateAuto=${autoSecond.updateAuto}`);
+const autoKey = JSON.parse(localStorage.getItem(UPDATE_KEY) || "{}");
+check("自动检查把 checkedAt 写入独立 key",
+  typeof autoKey.checkedAt === "number" && typeof autoKey.resultAt === "undefined",
+  JSON.stringify(autoKey));
+
+// 模拟主进程注入结果：写入缓存、跨窗口可读，并画出红点。
+window.__lagfixUpdate = { status: "ok", current: "0.3.7", latest: "9.9.9", newer: true,
+  url: "https://example.invalid/releases", at: Date.now() };
+window.__lagfixSettings();   // 重建面板 → renderPanelStatus 同步缓存
+panel = documentStub.getElementById("lagfix-settings-panel");
+panelDot = documentStub.getElementById("lagfix-settings-panel-updatedot");
+badgeDot = documentStub.getElementById("lagfix-overlay-badge-update-dot");
+check("有新版本时角标红点显示", !!badgeDot && badgeDot.style.display === "",
+  `display=${badgeDot && badgeDot.style.display}`);
+check("有新版本时维护页红点显示", !!panelDot && panelDot.style.display === "",
+  `display=${panelDot && panelDot.style.display}`);
+check("维护页显示发现新版本", allText(panel).includes("发现新版本 v9.9.9"));
+check("更新缓存写入独立 key 且含 latest/newer",
+  (() => {
+    const st = JSON.parse(localStorage.getItem(UPDATE_KEY) || "{}");
+    return st.current === "0.3.7" && st.latest === "9.9.9" && st.newer === true
+      && typeof st.resultAt === "number";
+  })(), localStorage.getItem(UPDATE_KEY));
+
+// 另一个窗口写入缓存：storage 事件应即时更新红点，不需要重建面板。
+const onUpdateStorage = (window._listeners.storage || [])[0];
+localStorage.setItem(UPDATE_KEY, JSON.stringify({
+  current: "0.3.7", latest: "10.0.0", newer: true, resultAt: Date.now(),
+}));
+if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
+check("跨窗口缓存显示红点", badgeDot.style.display === "" && panelDot.style.display === "");
+localStorage.setItem(UPDATE_KEY, JSON.stringify({
+  current: "0.3.7", latest: "10.0.0", newer: false, resultAt: Date.now(),
+}));
+if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
+check("明确无新版本时红点隐藏", badgeDot.style.display === "none" && panelDot.style.display === "none");
+
+// 版本不匹配 / 同版本 / newer=false 三种脏数据都不能亮红点。
+const dotCases = [
+  ["缓存版本与当前版本不一致", { current: "0.3.6", latest: "9.9.9", newer: true }],
+  ["latest 与当前版本相同", { current: "0.3.7", latest: "0.3.7", newer: true }],
+  ["newer 为 false", { current: "0.3.7", latest: "9.9.9", newer: false }],
+];
+for (const [name, st] of dotCases) {
+  localStorage.setItem(UPDATE_KEY, JSON.stringify({ ...st, resultAt: Date.now() }));
+  if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
+  check(name + "时红点隐藏",
+    badgeDot.style.display === "none" && panelDot.style.display === "none",
+    `badge=${badgeDot.style.display} panel=${panelDot.style.display}`);
+}
+
+// 关闭自动检查：即使 checkedAt 过期也不再自动请求。
+writeSettings({ autoUpdateCheckOn: false });
+panel = documentStub.getElementById("lagfix-settings-panel");
+badgeDot = documentStub.getElementById("lagfix-overlay-badge-update-dot");
+panelDot = documentStub.getElementById("lagfix-settings-panel-updatedot");
+const manualOnlyKey = JSON.parse(localStorage.getItem(UPDATE_KEY) || "{}");
+manualOnlyKey.checkedAt = 0;
+localStorage.setItem(UPDATE_KEY, JSON.stringify(manualOnlyKey));
+check("关闭自动检查后不再自动请求", collect().updateCheck === 0);
+// 留一份“有新版本”的缓存给 __lagfixOff 清理用例。
+localStorage.setItem(UPDATE_KEY, JSON.stringify({
+  current: "0.3.7", latest: "9.9.9", newer: true, resultAt: Date.now(),
+}));
+if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
+check("恢复新版本缓存后红点重新显示",
+  badgeDot.style.display === "" && panelDot.style.display === "");
+
 
 function findButton(root, text) {
   if (root.tagName === "BUTTON" && String(root.textContent || "").trim() === text) return root;
@@ -1600,6 +1700,18 @@ const rz = panel ? findButton(panel, "重启 ZCode") : null;
 const upBtn = panel ? findButton(panel, "检查更新") : null;
 check("「重启 ZCode」是可点按钮", !!rz && !rz.disabled);
 check("「检查更新」已可用（v0.3.1 接入手动检查）", !!upBtn && upBtn.disabled !== true);
+const fbBtn = panel ? findButton(panel, "反馈问题") : null;
+check("维护页有「反馈问题」入口", !!fbBtn);
+if (fbBtn) {
+  let openedIssue = "";
+  const prevZc = window.zcode;
+  window.zcode = { openExternal(u) { openedIssue = u; } };
+  (fbBtn._listeners.click || [])[0]({});
+  if (prevZc === undefined) delete window.zcode; else window.zcode = prevZc;
+  check("反馈入口打开 GitHub issue 模板",
+    openedIssue === "https://github.com/ck-ys/zcode-lagfix/issues/new?template=bug_report.yml",
+    openedIssue);
+}
 if (upBtn) {
   // 点击只置内存标记，随下一个样本回传一次；按钮 15s 后恢复。
   // 这里把 >=5s 的定时器吞掉，避免测试进程被 15s 定时器拖住退出。
@@ -1609,7 +1721,10 @@ if (upBtn) {
   globalThis.setTimeout = realSetTimeout;
   check("点击后按钮进入检查中并禁用", upBtn.disabled === true
     && String(upBtn.textContent).includes("检查中"), `text=${upBtn.textContent}`);
-  check("本次 payload 的 updateCheck=1", JSON.parse(window.__lagfixCollect()).updateCheck === 1);
+  const manualPayload = JSON.parse(window.__lagfixCollect());
+  check("本次 payload 的 updateCheck=1", manualPayload.updateCheck === 1);
+  check("手动检查 payload 的 updateAuto=0", manualPayload.updateAuto === 0,
+    `updateAuto=${manualPayload.updateAuto}`);
   check("下一次 payload 的 updateCheck 归零（只请求一次）",
     JSON.parse(window.__lagfixCollect()).updateCheck === 0);
   // 标记清零后、主进程结果注入前，面板不能回落到「尚未检查」。
@@ -2174,6 +2289,8 @@ check("默认 panelQuietOn=false（实验默认关）", initialSettings.panelQui
   `snapshot=${initialSettings.panelQuietOn}`);
 check("默认 loadOlderPageLimitOn=false（实验默认关）", initialSettings.loadOlderPageLimitOn === false,
   `snapshot=${initialSettings.loadOlderPageLimitOn}`);
+check("默认 autoUpdateCheckOn=false（自动检查默认关）", initialSettings.autoUpdateCheckOn === false,
+  `snapshot=${initialSettings.autoUpdateCheckOn}`);
 documentStub.hidden = false;   // 后台窗口会走 hiddenSkipOn，通知不会立即 flush
 writeSettings({ throttleOn: true, lafCtxOn: true });
 check("P0 前置：合并刷新已启用并已装到当前 store",
@@ -2414,6 +2531,25 @@ check("一键还原同时关掉 v0.3.5 两项",
 check("一键还原同时关掉 v0.3.6 O8",
   saved.loadOlderPageLimitOn === false,
   `pageLimit=${saved.loadOlderPageLimitOn}`);
+check("一键还原同时关掉自动检查更新", saved.autoUpdateCheckOn === false,
+  `auto=${saved.autoUpdateCheckOn}`);
+check("__lagfixOff 清掉更新缓存与两处红点",
+  localStorage.getItem("lagfix.update.v1") === null
+    && documentStub.getElementById("lagfix-overlay-badge-update-dot").style.display === "none"
+    && documentStub.getElementById("lagfix-settings-panel-updatedot").style.display === "none",
+  `key=${localStorage.getItem("lagfix.update.v1")}`);
+// 还原前已发出的检查可能在还原后才回来：没有新的用户动作，不得写回缓存/红点/状态文案。
+window.__lagfixUpdate = { status: "ok", current: "0.3.7", latest: "9.9.9", newer: true,
+  url: "https://example.invalid/releases", at: Date.now() + 1 };
+window.__lagfixSettings();
+check("__lagfixOff 后到达的在途结果不写缓存/红点",
+  localStorage.getItem("lagfix.update.v1") === null
+    && documentStub.getElementById("lagfix-overlay-badge-update-dot").style.display === "none"
+    && documentStub.getElementById("lagfix-settings-panel-updatedot").style.display === "none",
+  `key=${localStorage.getItem("lagfix.update.v1")}`);
+check("__lagfixOff 后到达的在途结果不显示新版本文案",
+  !String(documentStub.getElementById("lagfix-settings-panel-updatestatus").textContent)
+    .includes("发现新版本"));
 check("__lagfixOff 后 page 为 null",
   collect().page === null && window.__lagfixDiag().page === null,
   `page=${JSON.stringify(collect().page)}`);

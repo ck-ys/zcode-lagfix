@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * zcode-lagfix 主进程加载器 v0.3.6（观测 + 渲染通知节流 + 日志预算 + 检查更新）。
+ * zcode-lagfix 主进程加载器 v0.3.7（观测 + 渲染通知节流 + 日志预算 + 检查更新）。
  *
  * 由 app.asar 入口尾部的 dynamic import 加载（CommonJS）。
  * 职责：
@@ -228,7 +228,7 @@
               var d = appendSample(wc.id, text);
               // 手动「检查更新」：渲染端只置一个内存标记，真正的网络请求在主进程发。
               // dead 样本不带请求，避免已自禁用窗口反复触发。
-              if (d && !d.dead && d.updateCheck === 1) checkUpdate(wc, d.ver);
+              if (d && !d.dead && d.updateCheck === 1) checkUpdate(wc, d.ver, d.updateAuto === 1);
             }
           })
           .catch(function (e) {
@@ -416,7 +416,7 @@
     // 设置面板可能在用户拖动前后多次改采集间隔：重建定时器即可
     ELECTRON = electron;
 
-    log("v0.3.6 加载器已启动（观测 + 渲染节流 + 大历史保护 + 侧栏/回前台保护 + 卡顿归因 + 补页批量实验 + 日志预算 + 检查更新；__lagfixOff 一键还原）");
+    log("v0.3.7 加载器已启动（观测 + 渲染节流 + 大历史保护 + 侧栏/回前台保护 + 卡顿归因 + 补页批量实验 + 自动检查更新/红点 + 日志预算 + 检查更新；__lagfixOff 一键还原）");
   }
 
   var ELECTRON = null;
@@ -533,15 +533,20 @@
     }
   }
 
-  // ---- 检查更新（手动触发，只在主进程发一次 GitHub Releases 请求） ----
+  // ---- 检查更新（手动或自动触发，只在主进程发 GitHub Releases 请求） ----
   // 渲染端把 updateCheck=1 塞进样本；主进程查完把结果注入 window.__lagfixUpdate。
   // 不带 token、不自动下载、不自动安装；失败只影响面板那一行提示。
+  // v0.3.7：自动检查（updateAuto=1）默认由渲染端开关控制；主进程再按 24h 去重，
+  // 多窗口同时到期也只发一次网络请求，其余窗口复用缓存结果。
   var UPDATE_API = "https://api.github.com/repos/ck-ys/zcode-lagfix/releases";
   var UPDATE_HOST = "api.github.com";
   var UPDATE_HOME = "https://github.com/ck-ys/zcode-lagfix/releases";
   var UPDATE_MAX_BYTES = 2 * 1024 * 1024;
   var UPDATE_TIMEOUT_MS = 10000;
+  var AUTO_UPDATE_MIN_MS = 24 * 60 * 60 * 1000;
   var lastUpdateAt = 0;
+  var lastAutoUpdateAt = 0;
+  var lastUpdateInfo = null;
   var updateInflight = false;
 
   function parseSemver(s) {
@@ -567,14 +572,26 @@
     } catch (e) {}
   }
 
-  function checkUpdate(wc, current) {
+  function checkUpdate(wc, current, auto) {
     var now = Date.now();
+    if (auto) {
+      // 24h 内已有结果：直接回放缓存，不再联网；at 用回放时刻，避免接收端
+      // 把旧结果误判成「本次请求还没回来」而一直显示正在检查。
+      if (lastUpdateInfo && now - lastAutoUpdateAt < AUTO_UPDATE_MIN_MS) {
+        sendUpdate(wc, Object.assign({}, lastUpdateInfo, { at: now }));
+        return;
+      }
+      // 24h 内已经试过但失败了（无缓存），或另一次请求在途：自动检查静默跳过，不弹错误。
+      if (now - lastAutoUpdateAt < AUTO_UPDATE_MIN_MS || updateInflight) return;
+    }
     if (updateInflight || now - lastUpdateAt < 5000) {
+      if (auto) return;   // 自动检查不叠加，也不把“太频繁”当失败塞给用户
       sendUpdate(wc, { status: "error", message: "请求过于频繁，请稍后再试", at: now });
       return;
     }
     updateInflight = true;
     lastUpdateAt = now;
+    if (auto) lastAutoUpdateAt = now;
     var cur = parseSemver(current) || parseSemver("0.0.0");
     // 总时限覆盖连接、重定向与慢速滴流；每跳不再单独重置 10s。
     var deadline = Date.now() + UPDATE_TIMEOUT_MS;
@@ -608,14 +625,18 @@
       }
       log("检查更新：当前 " + current + "，最新 " + best.tag
         + (newer ? "（有新版本）" : "（已是最新）"));
-      sendUpdate(wc, {
+      var info = {
         status: "ok",
         current: current || "",
         latest: best ? best.tag.replace(/^v/, "") : "",
         newer: newer,
         url: (best && best.url) || UPDATE_HOME,
         at: Date.now(),
-      });
+      };
+      // 只缓存成功结果；失败不缓存，但 24h 窗口已开始计时，自动检查不会反复重试。
+      lastAutoUpdateAt = Date.now();
+      lastUpdateInfo = info;
+      sendUpdate(wc, info);
     });
   }
 

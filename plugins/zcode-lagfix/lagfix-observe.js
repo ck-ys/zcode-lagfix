@@ -1,5 +1,12 @@
 /**
- * zcode-lagfix renderer 观测脚本 v0.3.6
+ * zcode-lagfix renderer 观测脚本 v0.3.7
+ *
+ * v0.3.7（自动检查更新 + 角标小红点）：
+ *   - autoUpdateCheckOn（默认关）：开启后 24h 内最多自动检查一次；结果写入
+ *     localStorage["lagfix.update.v1"]，跨窗口/重启保留，不上报本机数据。
+ *   - 有新版本时角标右侧与维护页「检查更新」行显示小红点；缓存版本与当前
+ *     版本不一致、latest 与当前相同或 newer=false 时都不显示。
+ *   - 手动检查保持原样；__lagfixOff 关闭自动检查并清缓存/红点。
  *
  * v0.3.6（补页批量，默认关的实验）：
  *   - O8 loadOlderPageLimitOn：无参 loadOlder() 的默认页大小 60 → 200；
@@ -140,9 +147,12 @@
   var REFOCUS_WINDOW_MS = 800;     // 回前台帧窗口
   var PANE_SWITCH_DEDUPE_MS = 150; // aria-hidden 与 class 双信号去重
   var REFOCUS_DEDUPE_MS = 500;     // visibilitychange 与 focus 双信号去重
-  var VERSION = "0.3.6";
+  var VERSION = "0.3.7";
   var ERR_LIMIT = 50;
   var OVERLAY_ID = "lagfix-overlay-badge";
+  // v0.3.7：更新检查结果的跨窗口缓存 + 自动检查间隔。
+  var UPDATE_KEY = "lagfix.update.v1";
+  var UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
   // 宿主浮层（Radix portal）：上下文容量、模型/工具菜单、对话框等。
   // 这些内容不在 composer dock 子树里，必须单独查，否则角标会盖在面板上。
   var HOST_FLOATING_SEL = '[data-slot="hover-card-content"],[data-slot="popover-content"],'
@@ -181,6 +191,8 @@
     panelQuietOn: false,       // O5 面板期进一步合并（实验）
     // v0.3.6 O8 补页批量（默认关，A/B 达标前不进默认路径）
     loadOlderPageLimitOn: false,
+    // v0.3.7 自动检查更新（默认关；开启后 24h 内最多一次，只查 GitHub Releases）
+    autoUpdateCheckOn: false,
     logMaxMB: 50,       // 观测日志总预算（MB），超过自动删最旧
     warnMs: 50,         // 帧 P95 黄阈值
     badMs: 100,         // 帧 P95 红阈值
@@ -224,6 +236,7 @@
     if (typeof o.lafCtxOn === "boolean") s.lafCtxOn = o.lafCtxOn;
     if (typeof o.panelQuietOn === "boolean") s.panelQuietOn = o.panelQuietOn;
     if (typeof o.loadOlderPageLimitOn === "boolean") s.loadOlderPageLimitOn = o.loadOlderPageLimitOn;
+    if (typeof o.autoUpdateCheckOn === "boolean") s.autoUpdateCheckOn = o.autoUpdateCheckOn;
     if (o.logMaxMB != null) s.logMaxMB = clampNum(o.logMaxMB, 5, 1000, DEFAULTS.logMaxMB);
     if (o.warnMs != null) s.warnMs = clampNum(o.warnMs, 1, 5000, DEFAULTS.warnMs);
     if (o.badMs != null) s.badMs = clampNum(o.badMs, 2, 10000, DEFAULTS.badMs);
@@ -285,6 +298,8 @@
     updateCheckRequested: false, // 只存内存：随下一个样本回传一次，主进程检查 GitHub Releases
     updateCheckWaiting: false,   // 请求已随样本发出，等主进程注入 __lagfixUpdate
     updateCheckSentAt: 0,        // 发出请求时的本地时间，用于判断结果是否已更新
+    updateCheckAuto: false,      // 本次请求是否由自动检查触发（v0.3.7）
+    updateOffAt: 0,              // v0.3.7：__lagfixOff 后忽略在途结果；再次手动/开启自动时清零
   };
 
   // rAF 真实帧间隔
@@ -2350,6 +2365,9 @@
       "white-space:nowrap;overflow:hidden;max-width:calc(100vw - 24px)}",
       "#" + OVERLAY_ID + ":hover{background:var(--color-popover,#1c2129)}",
       "#" + OVERLAY_ID + " .lg-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}",
+      // v0.3.7：有新版本时角标右侧的小红点（不挤占文字，不用绝对定位避免被 overflow 裁掉）
+      "#" + OVERLAY_ID + " .lg-update-dot{width:7px;height:7px;border-radius:50%;",
+      "background:#f85149;flex:0 0 auto;display:none}",
       "#" + OVERLAY_ID + " .lg-verdict{font-weight:600}",
       "#" + OVERLAY_ID + " .lg-met{color:var(--color-foreground-subtle,#9aa4b2);overflow:hidden;",
       "min-width:0;",
@@ -2433,6 +2451,8 @@
       "#" + PANEL_ID + " .row:first-child{border-top:0;padding-top:0}",
       "#" + PANEL_ID + " .row.off .lab,#" + PANEL_ID + " .row.off .sub{opacity:.5}",
       "#" + PANEL_ID + " .row .lab{font-size:13px;display:flex;align-items:center;gap:6px}",
+      "#" + PANEL_ID + " .lg-update-dot-inline{width:7px;height:7px;border-radius:50%;",
+      "background:#f85149;flex:0 0 auto;display:none}",
       "#" + PANEL_ID + " .row .sub{font-size:11.5px;line-height:1.45;margin-top:2px;",
       "color:var(--color-foreground-subtle,#8791a3)}",
       "#" + PANEL_ID + " .row .note{font-size:11.5px;line-height:1.55;margin-top:6px;",
@@ -2534,6 +2554,13 @@
     met.id = OVERLAY_ID + "-met";
     met.textContent = "帧 -";
 
+    // v0.3.7：有新版本时的小红点，放在文字与齿轮之间，不参与文字省略。
+    var updDot = document.createElement("span");
+    updDot.className = "lg-update-dot";
+    updDot.id = OVERLAY_ID + "-update-dot";
+    updDot.title = "发现新版本，点齿轮 → 维护查看";
+    updDot.style.display = "none";
+
     var gear = document.createElement("button");
     gear.type = "button";
     gear.id = GEAR_ID;
@@ -2560,6 +2587,7 @@
     el.appendChild(dot);
     el.appendChild(verdict);
     el.appendChild(met);
+    el.appendChild(updDot);
     el.appendChild(gear);
     el.addEventListener("click", function (ev) {
       if (ev.target === gear || (gear.contains && gear.contains(ev.target))) return;
@@ -2791,6 +2819,8 @@
       if (state.dead || !document.body) return;
       ensureStyle();
       var el = ensureBadge();
+      syncUpdateState();
+      syncUpdateDot();
 
       var now = performance.now();
       var dt = lastTickAt ? (now - lastTickAt) / 1000 : 1;
@@ -3545,16 +3575,34 @@
       }, 60000);
     });
     c4.appendChild(rowEl("重启 ZCode", "ZCode 清理超过 15 秒才会强制结束；这次请求不会被保存。", rz));
+    c4.appendChild(rowEl("自动检查更新", "开启后 24 小时内最多自动检查一次；发现新版本时角标和维护页出现小红点。",
+      switchEl(settings.autoUpdateCheckOn, function (v) {
+        settings.autoUpdateCheckOn = v;
+        if (v) state.updateOffAt = 0;   // 用户重新开启：接受后续检查结果
+        saveSettings();
+        if (v) {
+          try {
+            if (queueAutoUpdateCheck()) renderUpdateStatus();
+          } catch (e) {}
+        }
+        syncUpdateDot();
+        rebuildPanel(); renderPanelStatus();
+      }),
+      "会做什么：开启后，ZCode 启动或窗口打开时最多自动检查一次，24 小时内不重复；发现新版本时，角标右侧和维护页「检查更新」行出现小红点。\n"
+      + "不会做什么：不自动下载、不自动安装，也不上报任何本机数据；只请求 GitHub Releases 的公开版本列表。\n"
+      + "代价：开启后会产生一次网络请求；检查失败只影响提示，不影响其他功能。"));
     var up = document.createElement("button");
     up.type = "button";
     up.className = "act";
     up.textContent = "检查更新";
-    up.title = "只在点击后请求一次 GitHub Releases，不发送任何本机数据";
+    up.title = "手动请求一次 GitHub Releases，不发送任何本机数据；开启自动检查后每 24 小时最多一次";
     up.addEventListener("click", function () {
       var now = Date.now();
       if (now - lastUpdateAskAt < 5000) return;   // 防误连点
       lastUpdateAskAt = now;
       state.updateCheckRequested = true;
+      state.updateCheckAuto = false;
+      state.updateOffAt = 0;   // 用户再次手动检查：接受新的结果
       up.disabled = true;
       up.textContent = "检查中…";
       renderUpdateStatus();
@@ -3566,7 +3614,17 @@
         up.textContent = "检查更新";
       }, 15000);
     });
-    c4.appendChild(rowEl("检查更新", "只在点击后检查一次；不自动联网，不上报任何本机数据。", up));
+    var upRow = rowEl("检查更新", "手动检查一次；开启自动检查后每 24 小时最多一次，不自动下载或安装。", up);
+    var updRowDot = document.createElement("span");
+    updRowDot.className = "lg-update-dot-inline";
+    updRowDot.id = PANEL_ID + "-updatedot";
+    updRowDot.title = "发现新版本";
+    updRowDot.style.display = "none";
+    var upLab = upRow.children && upRow.children[0] && upRow.children[0].children
+      ? upRow.children[0].children[0] : null;
+    if (upLab) upLab.appendChild(updRowDot);
+    c4.appendChild(upRow);
+    syncUpdateDot();
 
     var upLine = document.createElement("div");
     upLine.className = "status";
@@ -3604,6 +3662,28 @@
     upCtl.className = "ctl";
     upCtl.appendChild(upCopy);
     c4.appendChild(rowEl("升级方式", "复制口令发给 ZCode 即可；不会自动下载或安装。", upCtl));
+
+    // v0.3.7：反馈入口。参考 zusage 的做法：优先走宿主 openExternal，失败再 window.open。
+    // 不自动上传任何内容；日志由用户按 issue 模板自行检查后附加。
+    var fbBtn = document.createElement("button");
+    fbBtn.type = "button";
+    fbBtn.className = "act";
+    fbBtn.textContent = "反馈问题";
+    fbBtn.title = "打开 GitHub 问题页；请按模板附上 /lagfix report 与日志文件";
+    fbBtn.addEventListener("click", function () {
+      var url = "https://github.com/ck-ys/zcode-lagfix/issues/new?template=bug_report.yml";
+      try {
+        var zc = window.zcode;
+        if (zc && typeof zc.openExternal === "function") {
+          zc.openExternal(url);
+          return;
+        }
+      } catch (e) {}
+      try { window.open(url, "_blank", "noopener"); } catch (e) {}
+    });
+    c4.appendChild(rowEl("反馈问题",
+      "打开 GitHub 问题页；请附 /lagfix report 结果和日志文件夹里的 main.log、最近一个 observe-*.jsonl。日志只含指标，不含消息正文。",
+      fbBtn));
     // 日志位置与预算：路径由主进程注入（window.__lagfixDataDir），
     // 上限随采集 payload 回传，由主进程执行删除/滚动。
     var dataDir = "~/.zcode/zcode-lagfix";
@@ -3737,9 +3817,90 @@
 
   // 「检查更新」结果由主进程注入 window.__lagfixUpdate（本机不读网络）。
   // 主进程只在收到 updateCheck=1 的样本后写一次；这里只负责展示。
+  // v0.3.7：结果写入独立的 localStorage key，跨窗口共享，并据此画小红点。
+  function readUpdateState() {
+    try {
+      var raw = window.localStorage.getItem(UPDATE_KEY);
+      var o = raw ? JSON.parse(raw) : null;
+      return o && typeof o === "object" ? o : null;
+    } catch (e) { return null; }
+  }
+
+  function updateDotVisible() {
+    var st = readUpdateState();
+    return !!(st && st.newer === true && st.current === VERSION
+      && st.latest && st.latest !== VERSION);
+  }
+
+  function syncUpdateDot() {
+    var on = updateDotVisible();
+    var bd = document.getElementById(OVERLAY_ID + "-update-dot");
+    var rd = document.getElementById(PANEL_ID + "-updatedot");
+    if (bd) bd.style.display = on ? "" : "none";
+    if (rd) rd.style.display = on ? "" : "none";
+  }
+
+  function writeUpdateState(st) {
+    try { window.localStorage.setItem(UPDATE_KEY, JSON.stringify(st)); } catch (e) {}
+    syncUpdateDot();
+    renderUpdateStatus();
+  }
+
+  // 主进程注入的结果只处理一次：at 小于等于已记录的结果时忽略。
+  function syncUpdateState() {
+    var u = null;
+    try { u = window.__lagfixUpdate || null; } catch (e) {}
+    if (!u || typeof u !== "object" || typeof u.at !== "number") return;
+    // 一键还原前已发出的请求，结果可能在还原后才回来；没有新的用户动作就不写回缓存/红点。
+    if (state.updateOffAt) return;
+    var st = readUpdateState() || {};
+    if (typeof st.resultAt === "number" && u.at <= st.resultAt) return;
+    st.resultAt = u.at;
+    if (u.status === "ok") {
+      st.current = u.current || "";
+      st.latest = u.latest || "";
+      st.newer = !!u.newer;
+      st.url = u.url || "";
+    }
+    writeUpdateState(st);
+  }
+
+  function updateCheckDue() {
+    var st = readUpdateState();
+    var last = st && typeof st.checkedAt === "number" ? st.checkedAt : 0;
+    return Date.now() - last >= UPDATE_INTERVAL_MS;
+  }
+
+  function queueAutoUpdateCheck() {
+    if (state.dead || !settings.autoUpdateCheckOn) return false;
+    if (state.updateCheckRequested) return false;
+    if (state.updateCheckWaiting) {
+      // 面板关着时 renderUpdateStatus 不一定被调用；等待超过 15s 视为本轮丢失，
+      // 允许自动检查重试，不能让一个没送达的请求永久堵住后续检查。
+      if (Date.now() - state.updateCheckSentAt <= 15000) return false;
+      state.updateCheckWaiting = false;
+    }
+    if (!updateCheckDue()) return false;
+    state.updateCheckRequested = true;
+    state.updateCheckAuto = true;
+    return true;
+  }
+
+  // 每个采集周期取一次：手动请求优先；没有手动请求时才看自动检查是否到期。
+  function prepareUpdateAsk() {
+    if (!state.updateCheckRequested) queueAutoUpdateCheck();
+    return {
+      ask: state.updateCheckRequested ? 1 : 0,
+      auto: state.updateCheckRequested && state.updateCheckAuto ? 1 : 0,
+    };
+  }
+
   function markUpdateRequestSent() {
     state.updateCheckWaiting = true;
     state.updateCheckSentAt = Date.now();
+    var st = readUpdateState() || {};
+    st.checkedAt = Date.now();
+    writeUpdateState(st);
   }
 
   function renderUpdateStatus() {
@@ -3747,6 +3908,8 @@
     if (!el) return;
     var u = null;
     try { u = window.__lagfixUpdate || null; } catch (e) {}
+    // 一键还原后不显示还原前已发出的在途结果；用户再次手动检查/开启自动会清零该标记。
+    if (state.updateOffAt) u = null;
     // 请求已随样本发出、主进程结果还没注入时，继续显示「正在检查」。
     // 结果以 __lagfixUpdate.at 为准；15s 兜底避免主进程异常时永远停在检查中。
     if (state.updateCheckWaiting) {
@@ -3761,8 +3924,18 @@
       el.textContent = "正在检查…（主进程下一个采集周期发出请求）";
       return;
     }
+    var st = readUpdateState();
     if (!u || typeof u !== "object") {
-      el.textContent = "尚未检查。点击「检查更新」会请求一次 GitHub Releases。";
+      // 重启后 window.__lagfixUpdate 会消失，用 localStorage 里的上次结果兜底。
+      if (st && st.current === VERSION && typeof st.resultAt === "number") {
+        el.textContent = st.newer
+          ? "上次检查：发现新版本 v" + st.latest + "（当前 v" + st.current + "）。用下方「复制安装口令」升级。"
+          : "上次检查：已是最新（v" + st.current + "）。";
+        return;
+      }
+      el.textContent = settings.autoUpdateCheckOn
+        ? "尚未检查。自动检查已开启，24 小时内最多检查一次。"
+        : "尚未检查。点击「检查更新」会请求一次 GitHub Releases。";
       return;
     }
     if (u.status === "ok") {
@@ -3775,6 +3948,8 @@
   }
 
   function renderPanelStatus() {
+    syncUpdateState();
+    syncUpdateDot();
     renderUpdateStatus();
     var s = document.getElementById(PANEL_ID + "-fixstatus");
     if (!s) return;
@@ -4397,6 +4572,8 @@
       // v0.3.5：上下文归因与面板期合并一并关；时间戳/计数清空。
       settings.lafCtxOn = false;
       settings.panelQuietOn = false;
+      // v0.3.7：自动检查更新一并关；缓存/在途标记/红点全部清掉，避免还原后还留着“有新版本”。
+      settings.autoUpdateCheckOn = false;
       saveSettings();
       releaseThrottle();
       releaseLoadAllGuard();
@@ -4431,6 +4608,15 @@
       domProbeAt = 0;
       domCostMs = 0;
       if (wasBig && bigBlocked !== bigBlockedMark) resumeFullHistory();
+      // v0.3.7：清缓存、清在途标记、清宿主注入结果，并把角标/维护页红点一起收掉。
+      try { window.localStorage.removeItem(UPDATE_KEY); } catch (e) {}
+      try { window.__lagfixUpdate = null; } catch (e) {}
+      state.updateCheckRequested = false;
+      state.updateCheckWaiting = false;
+      state.updateCheckAuto = false;
+      state.updateCheckSentAt = 0;
+      state.updateOffAt = Date.now();   // 还原前已发出的结果不再写回缓存/红点
+      try { syncUpdateDot(); } catch (e) {}
       fixState.reason = "已手动关闭";
       renderPanelStatus();
       return "fix off";
@@ -4603,6 +4789,11 @@
 
   try {
     window.addEventListener("storage", function (ev) {
+      if (ev && ev.key === UPDATE_KEY) {
+        syncUpdateDot();
+        renderUpdateStatus();
+        return;
+      }
       if (ev && ev.key && ev.key !== SETTINGS_KEY) return;
       reloadSettings();
     });
@@ -4639,6 +4830,7 @@
       lafCtxOn: settings.lafCtxOn,
       panelQuietOn: settings.panelQuietOn,
       loadOlderPageLimitOn: settings.loadOlderPageLimitOn,
+      autoUpdateCheckOn: settings.autoUpdateCheckOn,
       logMaxMB: settings.logMaxMB,
       warnMs: settings.warnMs, badMs: settings.badMs, collectSec: settings.collectSec,
     };
@@ -4799,7 +4991,7 @@
         pane: null, refocus: null,
         laf: null, pace: null, page: null,
         paneOpen: null, panelQuiet: 0,
-        ver: VERSION, updateCheck: 0,
+        ver: VERSION, updateCheck: 0, updateAuto: 0,
         restart: state.restartRequested ? 1 : 0,
       });
     }
@@ -4815,11 +5007,12 @@
       // v0.3.5：暂停期间的上下文计数不带到恢复后的第一段。
       resetLafCtx();
       inputPendingAt = 0;
-      // 暂停不影响手动「检查更新」：标记随本样本回传一次后立即清掉，
+      // 暂停不影响手动/自动「检查更新」：标记随本样本回传一次后立即清掉，
       // 否则暂停期间每个周期都会重复请求。
-      var pausedAsk = state.updateCheckRequested ? 1 : 0;
+      var pausedAsk = prepareUpdateAsk();
       state.updateCheckRequested = false;
-      if (pausedAsk) markUpdateRequestSent();
+      state.updateCheckAuto = false;
+      if (pausedAsk.ask) markUpdateRequestSent();
       return JSON.stringify({
         sid: state.sid, frames: 0, dt: 0,
         commitP50: null, commitP95: null, frameP50: null, frameP95: null,
@@ -4832,14 +5025,16 @@
         // 暂停期归因环不累计（laf=null）；降频/补页批量是缓解项，与 observe 独立，照实上报。
         laf: null, pace: paceSnapshot(), page: pageSnapshot(),
         paneOpen: null, panelQuiet: 0,
-        ver: VERSION, updateCheck: pausedAsk,
+        ver: VERSION, updateCheck: pausedAsk.ask, updateAuto: pausedAsk.auto,
         restart: state.restartRequested ? 1 : 0,
       });
     }
     // v0.3.3：每轮采集重新确认侧栏标记（宿主可能改版/切布局），并更新常开属性。
     try { syncPaneProbe(); } catch (e) {}
     var now = performance.now();
-    var askUpdate = state.updateCheckRequested ? 1 : 0;
+    var ask = prepareUpdateAsk();
+    var askUpdate = ask.ask;
+    var askAuto = ask.auto;
     var dtS = state.lastCollectAt ? (now - state.lastCollectAt) / 1000 : 0;
     state.lastCollectAt = now;
     try {
@@ -4911,6 +5106,7 @@
         panelQuiet: panelQuietActive() ? 1 : 0,
         ver: VERSION,
         updateCheck: askUpdate,
+        updateAuto: askAuto,
         restart: state.restartRequested ? 1 : 0,
       };
       return JSON.stringify(out);
@@ -4923,6 +5119,7 @@
         page: null,
         paneOpen: null, panelQuiet: 0, ver: VERSION,
         updateCheck: askUpdate,
+        updateAuto: askAuto,
         restart: state.restartRequested ? 1 : 0 });
     } finally {
       state.frames = 0;   // 异常路径也要清零，否则下次会跨窗口累计上报
@@ -4935,6 +5132,7 @@
       // 记下已发出，面板在结果注入前继续显示「正在检查」。
       if (askUpdate) markUpdateRequestSent();
       state.updateCheckRequested = false;
+      state.updateCheckAuto = false;
       // v0.3.4：lafMax 与 lafCount 同为「本周期」口径（终审对齐 spec 1.1.1；
       // 此前跨周期保留会让报告的「本周期最长」拿到陈旧值）。
       lafMax = 0;

@@ -21,10 +21,12 @@ function check(name, ok, detail) {
   else { fail++; console.log(`  [FAIL] ${name}  ${detail === undefined ? "" : detail}`); }
 }
 
-function runOnce(plans, payloadObj) {
+function runOnce(plans, payloadObj, cycles = 1) {
   const requests = [];
   const injected = [];
   const logs = [];
+  const payloads = Array.isArray(payloadObj) ? payloadObj : [payloadObj];
+  let payloadAt = 0;
   let pumpCb = null;
 
   const httpsStub = {
@@ -83,7 +85,9 @@ function runOnce(plans, payloadObj) {
     getType: () => "window",
     executeJavaScript(code) {
       if (code.includes("__lagfixCollect")) {
-        return Promise.resolve(JSON.stringify(payloadObj));
+        const p = payloads[Math.min(payloadAt, payloads.length - 1)];
+        payloadAt++;
+        return Promise.resolve(JSON.stringify(p));
       }
       injected.push(code);
       return Promise.resolve();
@@ -121,14 +125,19 @@ function runOnce(plans, payloadObj) {
   if (!pumpCb) throw new Error("pump 未注册");
   pumpCb();
   return new Promise((resolve) => {
-    setTimeout(() => {
-      let info = null;
-      const code = injected.find((c) => c.includes("__lagfixUpdate"));
-      if (code) {
-        const json = code.replace(/^window\.__lagfixUpdate=/, "").replace(/;\s*$/, "");
-        try { info = JSON.parse(json); } catch (e) { info = { parseError: e.message }; }
+    setTimeout(async () => {
+      // 每个采集周期手动驱动一次 pump，覆盖主进程侧的自动检查去重/缓存回放。
+      for (let i = 1; i < cycles; i++) {
+        pumpCb();
+        await new Promise((r) => setTimeout(r, 40));
       }
-      resolve({ info, requests, logs, injected });
+      const infos = [];
+      for (const code of injected) {
+        if (!code.includes("__lagfixUpdate")) continue;
+        const json = code.replace(/^window\.__lagfixUpdate=/, "").replace(/;\s*$/, "");
+        try { infos.push(JSON.parse(json)); } catch (e) { infos.push({ parseError: e.message }); }
+      }
+      resolve({ info: infos[0] || null, infos, requests, logs, injected });
     }, 60);
   });
 }
@@ -265,6 +274,38 @@ const base = (over) => Object.assign({ ver: "0.3.1", updateCheck: 1,
   {
     const r = await runOnce([], base({ dead: true }));
     check("dead 样本不触发更新检查", r.requests.length === 0, `req=${r.requests.length}`);
+  }
+
+  console.log("-- v0.3.7 自动检查去重 --");
+  {
+    const r = await runOnce([releases([rel("v0.3.2")])],
+      [base({ updateAuto: 1 }), base({ updateCheck: 0, updateAuto: 0 })], 2);
+    check("updateAuto=1 的到期请求正常发出",
+      r.requests.length === 1 && r.info && r.info.status === "ok"
+      && r.info.newer === true, JSON.stringify(r.info));
+    check("自动请求只注入一次结果", r.infos.length === 1, `infos=${r.infos.length}`);
+  }
+  {
+    const r = await runOnce([releases([rel("v0.3.2")])],
+      [base({ updateAuto: 0 }), base({ updateAuto: 1 }), base({ updateAuto: 1 })], 3);
+    check("手动成功后 24h 内自动检查复用缓存，不再联网",
+      r.requests.length === 1 && r.infos.length === 3,
+      `req=${r.requests.length} infos=${r.infos.length}`);
+    check("缓存回放保持 ok + newer",
+      r.infos[2] && r.infos[2].status === "ok" && r.infos[2].newer === true,
+      JSON.stringify(r.infos[2]));
+    check("缓存回放的 at 是回放时刻（不早于本次请求）",
+      r.infos[1] && r.infos[2] && r.infos[1].at >= r.infos[0].at
+      && r.infos[2].at >= r.infos[1].at,
+      `at=${r.infos.map((x) => x && x.at).join(",")}`);
+  }
+  {
+    const r = await runOnce([{ error: "network down" }],
+      [base({ updateAuto: 1 }), base({ updateAuto: 1 })], 2);
+    check("自动检查失败后 24h 内不重复联网，也不重复注入错误",
+      r.requests.length === 1 && r.infos.length === 1
+      && r.infos[0].status === "error",
+      `req=${r.requests.length} infos=${r.infos.length}`);
   }
 
   console.log(`== 结果： ${fail ? "FAIL(" + fail + ")" : "PASS"} (${pass} passed) ==`);
