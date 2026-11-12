@@ -207,6 +207,16 @@ v0.3.8 已拍板范围（日志清理加固，只删不覆盖）：
 - 明确不做：覆盖/截断、递归删除、删除运行目录外文件、跟随符号链接、压缩/回收站/外部删除命令、提权强删。
 - 行为规格见 `docs/specs/v0.3.8-log-retention.md`；发布说明见 `docs/releases/v0.3.8.md`。
 
+v0.3.9 已拍板范围（设置面板滚动/焦点与还原边界，不改观测字段）：
+
+- B 面板开关跳顶：`rebuildPanel()` 重建前读取 `.dlg-content` 的 `scrollTop`，重建后写回；内容区固定 id `lagfix-panel-content`。只影响重建，不改变分区与开关值。
+- 模态焦点：首次打开记录 `document.activeElement` 并把焦点移到面板容器（`tabindex="-1"`，无焦点框）；打开期间 Tab/Shift+Tab 在面板内循环，无可聚焦控件时保持面板焦点；关闭时若原元素仍连接则归还焦点。`rebuildPanel()` 优先恢复同一序号的可聚焦控件，否则聚焦面板容器。
+- `restoreTarget` 还原守卫：`subscribe` 包装记录 `{orig, wrapped}`，只有 `target.subscribe === wrapped` 时才写回 `orig`；宿主运行期替换了 `subscribe` 时不得覆盖，标记属性可以删除。`__lagfixOff()`、关闭「合并刷新」、observer 自禁用共用该规则。
+- 订阅回调异常：仍不向宿主冒泡，但每页面最多 `console.error` 一次；不写 `observe-*.jsonl`，不改变采样与开关。
+- 更新状态文案：`newer=false` 且 `current > latest` 时显示「当前 vX 高于最新发布 vY（发布通道尚未更新）」，不显示红点；`current === latest` 保持「已是最新」。
+- 明确不做：不把 `__lagfixOff()` 改成完全卸载（v0.3.0–v0.3.2 已拍板保留观测、角标与 Ctrl+Alt+L 入口）；不改 composer、不改消息/会话/工具结果、不改注入链、不新增网络请求。
+- 行为规格见 `docs/specs/v0.3.9-panel-focus.md`；发布说明见 `docs/releases/v0.3.9.md`。
+
 ## 7. 版本与发布
 
 每次版本变更必须同步以下位置，缺一不可：
