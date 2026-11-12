@@ -1,5 +1,14 @@
 /**
- * zcode-lagfix renderer 观测脚本 v0.3.8
+ * zcode-lagfix renderer 观测脚本 v0.3.9
+ *
+ * v0.3.9（设置面板滚动/焦点与还原边界）：
+ *   - rebuildPanel() 重建前记住 .dlg-content 的 scrollTop，重建后写回；
+ *     点开关不再把面板跳回顶部。
+ *   - 打开面板时记录原焦点并把焦点收进面板（tabindex=-1）；Tab/Shift+Tab
+ *     在面板内循环；关闭后焦点还给原元素。
+ *   - restoreTarget 只还原自己装的那层 subscribe：宿主已替换时不覆盖。
+ *   - 订阅回调异常仍不向宿主冒泡，但每页面最多 console.error 一次。
+ *   - 当前版本高于最新 Release 时，维护页说明“发布通道尚未更新”。
  *
  * v0.3.7（自动检查更新 + 角标小红点）：
  *   - autoUpdateCheckOn（默认关）：开启后 24h 内最多自动检查一次；结果写入
@@ -147,7 +156,7 @@
   var REFOCUS_WINDOW_MS = 800;     // 回前台帧窗口
   var PANE_SWITCH_DEDUPE_MS = 150; // aria-hidden 与 class 双信号去重
   var REFOCUS_DEDUPE_MS = 500;     // visibilitychange 与 focus 双信号去重
-  var VERSION = "0.3.8";
+  var VERSION = "0.3.9";
   var ERR_LIMIT = 50;
   var OVERLAY_ID = "lagfix-overlay-badge";
   // v0.3.7：更新检查结果的跨窗口缓存 + 自动检查间隔。
@@ -884,6 +893,7 @@
   // v0.2 节流状态（这里声明：attach() 可能在首轮轮询就用到）
   var fixState = { applied: false, target: null, orig: null, reason: "", retryTimer: null, tries: 0,
     loadTarget: null, loadOrig: null, blockedStore: null, resumeTimer: null };
+  var listenerErrLogged = false;
 
   function err() {
     if (++state.errCount >= ERR_LIMIT) disable("too-many-errors");
@@ -2279,6 +2289,7 @@
   var statsShowTimer = null;
   var panelNav = "status";
   var uiBound = false;
+  var lastFocusBeforePanel = null;
   var observedSurface = null;
   var surfaceRO = null;
   var lastTickAt = 0;         // 上次角标刷新的时间（算提交速率/停顿）
@@ -2438,6 +2449,7 @@
       "#" + PANEL_ID + " .dlg-nav button.on{background:rgba(88,166,255,.16);color:#79c0ff;opacity:1}",
       "#" + PANEL_ID + " .dlg-nav span{font-size:13px}",
       "#" + PANEL_ID + " .dlg-content{flex:1;min-width:0;overflow-y:auto;padding:14px 18px 18px}",
+      "#" + PANEL_ID + ":focus{outline:none}",
       "#" + PANEL_ID + " h3{margin:0 0 2px;font-size:14px;font-weight:600}",
       "#" + PANEL_ID + " .sec-desc{margin:0 0 10px;font-size:12px;line-height:1.5;",
       "color:var(--color-foreground-subtle,#8791a3)}",
@@ -3175,6 +3187,7 @@
     var p = document.createElement("div");
     p.id = PANEL_ID;
     p.setAttribute("data-lagfix-panel", "1");
+    p.tabIndex = -1;
 
     var hd = document.createElement("div");
     hd.className = "dlg-hd";
@@ -3197,6 +3210,7 @@
     nav.className = "dlg-nav";
     var content = document.createElement("div");
     content.className = "dlg-content";
+    content.id = PANEL_ID + "-content";
 
     var NAV = [
       { id: "status", label: "状态条" },
@@ -3810,9 +3824,29 @@
 
   function rebuildPanel() {
     if (!state.panelOpen) return;
+    // 重建会销毁旧 DOM，先记住滚动位置和当前控件序号，重建后还原。
+    var oldContent = document.getElementById(PANEL_ID + "-content");
+    var keepTop = oldContent && typeof oldContent.scrollTop === "number" ? oldContent.scrollTop : 0;
+    var oldPanel = document.getElementById(PANEL_ID);
+    var prevActive = null;
+    var focusIndex = -1;
+    try { prevActive = document.activeElement || null; } catch (e) {}
+    if (oldPanel && prevActive && oldPanel.contains(prevActive)) {
+      var oldList = panelFocusables(oldPanel);
+      focusIndex = oldList.indexOf(prevActive);
+    }
     // setPanelOpen(true) 内部已按当前设置 buildPanel 并 renderPanelStatus；
     // 这里不要再单独 build 一次（v0.3.0 初版每次改开关都构建两遍、白丢一次 DOM）。
     setPanelOpen(true);
+    var nextContent = document.getElementById(PANEL_ID + "-content");
+    if (nextContent) nextContent.scrollTop = keepTop;
+    var nextPanel = document.getElementById(PANEL_ID);
+    if (focusIndex >= 0) {
+      var nextList = panelFocusables(nextPanel);
+      if (nextList[focusIndex] && focusPanelNode(nextList[focusIndex])) return;
+    }
+    // 找不到同一控件时至少把焦点留在面板内，不能掉回宿主输入框。
+    if (nextPanel) focusPanelNode(nextPanel);
   }
 
   // 「检查更新」结果由主进程注入 window.__lagfixUpdate（本机不读网络）。
@@ -3903,6 +3937,24 @@
     writeUpdateState(st);
   }
 
+  function versionGt(a, b) {
+    function parse(v) {
+      var s = String(v || "").trim().replace(/^v/i, "");
+      var m = s.match(/^\d+(?:\.\d+)*/);
+      return m ? m[0].split(".").map(function (x) { return parseInt(x, 10) || 0; }) : null;
+    }
+    var pa = parse(a);
+    var pb = parse(b);
+    if (!pa || !pb) return false;
+    var n = Math.max(pa.length, pb.length, 3);
+    for (var i = 0; i < n; i++) {
+      var x = pa[i] || 0;
+      var y = pb[i] || 0;
+      if (x !== y) return x > y;
+    }
+    return false;
+  }
+
   function renderUpdateStatus() {
     var el = document.getElementById(PANEL_ID + "-updatestatus");
     if (!el) return;
@@ -3928,9 +3980,13 @@
     if (!u || typeof u !== "object") {
       // 重启后 window.__lagfixUpdate 会消失，用 localStorage 里的上次结果兜底。
       if (st && st.current === VERSION && typeof st.resultAt === "number") {
-        el.textContent = st.newer
-          ? "上次检查：发现新版本 v" + st.latest + "（当前 v" + st.current + "）。用下方「复制安装口令」升级。"
-          : "上次检查：已是最新（v" + st.current + "）。";
+        if (st.newer) {
+          el.textContent = "上次检查：发现新版本 v" + st.latest + "（当前 v" + st.current + "）。用下方「复制安装口令」升级。";
+        } else if (st.latest && versionGt(st.current, st.latest)) {
+          el.textContent = "上次检查：当前 v" + st.current + " 高于最新发布 v" + st.latest + "（发布通道尚未更新）。";
+        } else {
+          el.textContent = "上次检查：已是最新（v" + st.current + "）。";
+        }
         return;
       }
       el.textContent = settings.autoUpdateCheckOn
@@ -3939,9 +3995,13 @@
       return;
     }
     if (u.status === "ok") {
-      el.textContent = u.newer
-        ? "发现新版本 v" + u.latest + "（当前 v" + u.current + "）。用下方「复制安装口令」升级。"
-        : "已是最新（v" + u.current + "）。";
+      if (u.newer) {
+        el.textContent = "发现新版本 v" + u.latest + "（当前 v" + u.current + "）。用下方「复制安装口令」升级。";
+      } else if (u.latest && versionGt(u.current, u.latest)) {
+        el.textContent = "当前 v" + u.current + " 高于最新发布 v" + u.latest + "（发布通道尚未更新）。";
+      } else {
+        el.textContent = "已是最新（v" + u.current + "）。";
+      }
       return;
     }
     el.textContent = "检查失败：" + (u.message || "未知原因");
@@ -3974,10 +4034,38 @@
     } catch (e) {}
   }
 
+  function panelFocusables(root) {
+    if (!root || typeof root.querySelectorAll !== "function") return [];
+    try {
+      return Array.prototype.slice.call(root.querySelectorAll(
+        'button, input, select, textarea, [href], [tabindex]:not([tabindex="-1"])'
+      )).filter(function (el) {
+        if (!el || el.disabled || el.type === "hidden") return false;
+        // 面板里只有当前分组的控件可见；把隐藏分组排除，避免 Tab 落到看不见的按钮。
+        try {
+          if (typeof el.checkVisibility === "function" && !el.checkVisibility()) return false;
+        } catch (e) {}
+        return true;
+      });
+    } catch (e) { return []; }
+  }
+
+  function focusPanelNode(node) {
+    if (!node || typeof node.focus !== "function") return false;
+    try { node.focus({ preventScroll: true }); return true; } catch (e) {
+      try { node.focus(); return true; } catch (e2) { return false; }
+    }
+  }
+
   function setPanelOpen(open) {
+    var wasOpen = state.panelOpen;
     state.panelOpen = !!open;
     var mask = document.getElementById(MASK_ID);
     if (open) {
+      // 首次打开时记住原焦点，关闭后还回去；rebuildPanel 的重复打开不能覆盖它。
+      if (!wasOpen) {
+        try { lastFocusBeforePanel = document.activeElement || null; } catch (e) { lastFocusBeforePanel = null; }
+      }
       // 每次打开都按当前设置重建：面板关着时可能被 storage 事件 / 控制台 __lagfixOff
       // 改过设置，复用旧 DOM 会显示过期的开关状态（用户实测：关掉节流后窗口没变灰）。
       buildPanel();
@@ -3989,6 +4077,11 @@
         document.addEventListener("keydown", onKeydown, true);
         document.addEventListener("mousedown", onDocDown, true);
       }
+      // 模态打开时把键盘焦点从宿主 composer 收进面板，避免后台误输入/误发送。
+      if (!wasOpen) {
+        var p0 = document.getElementById(PANEL_ID);
+        if (p0) focusPanelNode(p0);
+      }
       renderPanelStatus();
     } else {
       if (mask) mask.style.display = "none";
@@ -3998,16 +4091,52 @@
       document.removeEventListener("mousedown", onDocDown, true);
       document.removeEventListener("keydown", onKeydown, true);
       uiBound = false;
+      var restore = lastFocusBeforePanel;
+      lastFocusBeforePanel = null;
+      if (restore && restore !== document.body && restore.isConnected !== false) {
+        focusPanelNode(restore);
+      }
     }
   }
 
   function onKeydown(ev) {
+    // 面板是模态：Tab 必须在面板内循环，不能把焦点送回宿主输入框。
+    if (ev && ev.key === "Tab" && state.panelOpen) {
+      try {
+        var p = document.getElementById(PANEL_ID);
+        if (!p) return;
+        var list = panelFocusables(p);
+        var active = document.activeElement || null;
+        if (!list.length) {
+          ev.preventDefault();
+          focusPanelNode(p);
+          return;
+        }
+        var first = list[0];
+        var last = list[list.length - 1];
+        if (!p.contains(active)) {
+          ev.preventDefault();
+          focusPanelNode(ev.shiftKey ? last : first);
+          return;
+        }
+        if (ev.shiftKey && active === first) {
+          ev.preventDefault();
+          focusPanelNode(last);
+          return;
+        }
+        if (!ev.shiftKey && active === last) {
+          ev.preventDefault();
+          focusPanelNode(first);
+        }
+      } catch (e) {}
+      return;
+    }
     if (ev && ev.key === "Escape") {
       if (state.panelOpen) {
         // 只有焦点确实在弹窗里才吞掉 Esc，宿主输入框/弹窗的 Esc 必须照常传下去
         try {
-          var p = document.getElementById(PANEL_ID);
-          if (p && ev.target && p.contains(ev.target)) ev.stopPropagation();
+          var p2 = document.getElementById(PANEL_ID);
+          if (p2 && ev.target && p2.contains(ev.target)) ev.stopPropagation();
         } catch (e) {}
         setPanelOpen(false);
         return;
@@ -4187,7 +4316,15 @@
         }
         var args = lastArgs;
         lastArgs = null;
-        try { cb.apply(null, args || []); } catch (e) {}
+        try { cb.apply(null, args || []); } catch (e) {
+          // 宿主 listener 的异常仍不向 React 冒泡，但不能完全静默；每个页面只留一条。
+          try {
+            if (!listenerErrLogged) {
+              listenerErrLogged = true;
+              console.error("[lagfix] 订阅回调异常（后续同类不再打印）", e);
+            }
+          } catch (e2) {}
+        }
       }
       function wrapped() {
         lastArgs = arguments;
@@ -4264,7 +4401,10 @@
     if (!target) return;
     try {
       var rec = target.__lagfixThrottle;
-      if (rec && typeof rec.orig === "function") target.subscribe = rec.orig;
+      // 只还原我们自己装的那一层；宿主若已替换 subscribe，不能把它的新实现覆盖回旧 orig。
+      if (rec && typeof rec.orig === "function" && rec.wrapped && target.subscribe === rec.wrapped) {
+        target.subscribe = rec.orig;
+      }
       delete target.__lagfixThrottle;
     } catch (e) {}
   }
@@ -4464,8 +4604,9 @@
       return true;
     }
     var orig = target.subscribe;
-    target.subscribe = makeThrottledSubscribe(orig);
-    target.__lagfixThrottle = { orig: orig };
+    var wrapped = makeThrottledSubscribe(orig);
+    target.subscribe = wrapped;
+    target.__lagfixThrottle = { orig: orig, wrapped: wrapped };
     fixState.target = target;
     fixState.orig = orig;
     fixState.applied = true;
