@@ -234,6 +234,16 @@ v0.4.0 已拍板范围（推荐 A：T1 + U2 + O8b）：
 - 明确不做：不修改/延迟/取消定时器，不读回调参数或内容；不跳过补页、不合并分页；不改注入链、消息/会话/工具结果；不读 `db.sqlite`、不开 CDP、不联网上报。
 - A/B 门槛：O8b 调用次数下降 ≥30%，补页总耗时或滚动 P95/长任务不退化 >10%，锚点漂移 ≤48px，DOM 峰值增加 ≤20%；未过线保持默认关闭，调用次数也没明显下降则退役该项。行为规格见 `docs/specs/v0.4.0-t1-timer-attribution.md`、`docs/specs/v0.4.0-o8b-adaptive-page.md`；发布说明见 `docs/releases/v0.4.0.md`。
 
+v0.4.1 已拍板范围（角标更新红点移到齿轮右上角，单点视觉修复）：
+
+- DOM：红点 id 不变（`lagfix-overlay-badge-update-dot`），从角标容器移到齿轮按钮 `lagfix-gear` 内部；`aria-hidden="true"`，不再自带 `title`。
+- CSS：`.lg-gear` 加 `position:relative`；`.lg-update-dot` 改为 `position:absolute; top:-2px; right:-2px; width:6px; height:6px`，带 `box-shadow:0 0 0 1.5px var(--color-popover,#161b22)` 描边，`pointer-events:none`。
+- 角标容器保持 `overflow:hidden`；红点只伸进角标自身内边距，不越过裁切边界；点红点等同点齿轮。
+- 状态：显示条件、`syncUpdateDot()` 的 `inline-block`/`none`、缓存 key 与检查逻辑全部不变；齿轮 `title` 在有新版本时为「打开设置（有新版本）」，否则「打开设置」。
+- 维护页「检查更新」行红点保持行内，不移动。
+- 明确不做：不改网络请求、24 小时自动检查、红点判定条件、角标尺寸/指标文字/齿轮点击行为；不新增设置项或日志字段。
+- 行为规格见 `docs/specs/v0.4.1-update-dot-corner.md`；发布说明见 `docs/releases/v0.4.1.md`。
+
 ## 7. 版本与发布
 
 每次版本变更必须同步以下位置，缺一不可：
