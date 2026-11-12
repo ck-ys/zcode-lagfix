@@ -1,0 +1,116 @@
+name: 问题反馈
+description: 报告卡顿、注入失败、面板异常或其他问题（请附 /lagfix report 与日志）
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请尽量把「现象 + 复现步骤 + 数据」一次写全，方便定位。
+
+        日志只含指标、设置快照、窗口 id、会话 sid 与计数、补页元数据、长帧脚本文件名；**不含**提示词、回复、消息正文、工具参数或文件内容。提交前仍请自己检查一遍，删掉不想公开的路径或用户名。
+
+  - type: input
+    id: zcode-version
+    attributes:
+      label: ZCode 版本
+      description: 设置 → 关于，或启动页显示的版本号
+      placeholder: "例如 3.18.1"
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 插件版本
+      description: 设置面板底部版本行，或 ~/.zcode/cli/plugins/cache/lagfix-marketplace/zcode-lagfix/ 下的目录名
+      placeholder: "例如 0.3.7"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows 10 / 11
+        - macOS（Intel）
+        - macOS（Apple Silicon）
+        - 其他（请在现象里说明）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 问题类型
+      options:
+        - 滚动卡顿
+        - 输入 / 按键卡顿
+        - 切换会话卡顿
+        - 侧栏 / 右侧面板卡顿
+        - 切回 ZCode 时卡顿
+        - 注入失败 / 面板打不开 / 角标异常
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 现象
+      description: 实际发生了什么？能否稳定复现？大概持续多久？
+      placeholder: "例如：超长会话连续上翻 10 秒后，界面卡住约 3 秒，输入框上下键无响应。"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从打开 ZCode 开始，按顺序写清每一步；能稳定复现最好
+      placeholder: |
+        1. 打开某个超长会话（约 N 条消息）
+        2. 连续向上滚动到更早历史
+        3. 约 5 秒后开始卡顿
+    validations:
+      required: true
+
+  - type: input
+    id: session-size
+    attributes:
+      label: 会话规模
+      description: 消息数 / 历史行数 / 是否超过 3000 行；不确定可以写“大概”
+      placeholder: "例如：约 1200 条消息，历史窗口 8000 行"
+
+  - type: textarea
+    id: switches
+    attributes:
+      label: 当时的开关状态
+      description: 哪些开关开着？尤其「补页批量」「翻页降频」「长回合渲染减负」「自动检查更新」；有条件请做一轮开/关 A/B
+      placeholder: |
+        补页批量：开 / 关
+        翻页降频：开 / 关
+        长回合渲染减负：开 / 关
+        A/B 结果：...
+
+  - type: textarea
+    id: report
+    attributes:
+      label: /lagfix report 输出
+      description: 在 ZCode 里执行 /lagfix report，把三段输出完整粘贴到这里（基线 / 问题窗口 / 恢复后）
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: diagnostics
+    attributes:
+      label: 日志附件
+      description: 创建 issue 后，把日志文件直接拖进下方评论框；文件太大时贴相关时间段即可
+      options:
+        - label: 我会附上 ~/.zcode/zcode-lagfix/main.log 和最近一个 observe-YYYYMMDD.jsonl（或说明为什么无法提供）
+          required: true
+        - label: 我已检查日志与截图，确认不含凭据、token、内部服务地址或不想公开的内容
+          required: true

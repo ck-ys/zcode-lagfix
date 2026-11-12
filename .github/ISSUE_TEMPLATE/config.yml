@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 安装与使用说明
+    url: https://github.com/ck-ys/zcode-lagfix#readme
+    about: 先按 README 完成安装，并确认 /lagfix install 成功后再反馈
+  - name: 先看数据：/lagfix report
+    url: https://github.com/ck-ys/zcode-lagfix#遇到问题
+    about: 反馈性能问题前，请先跑一次 /lagfix report 并附上输出
