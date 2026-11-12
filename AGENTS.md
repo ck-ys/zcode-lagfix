@@ -174,6 +174,39 @@ v0.3.4 已拍板范围（Route A，归因先行 + 双实验）：
 - 三键均可独立关闭；`__lagfixOff()`/自禁用/暂停三条路径必须清掉 CV 属性、归因环、降频计数。两项实验保留门槛：A/B 滚动 P95 或长任务下降 ≥20%（或长任务 ≥30%），否则永久默认关闭并如实标注。
 - 行为规格见 `docs/specs/v0.3.4-loadolder-dom.md`；路线与数据门槛见 `docs/decisions/v0.3.4-route.html` 第 04/07 节。O7 多会话策略与预览绘制成本本版不做。
 
+v0.3.5 已拍板范围（推荐 A：P0 + O5 + U1）：
+
+- P0 长帧上下文归因（`lafCtxOn`，默认开，只读）：每条 ≥100ms 长帧记录 `sinceNotify/sinceFlush/sinceScroll/sinceCommit`（信号相对帧的滞后：帧前=距帧起点，帧内=0，晚于帧结束或未发生=`null`），归类 `flush/notify/scroll/other`；候选为 flush/notify/scroll 中滞后最小者，必须 ≤1000ms；帧内候选按信号发生时间取更早者，完全同毫秒按 flush→notify→scroll；commit 只作上下文不成类，attach/切会话清零。`ctx` 是本周期四类计数；样本带 `paneOpen`（未检测到侧栏为 `null`）与 `panelQuiet`（0/1）。P0 需要 `lafDiagOn` 父开关同时开启；滚动时间戳独立为 `lastLafScrollAt`，不得复用/污染滚动诊断的 `lastScrollAt`。
+- O5 面板期进一步合并（`panelQuietOn`，默认关，实验）：面板打开且观察到时通知下限 300→400ms、角标上限 1.8s→3s；面板关闭后新通知立即回基础间隔（在途一次最多按原窗口送达，400ms 下限在 1s 缓存之外计算）；不新增 DOM 属性、不碰 mask；即使 P2/P1/P0 全关，只要 O5 开就保留 pane 探针。过线门槛沿用 A/B：长帧数或 `frameP95` 下降 ≥20%，否则永久默认关闭。
+- U1 只出文档：把右侧预览是 Electron `<webview>` guest、合成落在宿主 renderer 的证据写进 README/发布说明，不改注入链、不声称插件已修。
+- 两键均可独立关闭；`__lagfixOff()`/自禁用/暂停三条路径必须清空四个时间戳、`ctx` 计数与 `paneOpen/panelQuiet` 输出。行为规格见 `docs/specs/v0.3.5-laf-context.md`；拍板页见 `docs/decisions/v0.3.5-next-optimization.html`。O3b（自动补拉降频）与 O6（非活动 pane 节流）本版不做。
+
+v0.3.6 已拍板范围（推荐 A：O8 补页批量，默认关闭的实验）：
+
+- O8 补页批量（`loadOlderPageLimitOn`，默认关）：只包装当前主 store **实例**的 `loadOlder`；仅当调用方无参且开关开、未自禁用时，改为 `orig.call(this, 200)`（协议上限内）；显式参数、开关关、自禁用一律原样 `orig.apply(this, arguments)`。必须保留 `this`、Promise、异常、`loadingOlder/canLoadOlder` 与返回内容；不跳过、不合并、不缓存、不写 store。包装安装条件扩展为 `scrollDiagOn || loadOlderPaceOn || loadOlderPageLimitOn`；只开 O8 也必须生效。计数 `page={limit,installed,applied,passthrough}` 随包装器生命周期：从关到开/换 store/自禁用/`__lagfixOff()` 清零，暂停观测不重置（替换仍生效）；`__lagfixOff()` 同时把开关置 false。样本 `page` 仅在开关开时上报，关闭为 `null`；`installed=false` 表示包装未装上、计数不可用。报告补页段显示页大小、生效与放行次数，遇到 dead/显式 `page=null` 停止回退，不回显旧计数。
+- 依赖宿主契约：ZCode v3.17.2 源码与安装版 v3.18.1 `app.asar` 均已核对 `loadOlder(limit = 60)` 与 `rowsRangeMaxLimit = 200`；宿主调用点为无参。未来若参数消失或上限变化，本实验必须停用并在报告提示，不得猜参数。
+- 明确不做：O3 行为改动、O3b 自动补拉降频、O6/O7 隐藏 pane 策略、预览 HTML 优化；不折叠/不隐藏任何内容；不改消息、会话、工具结果；不读 `db.sqlite`；不开 CDP；不联网。
+- A/B 门槛：同一会话、同一段历史、同一滚动路径做关→开→关至少 3 轮；补页次数下降 ≥50%（目标约 -66%），且补页总阻塞或滚动 P95/长任务下降 ≥20%，顶部空白 ≤300ms、锚点漂移 ≤48px、DOM 峰值不增加 >20%；未过线保持默认关闭并如实标注。行为规格见 `docs/specs/v0.3.6-loadolder-page.md`；拍板页见 `docs/decisions/v0.3.6-loadolder-page.html`。
+
+v0.3.7 已拍板范围（更新提醒：小红点 + 可选自动检查）：
+
+- U2 有新版本小红点：检查结果缓存在 `localStorage["lagfix.update.v1"]`（只含版本号、`newer`、release 链接、时间戳），跨窗口与重启保留；仅当 `newer===true`、缓存 `current===VERSION` 且 `latest!==VERSION` 时，在角标右侧（文字与齿轮之间）与维护页「检查更新」行显示红点。缓存版本不一致、`latest` 与当前相同、`newer=false` 一律不显示。
+- U3 自动检查更新（`autoUpdateCheckOn`，默认关）：开启后 ZCode 启动/窗口打开时最多检查一次，`checkedAt` 写本机，24 小时内不重复；主进程再按 24 小时去重并缓存成功结果，多窗口同时到期只发一次网络请求。只请求公开 GitHub Releases（`api.github.com`、HTTPS、最多 2 跳、10 秒总时限、2MB 上限），不带 token，不自动下载/安装，不上报本机数据。
+- 手动检查保持原样：点击后置 `updateCheckRequested` 并清 `updateCheckAuto`；样本带 `updateAuto=0/1`。`__lagfixOff()` 关闭自动检查、清更新缓存与两处红点、清在途标记；手动按钮仍可用。
+- 反馈入口（U4）：维护页「反馈问题」按钮只打开固定 GitHub issue 模板（优先 `window.zcode.openExternal`，失败退回 `window.open`）；README 增加「遇到问题」章节，issue 模板要求 `/lagfix report`、`main.log` 与最近一个 `observe-*.jsonl`。插件不自动读取或上传日志。
+- 明确不做：自动下载、自动安装、自动重启、后台常驻轮询、把更新结果写进会话或日志正文；不改注入链与其他缓解项。
+- 行为规格见 `docs/specs/v0.3.7-update-dot.md`；发布说明见 `docs/releases/v0.3.7.md`。
+
+v0.3.8 已拍板范围（日志清理加固，只删不覆盖）：
+
+- 用户拍板继续使用「删除」而不是覆盖/`truncate`；本版只加固删除判定，不改日志内容、观测字段、注入链与任何缓解项。
+- 运行目录安全：清理前 `lstat` DATA_DIR，必须是普通目录、非符号链接/junction；不满足或读取失败时 14 天保留与预算清理都跳过，只写一条告警。结果进程内缓存。
+- 文件名校验：`observe-YYYYMMDD.jsonl(.N)` 的日期必须真实（round-trip、年份 2020–2100）；非法日期不认作插件日志。
+- 预算清理：最小删除年龄 10 分钟；删前重新 `lstat` 复核名字/路径/普通文件/非链接/年龄；按当前大小修正总量，文件变小已回到预算内立即停止；删除失败不扣总量、同一文件每进程只告警一次。
+- 安装器临时文件：`install.py:_sweep_tmp` 与 `patch_install.py:sweep_tmp` 只删 `RUNTIME_FILES` 文件名 + `.tmp-<pid>` 的普通文件，跳过符号链接/非普通文件；不再匹配任意 `*.tmp-<pid>`。
+- 明确不做：覆盖/截断、递归删除、删除运行目录外文件、跟随符号链接、压缩/回收站/外部删除命令、提权强删。
+- 行为规格见 `docs/specs/v0.3.8-log-retention.md`；发布说明见 `docs/releases/v0.3.8.md`。
+
 ## 7. 版本与发布
 
 每次版本变更必须同步以下位置，缺一不可：

@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>zcode-lagfix 下一版本拍板 · v0.3.5 深度评估与最佳推荐</title>
+<style>
+  :root {
+    --bg: #0b1017;
+    --bg-2: #101824;
+    --card: #141d2b;
+    --card-2: #182334;
+    --line: #263449;
+    --text: #e6edf7;
+    --muted: #93a4bb;
+    --dim: #6e8098;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --radius: 14px;
+    --shadow: 0 18px 50px rgba(0, 0, 0, .28);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    color: var(--text);
+    background:
+      radial-gradient(900px 500px at 18% -8%, rgba(88, 166, 255, .14), transparent 60%),
+      radial-gradient(800px 420px at 92% 4%, rgba(188, 140, 255, .10), transparent 60%),
+      var(--bg);
+    font: 15px/1.72 "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+  code { overflow-wrap: anywhere; word-break: break-word; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 44px 22px 120px; }
+
+  /* ── header ── */
+  .hero {
+    display: grid;
+    grid-template-columns: 1.35fr .65fr;
+    gap: 24px;
+    align-items: stretch;
+    margin-bottom: 30px;
+  }
+  .hero-main, .hero-side {
+    background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,0));
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .hero-main { padding: 30px 30px 26px; }
+  .hero-side { padding: 22px; display: flex; flex-direction: column; justify-content: space-between; gap: 16px; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--blue); font-size: 12.5px; font-weight: 700;
+    letter-spacing: .12em; text-transform: uppercase;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); box-shadow: 0 0 0 5px rgba(248,81,73,.12); }
+  h1 { margin: 12px 0 10px; font-size: clamp(28px, 4vw, 42px); line-height: 1.18; letter-spacing: -.02em; }
+  h1 span { color: var(--muted); font-weight: 500; }
+  .lede { margin: 0; color: var(--muted); max-width: 760px; font-size: 16px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border-radius: 999px;
+    border: 1px solid var(--line); background: rgba(255,255,255,.025);
+    color: var(--muted); font-size: 12.5px;
+  }
+  .chip b { color: var(--text); font-weight: 650; }
+  .verdict-box { padding: 16px; border-radius: 12px; background: rgba(88,166,255,.07); border: 1px solid rgba(88,166,255,.25); }
+  .verdict-box .big { font-size: 20px; font-weight: 750; line-height: 1.35; }
+  .verdict-box p { margin: 8px 0 0; color: var(--muted); font-size: 13.5px; }
+  .version-line { color: var(--dim); font-size: 12.5px; }
+
+  /* ── sections ── */
+  section { margin-top: 38px; }
+  .sec-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+  h2 { margin: 0; font-size: 21px; letter-spacing: -.01em; }
+  .sec-head p { margin: 0; color: var(--dim); font-size: 13px; max-width: 580px; text-align: right; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .grid-2 > *, .grid-3 > * { min-width: 0; }
+  .card {
+    min-width: 0;
+    background: linear-gradient(180deg, rgba(255,255,255,.028), rgba(255,255,255,.008));
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 18px;
+  }
+  pre { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+  .card h3 { margin: 0 0 8px; font-size: 15.5px; }
+  .card p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12.5px; }
+  .dim { color: var(--dim); }
+  .tag {
+    display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 650; border: 1px solid var(--line); color: var(--muted);
+    background: rgba(255,255,255,.03); white-space: nowrap;
+  }
+  .tag.green { color: #7ee787; border-color: rgba(63,185,80,.35); background: rgba(63,185,80,.08); }
+  .tag.yellow { color: #e3b341; border-color: rgba(210,153,34,.35); background: rgba(210,153,34,.08); }
+  .tag.red { color: #ff7b72; border-color: rgba(248,81,73,.35); background: rgba(248,81,73,.08); }
+  .tag.blue { color: #79c0ff; border-color: rgba(88,166,255,.35); background: rgba(88,166,255,.08); }
+  .tag.purple { color: #d2a8ff; border-color: rgba(188,140,255,.35); background: rgba(188,140,255,.08); }
+
+  /* ── evidence ── */
+  .metric { display: flex; flex-direction: column; gap: 10px; }
+  .metric .label { display: flex; justify-content: space-between; color: var(--muted); font-size: 12.5px; }
+  .metric .label b { color: var(--text); font-size: 13px; }
+  .bar { height: 8px; border-radius: 999px; background: #1b2638; overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 999px; background: var(--green); }
+  .bar.yellow > i { background: var(--yellow); }
+  .bar.red > i { background: var(--red); }
+  .bar.blue > i { background: var(--blue); }
+  .phase { position: relative; }
+  .phase .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .phase .name { font-weight: 700; }
+  .phase .when { color: var(--dim); font-size: 12px; }
+  .phase .rows { display: flex; flex-direction: column; gap: 11px; }
+  .phase .foot { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--dim); font-size: 12px; }
+  .hot-card { border-color: rgba(248,81,73,.35); background: linear-gradient(180deg, rgba(248,81,73,.055), rgba(248,81,73,.015)); }
+
+  .callout {
+    display: grid; grid-template-columns: 36px 1fr; gap: 12px;
+    border: 1px solid rgba(88,166,255,.28); background: rgba(88,166,255,.055);
+    border-radius: var(--radius); padding: 16px 18px; margin-top: 14px;
+  }
+  .callout .icon {
+    width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+    background: rgba(88,166,255,.14); color: var(--blue); font-weight: 800;
+  }
+  .callout p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .callout b { color: var(--text); }
+
+  /* ── options ── */
+  .option {
+    position: relative; display: grid; grid-template-columns: 22px 1fr; gap: 12px;
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 16px;
+    background: linear-gradient(180deg, rgba(255,255,255,.024), rgba(255,255,255,.006));
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .option:hover { border-color: #3a4d68; }
+  .option.checked { border-color: rgba(88,166,255,.6); background: rgba(88,166,255,.06); }
+  .option input[type="checkbox"] { appearance: none; width: 19px; height: 19px; margin-top: 2px; border: 1.5px solid #40536e; border-radius: 6px; background: transparent; cursor: pointer; }
+  .option input[type="checkbox"]:checked { background: var(--blue); border-color: var(--blue); box-shadow: inset 0 0 0 3px var(--bg-2); }
+  .option .head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 6px; }
+  .option h4 { margin: 0; font-size: 14.5px; }
+  .option p { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+  .option ul { margin: 6px 0 0; padding-left: 18px; color: var(--dim); font-size: 12.5px; }
+  .option li { margin: 3px 0; }
+  .option .kv { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font-size: 12px; color: var(--dim); }
+  .option .kv b { color: var(--muted); font-weight: 650; }
+  .recommend { box-shadow: 0 0 0 1px rgba(63,185,80,.18) inset; }
+
+  /* ── acceptance table ── */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 12px; letter-spacing: .03em; text-transform: uppercase; }
+  td { color: var(--muted); }
+  td b { color: var(--text); font-weight: 650; }
+  .check { color: var(--green); font-weight: 800; }
+
+  /* ── summary ── */
+  .summary {
+    position: static; z-index: 20; margin-top: 34px;
+    display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: center;
+    padding: 14px 16px; border-radius: 14px; border: 1px solid rgba(88,166,255,.34);
+    background: rgba(16, 24, 36, .94); backdrop-filter: blur(12px);
+    box-shadow: 0 16px 40px rgba(0,0,0,.45);
+  }
+  .summary .line { color: var(--muted); font-size: 13px; }
+  .summary .line b { color: var(--text); }
+  .summary .picks { margin-top: 4px; color: var(--dim); font-size: 12px; }
+  .summary .actions { display: flex; gap: 8px; }
+  button {
+    border: 1px solid #365072; background: rgba(88,166,255,.13); color: #cfe6ff;
+    padding: 9px 13px; border-radius: 9px; font: inherit; font-size: 13px; font-weight: 650; cursor: pointer;
+  }
+  button:hover { background: rgba(88,166,255,.2); }
+  .toast { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%) translateY(10px); opacity: 0; pointer-events: none; background: #1b293b; border: 1px solid var(--line); color: var(--text); padding: 9px 14px; border-radius: 9px; font-size: 13px; transition: .18s ease; z-index: 50; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .footnote { margin-top: 32px; color: var(--dim); font-size: 12px; line-height: 1.8; }
+  .footnote code { color: var(--muted); background: rgba(255,255,255,.04); padding: 1px 5px; border-radius: 4px; }
+
+  .research-list { margin: 8px 0 0; padding-left: 17px; color: var(--muted); font-size: 12.5px; }
+  .research-list li { margin: 4px 0; }
+
+  @media (max-width: 900px) {
+    .hero { grid-template-columns: 1fr; }
+    .grid-3 { grid-template-columns: 1fr; }
+    .grid-2 { grid-template-columns: 1fr; }
+    .sec-head { display: block; }
+    .sec-head p { text-align: left; margin-top: 6px; }
+    .summary { grid-template-columns: 1fr; position: static; }
+    .summary .actions { justify-content: flex-start; }
+  }
+
+  @media (max-width: 720px) {
+    .accept-table thead { display: none; }
+    .accept-table, .accept-table tbody, .accept-table tr, .accept-table td { display: block; width: 100%; }
+    .accept-table tr { border-bottom: 1px solid var(--line); padding: 10px 0; }
+    .accept-table tr:last-child { border-bottom: 0; }
+    .accept-table td { border: 0; padding: 3px 0 3px 84px; position: relative; }
+    .accept-table td::before {
+      content: attr(data-label); position: absolute; left: 0; top: 3px; width: 76px;
+      color: var(--dim); font-size: 11.5px; font-weight: 600;
+    }
+  }
+
+  @media print {
+    body { background: #fff; color: #111; }
+    .wrap { padding: 0; max-width: none; }
+    .card, .hero-main, .hero-side, .option, .summary { box-shadow: none; background: #fff; border-color: #ddd; }
+    .summary { position: static; }
+    .toast, .actions { display: none; }
+  }
+  .option.no-check { grid-template-columns: 1fr; }
+</style>
+</head>
+<body>
+<style>
+  .flow { display: flex; flex-direction: column; gap: 0; margin: 18px 0 6px; }
+  .flow-step {
+    border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px;
+    background: var(--card); color: var(--text); font-size: 14px; line-height: 1.55;
+  }
+  .flow-step b { color: #fff; }
+  .flow-step small { display: block; margin-top: 4px; color: var(--muted); font-size: 12.5px; }
+  .flow-step.warn { border-color: rgba(248,81,73,.45); background: rgba(248,81,73,.07); }
+  .flow-step.ok { border-color: rgba(63,185,80,.45); background: rgba(63,185,80,.07); }
+  .flow-step.measure { border-color: rgba(88,166,255,.45); background: rgba(88,166,255,.07); }
+  .flow-arrow { text-align: center; color: var(--dim); font-size: 18px; line-height: 1.2; padding: 4px 0; }
+  .flow-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .flow-note { color: var(--dim); font-size: 12.5px; margin: 6px 0 0; }
+
+  .rec {
+    border: 1px solid rgba(63,185,80,.5); border-radius: 16px; padding: 22px 24px;
+    background: linear-gradient(180deg, rgba(63,185,80,.10), rgba(63,185,80,.03));
+    box-shadow: 0 18px 50px rgba(0,0,0,.28);
+  }
+  .rec-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .rec-badge {
+    display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px;
+    background: rgba(63,185,80,.16); border: 1px solid rgba(63,185,80,.45);
+    color: #7ee787; font-size: 12.5px; font-weight: 750; letter-spacing: .04em;
+  }
+  .rec h3 { margin: 10px 0 6px; font-size: 22px; }
+  .rec p { margin: 0; color: var(--muted); }
+  .rec-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 16px; }
+  .rec-cell { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; background: rgba(255,255,255,.02); }
+  .rec-cell b { display: block; font-size: 13px; color: #fff; margin-bottom: 4px; }
+  .rec-cell span { font-size: 13px; color: var(--muted); }
+
+  .bars { display: flex; flex-direction: column; gap: 10px; margin: 14px 0 4px; }
+  .bar-row { display: grid; grid-template-columns: 150px 1fr 64px; gap: 12px; align-items: center; font-size: 13px; }
+  .bar-track { height: 12px; border-radius: 999px; background: rgba(255,255,255,.06); overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #3fb950, #d29922); }
+  .bar-fill.bad { background: linear-gradient(90deg, #d29922, #f85149); }
+  .bar-val { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+  .bar-label { color: var(--muted); }
+
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+  .pill.good { background: rgba(63,185,80,.14); color: #7ee787; border: 1px solid rgba(63,185,80,.35); }
+  .pill.mid { background: rgba(210,153,34,.14); color: #e3b341; border: 1px solid rgba(210,153,34,.35); }
+  .pill.bad { background: rgba(248,81,73,.14); color: #ff7b72; border: 1px solid rgba(248,81,73,.35); }
+
+  .choose { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .choose .option {
+    border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; background: var(--card);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .choose .option.primary {
+    border-color: rgba(63,185,80,.55);
+    background: linear-gradient(180deg, rgba(63,185,80,.10), rgba(63,185,80,.02));
+    box-shadow: 0 0 0 1px rgba(63,185,80,.15) inset;
+  }
+  .choose h3 { margin: 0; font-size: 15px; }
+  .choose p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .choose small { color: var(--dim); font-size: 12.5px; }
+  @media (max-width: 720px) {
+    .flow-split, .choose, .rec-grid { grid-template-columns: 1fr; }
+    .bar-row { grid-template-columns: 110px 1fr 52px; }
+  }
+</style>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="hero-main">
+      <div class="eyebrow"><span class="dot" style="background:var(--green);box-shadow:0 0 0 5px rgba(63,185,80,.14)"></span>NEXT RELEASE · v0.3.5 · 深度评估版</div>
+      <h1>最佳推荐 <span>P0 归因 + O5 面板期合并 + U1 上游文档</span></h1>
+      <p class="lede">三轮实机对照（无负载 / 9 个子智能体隐性运行 / 4 个 pane 可见 / 面板快速滑动）已经把成本来源分开：<b>子智能体计算不占渲染主线程，显示它们的 pane 才占；滑动是最贵的动作</b>。插件唯一能调的变量是「通知合并」，所以 v0.3.5 只做这一项实验，并把归因做准。</p>
+      <div class="meta">
+        <span class="chip">证据 <b>3 轮 × 9 并行任务</b></span>
+        <span class="chip">样本 <b>带长帧归因 500+ 条</b></span>
+        <span class="chip">推荐 <b>A：P0 + O5 + U1</b></span>
+        <span class="chip">边界 <b>不承诺修好 webview</b></span>
+      </div>
+    </div>
+    <aside class="hero-side">
+      <div class="verdict-box">
+        <div class="big">一句话选择：先做 P0，再让 O5 试跑</div>
+        <p>P0 只读、零风险，决定后续所有判断；O5 只改通知时机，默认关，过不了 20% 门槛就永久关掉。O3b 与 O6 都不进本版。</p>
+      </div>
+      <div class="version-line">基于 v0.3.4（2026-11-11 已发布）· 本页只定路线</div>
+    </aside>
+  </header>
+
+  <section>
+    <div class="rec">
+      <div class="rec-top">
+        <span class="rec-badge">✓ 最佳推荐 · 方案 A</span>
+        <span class="chip">风险 <b>低</b></span>
+        <span class="chip">工时 <b>小</b></span>
+        <span class="chip">可回退 <b>是</b></span>
+      </div>
+      <h3>v0.3.5 = P0 归因补强（默认开）+ O5 面板期合并（实验、默认关）+ U1 上游文档</h3>
+      <p>理由只有一条：这是唯一一组「能立刻做、不碰宿主、还能为下一步提供证据」的组合。O3b 会碰首 turn 完整性，O6 需要猜 store→pane 映射，两者都该等 P0 数据。</p>
+      <div class="rec-grid">
+        <div class="rec-cell"><b>P0 · 默认开</b><span>给每条 ≥100ms 长帧标出触发来源与面板状态，回答「谁在占主线程」。</span></div>
+        <div class="rec-cell"><b>O5 · 默认关</b><span>面板打开时通知窗口 300→400ms、角标 1.8s→3s；只改时序，失败即关。</span></div>
+        <div class="rec-cell"><b>U1 · 只出文档</b><span>把 webview 合成证据交给上游；插件改不了那条链路，就不假装能改。</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>01 · 三轮实测：成本到底在哪</h2>
+      <p>同一台机器、同一长会话、5 个会话桶；只改变「是否显示 pane」「是否滑动」「是否跑子智能体」。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>窗口</th><th>条件</th><th>长帧数/3s<br>中位 / 最大</th><th>frameP95<br>中位 / 最大</th><th>长任务/3s<br>中位 / 最大</th></tr></thead>
+      <tbody>
+        <tr><td data-label="窗口">A</td><td data-label="条件">面板关、无子智能体负载</td><td data-label="长帧">5 / 11</td><td data-label="帧">24 / 43</td><td data-label="长任务">1 / 5</td></tr>
+        <tr><td data-label="窗口">B</td><td data-label="条件">面板关、<b>9 个子智能体运行中（pane 不显示）</b></td><td data-label="长帧"><b>2 / 8</b></td><td data-label="帧"><b>24 / 24</b></td><td data-label="长任务"><b>0.5 / 4</b></td></tr>
+        <tr><td data-label="窗口">C</td><td data-label="条件">面板开、<b>4 个子智能体 pane 可见并流式输出</b></td><td data-label="长帧">10 / 23</td><td data-label="帧">12 / <b>182</b></td><td data-label="长任务">15 / <b>41</b></td></tr>
+        <tr><td data-label="窗口">D</td><td data-label="条件">面板开、<b>快速上下滑动</b></td><td data-label="长帧">—</td><td data-label="帧">182 / <b>236</b></td><td data-label="长任务">50 / <b>62</b></td></tr>
+      </tbody>
+    </table>
+
+    <div class="grid-2" style="margin-top:16px">
+      <div class="card">
+        <h3>长任务峰值（每 3 秒次数）</h3>
+        <div class="bars">
+          <div class="bar-row"><span class="bar-label">A 无负载</span><div class="bar-track"><div class="bar-fill" style="width:8%"></div></div><span class="bar-val">5</span></div>
+          <div class="bar-row"><span class="bar-label">B 9 agent 隐性</span><div class="bar-track"><div class="bar-fill" style="width:6%"></div></div><span class="bar-val">4</span></div>
+          <div class="bar-row"><span class="bar-label">C 4 pane 可见</span><div class="bar-track"><div class="bar-fill bad" style="width:66%"></div></div><span class="bar-val">41</span></div>
+          <div class="bar-row"><span class="bar-label">D 面板滑动</span><div class="bar-track"><div class="bar-fill bad" style="width:100%"></div></div><span class="bar-val">62</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>frameP95 峰值（ms）</h3>
+        <div class="bars">
+          <div class="bar-row"><span class="bar-label">A 无负载</span><div class="bar-track"><div class="bar-fill" style="width:18%"></div></div><span class="bar-val">43</span></div>
+          <div class="bar-row"><span class="bar-label">B 9 agent 隐性</span><div class="bar-track"><div class="bar-fill" style="width:10%"></div></div><span class="bar-val">24</span></div>
+          <div class="bar-row"><span class="bar-label">C 4 pane 可见</span><div class="bar-track"><div class="bar-fill bad" style="width:77%"></div></div><span class="bar-val">182</span></div>
+          <div class="bar-row"><span class="bar-label">D 面板滑动</span><div class="bar-track"><div class="bar-fill bad" style="width:100%"></div></div><span class="bar-val">236</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout" style="margin-top:18px">
+      <div class="icon">→</div>
+      <p><b>读法：</b>B 段说明「后台跑子智能体」几乎不要渲染成本；C 段说明「把 4 个流式 pane 显示出来」要；D 段说明「滑动」要得更多。所以优化顺序是：<b>先减少可见 pane 的渲染频率/范围，再谈其它</b>——而这正好是插件节流能碰到的部分。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>02 · 候选评分（怎么选）</h2>
+      <p>五维打分，只看证据与风险；工时不按人天，按「本版能否验收」。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>候选</th><th>解决什么</th><th>证据强度</th><th>风险</th><th>本版</th></tr></thead>
+      <tbody>
+        <tr>
+          <td data-label="候选"><b>P0</b> 归因补强</td>
+          <td data-label="解决">TimerHandler 归属歧义；面板期与聊天期分不开</td>
+          <td data-label="证据"><span class="pill good">强</span> 三处时间源都能自证</td>
+          <td data-label="风险"><span class="pill good">极低</span> 只读，无行为改动</td>
+          <td data-label="本版"><span class="pill good">做 · 默认开</span></td>
+        </tr>
+        <tr>
+          <td data-label="候选"><b>O5</b> 面板期合并</td>
+          <td data-label="解决">面板可见时多 pane 流式渲染争主线程</td>
+          <td data-label="证据"><span class="pill mid">中</span> 面板期长帧真实，但插件只占一部分</td>
+          <td data-label="风险"><span class="pill good">低</span> 只改通知时机，可一键关</td>
+          <td data-label="本版"><span class="pill good">做 · 实验关</span></td>
+        </tr>
+        <tr>
+          <td data-label="候选"><b>O3b</b> 自动补拉降频</td>
+          <td data-label="解决">上翻补页 P95 561ms / 最长 1517ms</td>
+          <td data-label="证据"><span class="pill mid">中</span> 补页确实贵，但与面板滑动无关</td>
+          <td data-label="风险"><span class="pill bad">高</span> 跳过会让首 turn header 延迟</td>
+          <td data-label="本版"><span class="pill bad">后置</span></td>
+        </tr>
+        <tr>
+          <td data-label="候选"><b>O6</b> 非活动 pane 降频</td>
+          <td data-label="解决">C 段：4 个可见 pane 各占一份渲染</td>
+          <td data-label="证据"><span class="pill good">强</span> B vs C 直接对比</td>
+          <td data-label="风险"><span class="pill mid">中</span> 需 store→pane 映射，映射错会误伤可见会话</td>
+          <td data-label="本版"><span class="pill bad">下一版</span></td>
+        </tr>
+        <tr>
+          <td data-label="候选"><b>U1</b> 上游文档</td>
+          <td data-label="解决">webview 合成成本插件无法改</td>
+          <td data-label="证据"><span class="pill good">强</span> 宿主源码 + 长帧样本</td>
+          <td data-label="风险"><span class="pill good">无</span> 只写文档</td>
+          <td data-label="本版"><span class="pill good">做 · 文档</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>03 · 决策树：你该怎么选</h2>
+      <p>先回答一个问题：这一版你最想先拿到「答案」还是「缓解」。</p>
+    </div>
+    <div class="flow">
+      <div class="flow-step measure"><b>你的首要目标是什么？</b><small>只选一个，不要「都要」——一次只改一个变量是本仓库的硬规则</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-split">
+        <div class="flow-step ok"><b>要答案 → 选 B（只做 P0）</b><small>最稳，但这一版没有任何缓解；适合你愿意再等一轮数据。</small></div>
+        <div class="flow-step ok"><b>要答案 + 一次低风险尝试 → 选 A（推荐）</b><small>P0 决定方向，O5 默认关不影响日常；过不了门槛就永久关。</small></div>
+      </div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-split">
+        <div class="flow-step warn"><b>上翻补页的 561ms 更痛 → 选 C</b><small>加 O3b，但要接受首 turn header 可能延迟；验收周期更长。</small></div>
+        <div class="flow-step"><b>认定是宿主问题 → 选 D</b><small>不写代码，只出上游说明；适合你不想再往插件里加东西。</small></div>
+      </div>
+    </div>
+    <div class="callout">
+      <div class="icon">✓</div>
+      <p><b>如果只做一件事：做 P0。</b>它是唯一一个「不做就可能一直猜错」的项；O5 只是顺带试跑。三项里没有任何一项会改变宿主数据、会话内容或默认体验。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>04 · 修复前：成本怎么叠起来的</h2>
+      <p>三条支线共用一个主线程；插件当前只参与节流与观测。</p>
+    </div>
+    <div class="flow">
+      <div class="flow-step"><b>① 主会话运行/回复</b><small>投影提交约 4 次/秒；大 DOM 会话最高 9.9k 节点</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step"><b>② store 通知 → 插件节流</b><small>窗口 120ms / 自适应 200–300ms / 面板常开 300ms；到期用 <code>setTimeout</code> 补发</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-split">
+        <div class="flow-step"><b>③ 主时间线渲染</b><small>每条通知一次渲染，9.9k DOM 下单次 100ms+</small></div>
+        <div class="flow-step warn"><b>③′ 每个可见子智能体 pane 渲染</b><small>C 段实测：4 个 pane 流式输出 → 长任务峰值 41</small></div>
+      </div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step"><b>④ 宿主布局效应</b><small>遮罩同步（6 次样式写 + 几何读）、虚拟化测高、滚动补偿</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step warn"><b>⑤ 主线程排队 ← 面板 webview 滚动/合成</b><small>D 段实测：滑动时 frameP95 236ms、长任务 62 次/3 秒</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step warn"><b>⑥ 长帧 100–1500ms → 面板滑动掉帧</b></div>
+    </div>
+    <p class="flow-note">注：子智能体本身的推理在 agent 运行时里，不进渲染主线程（B 段证明）；进主线程的是「把它们的输出画出来」。</p>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>05 · 修复后：推荐方案怎么改</h2>
+      <p>只加两个开关与一段文档；宿主渲染链路一行不改。</p>
+    </div>
+    <div class="flow">
+      <div class="flow-step ok"><b>① 主会话 / 子智能体运行（不变）</b><small>插件仍只合并通知，不改数据、不改宿主</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step measure"><b>② P0 归因层（默认开，只读）</b><small>每条长帧记录距上次通知/补发/滚动/提交的毫秒数；分类 <code>flush / notify / scroll / other</code>；样本带 <code>paneOpen / panelQuiet</code></small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step ok"><b>③ O5 面板期合并（实验，默认关）</b><small>面板打开：通知窗口 300→400ms、角标 1.8s→3s；面板关闭立即恢复</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step ok"><b>④ 可见 pane 与主时间线的渲染次数下降</b><small>每次渲染成本不变，只是次数变少；预期 -20%~-30%，需 A/B</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step ok"><b>⑤ 主线程给面板 webview 合成让出时间</b><small>插件唯一能影响到那条链路的点</small></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-step measure"><b>⑥ 用 P0 数据判定是否过线</b><small>长帧数或 frameP95 下降 ≥20% → 保留可选；否则永久默认关并如实标注</small></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>06 · 验收与后续分叉</h2>
+      <p>四段对照 + 一张「归因 → 下一步」映射表。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>段</th><th>操作</th><th>看什么</th><th>说明什么</th></tr></thead>
+      <tbody>
+        <tr><td data-label="段">1</td><td data-label="操作">面板关、不操作 30 秒</td><td data-label="看"><code>laf.count / frameP95</code></td><td data-label="说明">大 DOM 会话底噪</td></tr>
+        <tr><td data-label="段">2</td><td data-label="操作">9 个 agent 跑、pane 不显示</td><td data-label="看">同上</td><td data-label="说明">确认「计算不占渲染线程」</td></tr>
+        <tr><td data-label="段">3</td><td data-label="操作">面板开、显示 4 个 pane，不滑动</td><td data-label="看">同上 + <code>paneOpen</code></td><td data-label="说明">可见 pane 的渲染成本</td></tr>
+        <tr><td data-label="段">4</td><td data-label="操作">面板开、快速滑动，O5 关/开各一轮</td><td data-label="看">长帧数、<code>frameP95</code>、<code>longTasks</code></td><td data-label="说明">O5 是否过 20% 门槛</td></tr>
+      </tbody>
+    </table>
+    <table class="accept-table" style="margin-top:14px">
+      <thead><tr><th>P0 分类结果</th><th>说明</th><th>下一步</th></tr></thead>
+      <tbody>
+        <tr><td data-label="结果"><code>flush</code> 最高</td><td data-label="说明">长帧紧跟插件节流补发</td><td data-label="下一步">O5 加严（400→500ms）或面板期暂停通知。</td></tr>
+        <tr><td data-label="结果"><code>notify</code> 最高</td><td data-label="说明">通知未合并直接渲染</td><td data-label="下一步">按 DOM 规模自适应窗口，先量再调。</td></tr>
+        <tr><td data-label="结果"><code>scroll</code> 最高</td><td data-label="说明">滚动处理本身重</td><td data-label="下一步">O3b 自动补拉降频 + 遮罩同步复查。</td></tr>
+        <tr><td data-label="结果"><code>other</code> 最高</td><td data-label="说明">宿主定时器 / webview 合成 / 纯绘制</td><td data-label="下一步">停插件侧优化，集中出 U1 证据。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>07 · 拍板</h2>
+      <p>回复一个字母；未获批准不写实现代码。</p>
+    </div>
+    <div class="choose">
+      <div class="option primary">
+        <span class="rec-badge">推荐</span>
+        <h3>A · P0 + O5 + U1</h3>
+        <p>先有答案，再做一次可回退的低风险尝试。O3b / O6 不进本版。</p>
+        <small>适合：想推进，但不想承担首 turn 完整性风险。</small>
+      </div>
+      <div class="option">
+        <h3>B · 只做 P0</h3>
+        <p>只要答案，不要缓解；等下一轮数据再决定。</p>
+        <small>适合：愿意再等一轮。</small>
+      </div>
+      <div class="option">
+        <h3>C · P0 + O5 + O3b</h3>
+        <p>一次覆盖上翻补页，但要接受首 turn header 延迟的风险。</p>
+        <small>适合：上翻 561ms 比面板滑动更痛。</small>
+      </div>
+      <div class="option">
+        <h3>D · 只出上游说明</h3>
+        <p>不写代码，把 webview 合成证据交给宿主团队。</p>
+        <small>适合：认定这是宿主问题。</small>
+      </div>
+    </div>
+  </section>
+
+  <div class="footnote">
+    本页只定路线与验收，不写实现代码。数据来自 <code>~/.zcode/zcode-lagfix/observe-20261111.jsonl*</code>（500+ 条带长帧归因样本，22:11–22:46，含三轮各 9 个并行子智能体对照）与 ZCode v3.17.2 源码；不读会话正文。相关文件：<code>docs/specs/v0.3.4-loadolder-dom.md</code>、<code>docs/releases/v0.3.4.md</code>、<code>docs/decisions/v0.3.4-route.html</code>。
+  </div>
+</div>
+
+</body>
+</html>

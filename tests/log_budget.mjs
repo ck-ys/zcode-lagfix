@@ -31,16 +31,29 @@ function todayName() {
 }
 
 // files: [{name, mb, ageMs, symlink?, dir?}]；deny: 删除会抛错的文件名集合
-function createInstance(files, deny) {
+// opts.root: DATA_DIR 自身的属性 { symlink?, dir? }，默认普通目录
+function createInstance(files, deny, opts) {
+  const root = Object.assign({ symlink: false, dir: true }, (opts && opts.root) || {});
+  const rootPath = "C:/temp/fake-lagfix-runtime";
+  const isRoot = (p) => String(p).replace(/\\/g, "/").toLowerCase() === rootPath.toLowerCase();
+  const rootStat = () => ({
+    size: 0,
+    mtimeMs: Date.now(),
+    isFile: () => root.dir,
+    isDirectory: () => root.dir,
+    isSymbolicLink: () => !!root.symlink,
+  });
   const map = new Map();
   for (const f of files) {
     map.set(f.name, {
+      name: f.name,
       size: Math.round(f.mb * MB),
       mtimeMs: Date.now() - (f.ageMs || 0),
       symlink: !!f.symlink,
       dir: !!f.dir,
     });
   }
+  let lstatHook = null;
   const unlinked = [];
   const renamed = [];
   const logs = [];
@@ -53,14 +66,17 @@ function createInstance(files, deny) {
     mkdirSync() {},
     readdirSync() { return Array.from(map.keys()); },
     statSync(p) {
+      if (isRoot(p)) return rootStat();
       const f = map.get(base(p));
       if (!f) throw new Error("ENOENT " + p);
       return { size: f.size, mtimeMs: f.mtimeMs, isFile: () => !f.dir };
     },
     // 清理逻辑用 lstat + isFile/isSymbolicLink 做最后一道闸：符号链接、目录必须跳过。
     lstatSync(p) {
+      if (isRoot(p)) return rootStat();
       const f = map.get(base(p));
       if (!f) throw new Error("ENOENT " + p);
+      if (lstatHook) lstatHook(f);
       return {
         size: f.size,
         mtimeMs: f.mtimeMs,
@@ -152,6 +168,7 @@ function createInstance(files, deny) {
     },
     files: map,
     unlinked, renamed, logs, appended, settingsWrites,
+    setLstatHook(fn) { lstatHook = fn; },
     totalBytes() {
       let t = 0;
       for (const [, f] of map) t += f.size;
@@ -221,11 +238,22 @@ const old = 3 * 86400000;              // 3 天前
     const rotated = today + ".1";
     check("超大活动文件先轮转为 .1", inst.files.has(rotated),
       JSON.stringify(Array.from(inst.files.keys())));
+    // v0.3.8：刚轮转的文件有 10 分钟保护，先把 mtime 推到 11 分钟前。
+    const rot = inst.files.get(rotated);
+    if (rot) rot.mtimeMs = Date.now() - 11 * 60 * 1000;
     inst.collect({ collectSec: 5, logMaxMB: 21 });
     await wait(20);
     check("下一轮预算删掉 .1 归档，今天的文件仍在",
       !inst.files.has(rotated) && inst.files.has(today),
       `unlinked=${JSON.stringify(inst.unlinked)}`);
+    check("刚轮转不足 10 分钟的归档不删", (() => {
+      const fresh = createInstance([
+        { name: today, mb: 60, ageMs: 1000 },
+        { name: today + ".1", mb: 5, ageMs: 60 * 1000 },
+      ]);
+      fresh.collect({ collectSec: 5, logMaxMB: 20 });
+      return fresh.files.has(today + ".1");
+    })());
   }
 
   console.log("-- 14 天过期：启动时清理（即使没超预算）--");
@@ -306,6 +334,88 @@ const old = 3 * 86400000;              // 3 天前
       && !inst.unlinked.includes("main.log")
       && inst.files.has(today)
       && inst.files.has("user-data.txt") && inst.files.has("settings.json"),
+      JSON.stringify(inst.unlinked));
+  }
+
+  console.log("-- 非法日期 / 最小年龄 / 目录安全 --");
+  {
+    const inst = createInstance([
+      { name: "observe-99999999.jsonl", mb: 30, ageMs: old },
+      { name: "observe-20261340.jsonl", mb: 30, ageMs: old },
+      { name: "observe-20260229.jsonl", mb: 30, ageMs: old },  // 2026 非闰年
+      { name: "observe-20261101.jsonl", mb: 30, ageMs: old },
+    ]);
+    inst.collect({ collectSec: 5, logMaxMB: 20 });
+    await wait(20);
+    check("名字像日志但日期非法的一律不删",
+      inst.files.has("observe-99999999.jsonl")
+      && inst.files.has("observe-20261340.jsonl")
+      && inst.files.has("observe-20260229.jsonl"),
+      JSON.stringify(inst.unlinked));
+    check("真实日期的旧 observe 正常删除",
+      !inst.files.has("observe-20261101.jsonl"));
+  }
+
+  {
+    const inst = createInstance([
+      { name: "main.log.1", mb: 30, ageMs: 5 * 60 * 1000 },
+      { name: "observe-20261101.jsonl", mb: 30, ageMs: old },
+    ]);
+    inst.collect({ collectSec: 5, logMaxMB: 20 });
+    await wait(20);
+    check("不足 10 分钟的归档不删", inst.files.has("main.log.1"),
+      JSON.stringify(inst.unlinked));
+    inst.files.get("main.log.1").mtimeMs = Date.now() - 11 * 60 * 1000;
+    // 改预算会立即触发一次清理（不受 60s 周期限制）。
+    inst.collect({ collectSec: 5, logMaxMB: 21 });
+    await wait(20);
+    check("超过 10 分钟后才可删", !inst.files.has("main.log.1"),
+      JSON.stringify(inst.unlinked));
+  }
+
+  {
+    const inst = createInstance([
+      { name: "observe-20261101.jsonl", mb: 30, ageMs: old },
+    ], null, { root: { symlink: true } });
+    inst.collect({ collectSec: 5, logMaxMB: 20 });
+    await wait(20);
+    check("运行目录是符号链接时不删任何文件",
+      inst.files.has("observe-20261101.jsonl") && inst.unlinked.length === 0,
+      JSON.stringify(inst.unlinked));
+    check("目录不安全时写一条告警",
+      inst.logs.some((l) => /日志目录不是普通目录/.test(l)), inst.logs.join(" | "));
+  }
+
+  {
+    const inst = createInstance([
+      { name: "observe-20261101.jsonl", mb: 30, ageMs: 20 * 86400000 },
+    ], null, { root: { dir: false } });
+    await wait(20);
+    inst.collect({ collectSec: 5, logMaxMB: 20 });
+    await wait(20);
+    check("运行目录不是目录时 14 天清理与预算清理都跳过",
+      inst.files.has("observe-20261101.jsonl") && inst.unlinked.length === 0,
+      JSON.stringify(inst.unlinked));
+  }
+
+  {
+    const inst = createInstance([
+      { name: "observe-20261101.jsonl", mb: 30, ageMs: old },
+      { name: "observe-20261102.jsonl", mb: 30, ageMs: old - 1000 },
+    ]);
+    const seen = new Map();
+    inst.setLstatHook((f) => {
+      const n = (seen.get(f.name) || 0) + 1;
+      seen.set(f.name, n);
+      // 第一次扫描 30MB；删前复核时变成 5MB → 已回到预算内，不该再删。
+      if (f.name === "observe-20261101.jsonl" && n === 2) f.size = 5 * MB;
+    });
+    inst.collect({ collectSec: 5, logMaxMB: 40 });
+    await wait(20);
+    check("删前发现文件变小并已回到预算内时停止，不多删",
+      inst.unlinked.length === 0
+      && inst.files.has("observe-20261101.jsonl")
+      && inst.files.has("observe-20261102.jsonl"),
       JSON.stringify(inst.unlinked));
   }
 

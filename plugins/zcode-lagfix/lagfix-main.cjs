@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * zcode-lagfix 主进程加载器 v0.3.4（观测 + 渲染通知节流 + 日志预算 + 检查更新）。
+ * zcode-lagfix 主进程加载器 v0.3.8（观测 + 渲染通知节流 + 日志预算与清理加固 + 检查更新）。
  *
  * 由 app.asar 入口尾部的 dynamic import 加载（CommonJS）。
  * 职责：
@@ -35,6 +35,8 @@
   var MAIN_LOG_MAX = 1024 * 1024;   // 超过 1MB 轮转为 main.log.1，保留上一代
   var COLLECT_INTERVAL_MS = 5000;
   var LOG_ROTATE_BYTES = 5 * 1024 * 1024;
+  // v0.3.8：预算删除只碰 10 分钟前的归档，避免和正在写入/刚轮转的文件抢。
+  var LOG_MIN_DELETE_AGE_MS = 10 * 60 * 1000;
 
   var errStreak = 0;
   var disabled = false;
@@ -228,7 +230,7 @@
               var d = appendSample(wc.id, text);
               // 手动「检查更新」：渲染端只置一个内存标记，真正的网络请求在主进程发。
               // dead 样本不带请求，避免已自禁用窗口反复触发。
-              if (d && !d.dead && d.updateCheck === 1) checkUpdate(wc, d.ver);
+              if (d && !d.dead && d.updateCheck === 1) checkUpdate(wc, d.ver, d.updateAuto === 1);
             }
           })
           .catch(function (e) {
@@ -249,6 +251,7 @@
   // 只匹配本插件自己生成的文件名；符号链接、目录、非普通文件一律跳过。
   function sweepOldLogs(days) {
     try {
+      if (!cleanupDirSafe()) return;
       var cutoff = Date.now() - days * 86400000;
       fs.readdirSync(DATA_DIR).forEach(function (name) {
         try {
@@ -270,14 +273,51 @@
   // 不纳入预算的话它会绕过 50MB 上限一直长（终审 P2）。
   var LOG_RE = /^(observe-\d{8}\.jsonl(?:\.\d+)?|(?:main|inject|monitor|install|hook-error|elevated-finalize)\.log(?:\.\d+)?)$/;
   var LIVE_LOG_RE = /^(main|inject|monitor|install|hook-error|elevated-finalize)\.log$/;
+  var OBSERVE_LOG_RE = /^observe-(\d{4})(\d{2})(\d{2})\.jsonl(?:\.\d+)?$/;
   var curLogMaxMB = 50;
   var haveRendererSettings = false;   // 收到过 renderer 设置后才知道真实预算，之前不删日志
   var lastSweepAt = 0;
+
+  // v0.3.8：8 位数字不等于真实日期。只认能 round-trip 的日期，
+  // 避免用户文件 observe-99999999.jsonl / observe-20261340.jsonl 被当旧日志删掉。
+  function validObserveLogName(name) {
+    var m = OBSERVE_LOG_RE.exec(String(name || ""));
+    if (!m) return false;
+    var y = +m[1], mo = +m[2], d = +m[3];
+    if (y < 2020 || y > 2100) return false;
+    var dt = new Date(y, mo - 1, d);
+    return dt.getFullYear() === y && dt.getMonth() === mo - 1 && dt.getDate() === d;
+  }
+
+  // v0.3.8：运行目录本身必须是普通目录。符号链接/junction 下删除会作用到目标目录，
+  // 无法确认目标是谁时整轮跳过；读写日志仍照常，宁可超预算也不隔着链接删。
+  var dataDirSafe = 0;   // 0 未检查，1 安全，-1 拒绝清理
+  function cleanupDirSafe() {
+    if (dataDirSafe === 1) return true;
+    if (dataDirSafe === -1) return false;
+    try {
+      var st = fs.lstatSync(DATA_DIR);
+      if (!st || typeof st.isDirectory !== "function" || !st.isDirectory()
+        || (typeof st.isSymbolicLink === "function" && st.isSymbolicLink())) {
+        dataDirSafe = -1;
+        log("日志目录不是普通目录，已跳过自动清理：" + DATA_DIR);
+        return false;
+      }
+      dataDirSafe = 1;
+      return true;
+    } catch (e) {
+      dataDirSafe = -1;
+      log("无法确认日志目录类型，已跳过自动清理：" + (e && e.message));
+      return false;
+    }
+  }
 
   // 清理只允许操作「DATA_DIR 直接子项 + 本插件白名单文件名 + 普通文件」。
   // 任何一步不满足就返回 null，调用方一律跳过：宁可超预算，也不误删。
   function ownedLogPath(name) {
     if (typeof name !== "string" || !LOG_RE.test(name)) return null;
+    // v0.3.8：observe 文件名必须带真实日期，不能只看 8 位数字。
+    if (name.indexOf("observe-") === 0 && !validObserveLogName(name)) return null;
     var dir = path.resolve(DATA_DIR);
     var full = path.resolve(dir, name);
     if (path.dirname(full) !== dir) return null;   // 防目录穿越/多余路径段
@@ -326,6 +366,7 @@
   function sweepByBudget() {
     try {
       if (!ensureDataDir()) return 0;
+      if (!cleanupDirSafe()) return 0;
       // 14 天保留以前只在启动时跑一次；长期不重启（用户常见的常驻场景）
       // 会让过期文件一直留着。这里每小时补跑一次，成本是一次 readdir。
       var nowTs = Date.now();
@@ -335,6 +376,7 @@
       }
       var maxBytes = Math.max(5, curLogMaxMB) * 1024 * 1024;
       var nowName = path.basename(logFilePath(Date.now()));
+      var minAgeCutoff = nowTs - LOG_MIN_DELETE_AGE_MS;
       var files = [];
       var total = 0;
       fs.readdirSync(DATA_DIR).forEach(function (name) {
@@ -355,8 +397,14 @@
           // 删前复核：名字、路径、普通文件、非符号链接，任何一项变了就跳过。
           var rec = ownedLogStat(files[i].name);
           if (!rec || isLiveLog(files[i].name)) continue;
+          // v0.3.8：刚轮转/刚写入的文件至少保留 10 分钟，避免和写入方抢文件。
+          if (typeof rec.st.mtimeMs !== "number" || rec.st.mtimeMs > minAgeCutoff) continue;
+          // v0.3.8：按当前大小修正总量；文件变小后已回到预算内就不再继续删。
+          var actual = typeof rec.st.size === "number" ? rec.st.size : files[i].size;
+          total += actual - files[i].size;
+          if (total <= maxBytes) break;
           fs.unlinkSync(rec.full);
-          total -= files[i].size;
+          total -= actual;
           removed++;
         } catch (e) {
           // 文件还在磁盘上，不能从 total 里扣掉；否则「不可删文件 > 预算」时
@@ -416,7 +464,7 @@
     // 设置面板可能在用户拖动前后多次改采集间隔：重建定时器即可
     ELECTRON = electron;
 
-    log("v0.3.4 加载器已启动（观测 + 渲染节流 + 大历史保护 + 侧栏/回前台保护 + 卡顿来源定位 + 日志预算 + 检查更新；__lagfixOff 一键还原）");
+    log("v0.3.8 加载器已启动（观测 + 渲染节流 + 大历史保护 + 侧栏/回前台保护 + 卡顿归因 + 补页批量实验 + 自动检查更新/红点 + 日志预算与清理加固；__lagfixOff 一键还原）");
   }
 
   var ELECTRON = null;
@@ -533,15 +581,20 @@
     }
   }
 
-  // ---- 检查更新（手动触发，只在主进程发一次 GitHub Releases 请求） ----
+  // ---- 检查更新（手动或自动触发，只在主进程发 GitHub Releases 请求） ----
   // 渲染端把 updateCheck=1 塞进样本；主进程查完把结果注入 window.__lagfixUpdate。
   // 不带 token、不自动下载、不自动安装；失败只影响面板那一行提示。
+  // v0.3.7：自动检查（updateAuto=1）默认由渲染端开关控制；主进程再按 24h 去重，
+  // 多窗口同时到期也只发一次网络请求，其余窗口复用缓存结果。
   var UPDATE_API = "https://api.github.com/repos/ck-ys/zcode-lagfix/releases";
   var UPDATE_HOST = "api.github.com";
   var UPDATE_HOME = "https://github.com/ck-ys/zcode-lagfix/releases";
   var UPDATE_MAX_BYTES = 2 * 1024 * 1024;
   var UPDATE_TIMEOUT_MS = 10000;
+  var AUTO_UPDATE_MIN_MS = 24 * 60 * 60 * 1000;
   var lastUpdateAt = 0;
+  var lastAutoUpdateAt = 0;
+  var lastUpdateInfo = null;
   var updateInflight = false;
 
   function parseSemver(s) {
@@ -567,14 +620,26 @@
     } catch (e) {}
   }
 
-  function checkUpdate(wc, current) {
+  function checkUpdate(wc, current, auto) {
     var now = Date.now();
+    if (auto) {
+      // 24h 内已有结果：直接回放缓存，不再联网；at 用回放时刻，避免接收端
+      // 把旧结果误判成「本次请求还没回来」而一直显示正在检查。
+      if (lastUpdateInfo && now - lastAutoUpdateAt < AUTO_UPDATE_MIN_MS) {
+        sendUpdate(wc, Object.assign({}, lastUpdateInfo, { at: now }));
+        return;
+      }
+      // 24h 内已经试过但失败了（无缓存），或另一次请求在途：自动检查静默跳过，不弹错误。
+      if (now - lastAutoUpdateAt < AUTO_UPDATE_MIN_MS || updateInflight) return;
+    }
     if (updateInflight || now - lastUpdateAt < 5000) {
+      if (auto) return;   // 自动检查不叠加，也不把“太频繁”当失败塞给用户
       sendUpdate(wc, { status: "error", message: "请求过于频繁，请稍后再试", at: now });
       return;
     }
     updateInflight = true;
     lastUpdateAt = now;
+    if (auto) lastAutoUpdateAt = now;
     var cur = parseSemver(current) || parseSemver("0.0.0");
     // 总时限覆盖连接、重定向与慢速滴流；每跳不再单独重置 10s。
     var deadline = Date.now() + UPDATE_TIMEOUT_MS;
@@ -608,14 +673,18 @@
       }
       log("检查更新：当前 " + current + "，最新 " + best.tag
         + (newer ? "（有新版本）" : "（已是最新）"));
-      sendUpdate(wc, {
+      var info = {
         status: "ok",
         current: current || "",
         latest: best ? best.tag.replace(/^v/, "") : "",
         newer: newer,
         url: (best && best.url) || UPDATE_HOME,
         at: Date.now(),
-      });
+      };
+      // 只缓存成功结果；失败不缓存，但 24h 窗口已开始计时，自动检查不会反复重试。
+      lastAutoUpdateAt = Date.now();
+      lastUpdateInfo = info;
+      sendUpdate(wc, info);
     });
   }
 
