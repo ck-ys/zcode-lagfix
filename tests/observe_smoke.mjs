@@ -806,121 +806,159 @@ check("包装重装后 pace 计数归零",
 writeSettings({ scrollDiagOn: true, loadOlderPaceOn: false });
 winRows.length = 1;             // 还原小窗口，不影响后续用例
 
-console.log("-- v0.3.6 O8：补页批量（默认关） --");
-// 先确认默认关闭，再把观测/O3 都关掉，验证「只开 O8 也能装包装」。
-check("O8 前置：默认关闭", collect().settings.loadOlderPageLimitOn === false);
+console.log("-- v0.4.0 O8b：自适应补页（默认关） --");
+// 先确认默认关闭，再把观测/O3 都关掉，验证「只开 O8b 也能装包装」。
+check("O8b 前置：默认关闭", collect().settings.loadOlderPageLimitOn === false);
 writeSettings({ scrollDiagOn: false, loadOlderPaceOn: false, loadOlderPageLimitOn: false });
 check("三开关全关后 loadOlder 包装卸载", !store.__lagfixLoadOlder);
 writeSettings({ loadOlderPageLimitOn: true });
-check("只开 O8 也会安装 loadOlder 包装", !!store.__lagfixLoadOlder);
-check("只开 O8 时 pace 为 null", collect().pace === null, JSON.stringify(collect().pace));
-const o8HitsBefore = store.loadOlderHits || 0;
-const o8Promise = store.loadOlder();
-check("O8 无参调用替换为 limit=200",
-  JSON.stringify(store.loadOlderArgs) === "[200]", JSON.stringify(store.loadOlderArgs));
-check("O8 返回原 promise（不是新包装的）", o8Promise === store.lastLoadOlderPromise);
-await o8Promise;
-check("O8 只调用原方法一次", (store.loadOlderHits || 0) === o8HitsBefore + 1,
+check("只开 O8b 也会安装 loadOlder 包装", !!store.__lagfixLoadOlder);
+check("只开 O8b 时 pace 为 null", collect().pace === null, JSON.stringify(collect().pace));
+
+// 小窗口：不替换页大小，计 small。
+check("O8b 前置：窗口未超过 3000 行", winRows.length <= 3000, `rows=${winRows.length}`);
+const o8bHitsBefore = store.loadOlderHits || 0;
+const o8bPromise = store.loadOlder();
+check("O8b 小窗口不传 limit",
+  JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
+check("O8b 返回原 promise（不是新包装的）", o8bPromise === store.lastLoadOlderPromise);
+await o8bPromise;
+check("O8b 只调用原方法一次", (store.loadOlderHits || 0) === o8bHitsBefore + 1,
   `hits=${store.loadOlderHits}`);
-const o8Page1 = collect().page;
-check("O8 page 快照：limit=200、installed、applied=1",
-  o8Page1 && o8Page1.limit === 200 && o8Page1.installed === true
-    && o8Page1.applied === 1 && o8Page1.passthrough === 0,
-  JSON.stringify(o8Page1));
+const o8bPage1 = collect().page;
+check("O8b page 快照：120/3000/600、installed、small=1",
+  o8bPage1 && o8bPage1.limit === 120 && o8bPage1.minRows === 3000
+    && o8bPage1.burstMs === 600 && o8bPage1.installed === true
+    && o8bPage1.small === 1 && o8bPage1.applied === 0
+    && o8bPage1.downgraded === 0 && o8bPage1.passthrough === 0,
+  JSON.stringify(o8bPage1));
 // 显式参数必须原样放行，不能被插件覆盖。
 await store.loadOlder(60);
-check("O8 显式 limit 原样放行", JSON.stringify(store.loadOlderArgs) === "[60]",
+check("O8b 显式 limit 原样放行", JSON.stringify(store.loadOlderArgs) === "[60]",
   JSON.stringify(store.loadOlderArgs));
-const o8Page2 = collect().page;
-check("O8 显式参数只计 passthrough，不计 applied",
-  o8Page2 && o8Page2.applied === 1 && o8Page2.passthrough === 1,
-  JSON.stringify(o8Page2));
-// this 语义：调用方给别的接收者时，原方法也必须收到同一个接收者。
-const otherReceiver = { loadOlderHits: 0 };
-await store.loadOlder.call(otherReceiver);
-check("O8 保持 this 语义并仍替换为 200",
-  otherReceiver.loadOlderHits === 1 && JSON.stringify(otherReceiver.loadOlderArgs) === "[200]",
-  `hits=${otherReceiver.loadOlderHits} args=${JSON.stringify(otherReceiver.loadOlderArgs)}`);
-// 同步异常也必须原样抛给调用方；页大小已经替换，计数照实增加。
-const o8AppliedBeforeThrow = collect().page.applied;
-store.loadOlderThrow = true;
-let o8Threw = false;
-try { store.loadOlder(); } catch (e) { o8Threw = true; }
-store.loadOlderThrow = false;
-check("O8 同步异常原样抛出", o8Threw);
-check("O8 同步抛错仍照实计入 applied",
-  collect().page.applied === o8AppliedBeforeThrow + 1,
-  `applied=${collect().page.applied} 期望 ${o8AppliedBeforeThrow + 1}`);
-// 关闭 O8（且观测/O3 都关）→ 包装卸载、下一次无参调用回到宿主默认。
-const cachedO8Wrapper = store.loadOlder;
+const o8bPage2 = collect().page;
+check("O8b 显式参数只计 passthrough，不计 applied",
+  o8bPage2 && o8bPage2.small === 1 && o8bPage2.passthrough === 1,
+  JSON.stringify(o8bPage2));
+
+// 大窗口：从关到开算一轮新实验，首次无参调用取 120 行。
+for (let i = 0; i < 3200; i++) winRows.push({ rowId: "o8b" + i });
 writeSettings({ loadOlderPageLimitOn: false });
-check("关闭 O8 后包装卸载", !store.__lagfixLoadOlder);
+writeSettings({ loadOlderPageLimitOn: true });
+const o8bFreshBig = collect().page;
+check("O8b 从关到开计数与时间戳归零",
+  o8bFreshBig && o8bFreshBig.applied === 0 && o8bFreshBig.downgraded === 0
+    && o8bFreshBig.small === 0 && o8bFreshBig.passthrough === 0,
+  JSON.stringify(o8bFreshBig));
 await store.loadOlder();
-check("关闭 O8 后无参调用不再传 limit",
-  JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
-check("关闭 O8 后 page 为 null", collect().page === null,
+check("O8b 大窗口首次取 120 行",
+  JSON.stringify(store.loadOlderArgs) === "[120]", JSON.stringify(store.loadOlderArgs));
+check("O8b applied=1", collect().page && collect().page.applied === 1,
   JSON.stringify(collect().page));
-// 包装因滚动诊断保留时：关闭 O8 只停止替换，不卸载；重新开启从 0 计数。
-writeSettings({ scrollDiagOn: true, loadOlderPageLimitOn: true });
+// 600ms 内第二次：降回宿主默认 60，不能跳过原方法。
+const o8bBurstHits = store.loadOlderHits || 0;
 await store.loadOlder();
-check("O8 重开前置：已生效 1 次",
-  collect().page && collect().page.applied === 1, JSON.stringify(collect().page));
+check("O8b 连续补页降回默认 60 行",
+  JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
+check("O8b 连续补页仍调用原方法（不跳过）",
+  (store.loadOlderHits || 0) === o8bBurstHits + 1, `hits=${store.loadOlderHits}`);
+const o8bBurstPage = collect().page;
+check("O8b downgraded=1 且 applied 仍为 1",
+  o8bBurstPage && o8bBurstPage.applied === 1 && o8bBurstPage.downgraded === 1,
+  JSON.stringify(o8bBurstPage));
+
+// this 语义：换接收者时，原方法仍需收到同一个接收者；大窗口照常取 120。
+writeSettings({ loadOlderPageLimitOn: false });
+writeSettings({ loadOlderPageLimitOn: true });
+const otherReceiver = { state: { snapshot: { rows: { window: winRows } } } };
+await store.loadOlder.call(otherReceiver);
+check("O8b 保持 this 语义并大窗口取 120",
+  otherReceiver.loadOlderHits === 1 && JSON.stringify(otherReceiver.loadOlderArgs) === "[120]",
+  `hits=${otherReceiver.loadOlderHits} args=${JSON.stringify(otherReceiver.loadOlderArgs)}`);
+// 同步异常必须原样抛给调用方；页大小已决定替换，计数照实增加。
+writeSettings({ loadOlderPageLimitOn: false });
+writeSettings({ loadOlderPageLimitOn: true });
+store.loadOlderThrow = true;
+let o8bThrew = false;
+try { store.loadOlder(); } catch (e) { o8bThrew = true; }
+store.loadOlderThrow = false;
+check("O8b 同步异常原样抛出", o8bThrew);
+check("O8b 同步抛错仍照实计入 applied",
+  collect().page.applied === 1, `applied=${collect().page.applied}`);
+
+// 关闭 O8b（且观测/O3 都关）→ 包装卸载、下一次无参调用回到宿主默认。
+const cachedO8bWrapper = store.loadOlder;
+writeSettings({ loadOlderPageLimitOn: false, scrollDiagOn: false });
+check("关闭 O8b 后包装卸载", !store.__lagfixLoadOlder);
+await store.loadOlder();
+check("关闭 O8b 后无参调用不再传 limit",
+  JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
+check("关闭 O8b 后 page 为 null", collect().page === null,
+  JSON.stringify(collect().page));
+// 包装因滚动诊断保留时：关闭 O8b 只停止替换，不卸载；重新开启从 0 计数。
+writeSettings({ scrollDiagOn: true, loadOlderPageLimitOn: true });
 // 包装释放后宿主若缓存了旧函数引用，也不能继续替换参数（gen 门控）。
-await cachedO8Wrapper.call(store);
+await cachedO8bWrapper.call(store);
 check("释放后旧 wrapper 引用不再替换参数",
   JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
+await store.loadOlder();
+check("O8b 重开前置：已生效 1 次",
+  collect().page && collect().page.applied === 1, JSON.stringify(collect().page));
 // 冻结 store 可能让 release 删不掉 marker；代际不一致时必须重装，不能复用旧 wrapper。
 store.__lagfixLoadOlder.gen = -1;
 writeSettings({ loadOlderPageLimitOn: false });
 writeSettings({ loadOlderPageLimitOn: true });
-const o8StalePage = collect().page;
+const o8bStalePage = collect().page;
 check("过期 marker 不复用：installed=true 且计数归零",
-  o8StalePage && o8StalePage.installed === true && o8StalePage.applied === 0,
-  JSON.stringify(o8StalePage));
+  o8bStalePage && o8bStalePage.installed === true && o8bStalePage.applied === 0,
+  JSON.stringify(o8bStalePage));
 await store.loadOlder();
-check("过期 marker 重装后仍替换为 200",
-  JSON.stringify(store.loadOlderArgs) === "[200]", JSON.stringify(store.loadOlderArgs));
+check("过期 marker 重装后仍替换为 120",
+  JSON.stringify(store.loadOlderArgs) === "[120]", JSON.stringify(store.loadOlderArgs));
 writeSettings({ loadOlderPageLimitOn: false });
-check("关闭 O8 但包装保留时 page 为 null", collect().page === null,
+check("关闭 O8b 但包装保留时 page 为 null", collect().page === null,
   JSON.stringify(collect().page));
 await store.loadOlder();
-check("关闭 O8 但包装保留时不再传 limit",
+check("关闭 O8b 但包装保留时不再传 limit",
   JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
 writeSettings({ loadOlderPageLimitOn: true });
-const o8Reopen = collect().page;
-check("O8 从关到开重新计数",
-  o8Reopen && o8Reopen.applied === 0 && o8Reopen.passthrough === 0,
-  JSON.stringify(o8Reopen));
+const o8bReopen = collect().page;
+check("O8b 从关到开重新计数",
+  o8bReopen && o8bReopen.applied === 0 && o8bReopen.downgraded === 0
+    && o8bReopen.small === 0 && o8bReopen.passthrough === 0,
+  JSON.stringify(o8bReopen));
 await store.loadOlder();
-check("O8 重新开启后立刻恢复替换",
-  JSON.stringify(store.loadOlderArgs) === "[200]", JSON.stringify(store.loadOlderArgs));
-// 暂停观测与 O8 独立：observe=false 时缓解仍生效，计数继续累计。
+check("O8b 重新开启后立刻恢复 120",
+  JSON.stringify(store.loadOlderArgs) === "[120]", JSON.stringify(store.loadOlderArgs));
+// 暂停观测与 O8b 独立：observe=false 时缓解仍生效，计数继续累计。
 writeSettings({ observe: false });
-check("暂停观测时 O8 包装仍在", !!store.__lagfixLoadOlder);
+check("暂停观测时 O8b 包装仍在", !!store.__lagfixLoadOlder);
+writeSettings({ loadOlderPageLimitOn: false });
+writeSettings({ loadOlderPageLimitOn: true });
 await store.loadOlder();
-check("暂停观测时 O8 仍替换为 200", JSON.stringify(store.loadOlderArgs) === "[200]",
+check("暂停观测时 O8b 仍替换为 120", JSON.stringify(store.loadOlderArgs) === "[120]",
   JSON.stringify(store.loadOlderArgs));
-check("暂停期间 O8 计数继续累计",
-  collect().page && collect().page.applied === 2, JSON.stringify(collect().page));
+check("暂停期间 O8b 计数继续累计",
+  collect().page && collect().page.applied === 1, JSON.stringify(collect().page));
 writeSettings({ observe: true });
 // 包装重装后计数归零（换主 store 同口径）。
 writeSettings({ scrollDiagOn: false, loadOlderPaceOn: false, loadOlderPageLimitOn: false });
 check("重装前置：包装已卸载", !store.__lagfixLoadOlder);
 writeSettings({ scrollDiagOn: true, loadOlderPaceOn: false, loadOlderPageLimitOn: true });
-const o8Fresh = collect().page;
-check("重装后 O8 计数归零", o8Fresh && o8Fresh.applied === 0 && o8Fresh.passthrough === 0,
-  JSON.stringify(o8Fresh));
-// 与 O3 叠加：O3 跳过的那次不调用原方法，也不计 O8 的 applied。
-for (let i = 0; i < 3200; i++) winRows.push({ rowId: "o8pace" + i });
+const o8bFresh = collect().page;
+check("重装后 O8b 计数归零",
+  o8bFresh && o8bFresh.applied === 0 && o8bFresh.downgraded === 0
+    && o8bFresh.small === 0 && o8bFresh.passthrough === 0,
+  JSON.stringify(o8bFresh));
+// 与 O3 叠加：O3 跳过的那次不调用原方法，也不计 O8b 的 applied。
 writeSettings({ loadOlderPaceOn: true });
 const bothHitsBefore = store.loadOlderHits || 0;
 paceScroll();
 await store.loadOlder();
 const bothApplied = collect().page.applied;
 paceScroll();
-const bothSkipped = store.loadOlder();
-await Promise.all([bothSkipped]);
-check("O3 跳过时原方法只执行一次，O8 只记一次 applied",
+await store.loadOlder();
+check("O3 跳过时原方法只执行一次，O8b 只记一次 applied",
   (store.loadOlderHits || 0) === bothHitsBefore + 1
     && collect().page.applied === bothApplied
     && bothApplied >= 1,
@@ -1598,7 +1636,7 @@ check("A8：面板不再提供「显示角标」开关", !panelText.includes("�
 check("性能页含「侧栏与回前台」四项",
   ["侧栏与回前台统计", "侧栏开合保护", "面板常开保护", "回前台保护"]
     .every((t) => panelText.includes(t)));
-check("面板版本行是 v0.3.10", panelText.includes("v0.3.10"));
+check("面板版本行是 v0.4.0", panelText.includes("v0.4.0"));
 check("面板不再出现版本号式标题", !panelText.includes("v0.3 性能增强"));
 check("维护页写明日志路径与上限",
   panelText.includes("日志存储路径") && panelText.includes("日志上限"));
@@ -1648,7 +1686,7 @@ check("自动检查把 checkedAt 写入独立 key",
   JSON.stringify(autoKey));
 
 // 模拟主进程注入结果：写入缓存、跨窗口可读，并画出红点。
-window.__lagfixUpdate = { status: "ok", current: "0.3.10", latest: "9.9.9", newer: true,
+window.__lagfixUpdate = { status: "ok", current: "0.4.0", latest: "9.9.9", newer: true,
   url: "https://example.invalid/releases", at: Date.now() };
 window.__lagfixSettings();   // 重建面板 → renderPanelStatus 同步缓存
 panel = documentStub.getElementById("lagfix-settings-panel");
@@ -1662,19 +1700,19 @@ check("维护页显示发现新版本", allText(panel).includes("发现新版本
 check("更新缓存写入独立 key 且含 latest/newer",
   (() => {
     const st = JSON.parse(localStorage.getItem(UPDATE_KEY) || "{}");
-    return st.current === "0.3.10" && st.latest === "9.9.9" && st.newer === true
+    return st.current === "0.4.0" && st.latest === "9.9.9" && st.newer === true
       && typeof st.resultAt === "number";
   })(), localStorage.getItem(UPDATE_KEY));
 
 // 另一个窗口写入缓存：storage 事件应即时更新红点，不需要重建面板。
 const onUpdateStorage = (window._listeners.storage || [])[0];
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.3.10", latest: "10.0.0", newer: true, resultAt: Date.now(),
+  current: "0.4.0", latest: "10.0.0", newer: true, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("跨窗口缓存显示红点", badgeDot.style.display === "inline-block" && panelDot.style.display === "inline-block");
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.3.10", latest: "10.0.0", newer: false, resultAt: Date.now(),
+  current: "0.4.0", latest: "10.0.0", newer: false, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("明确无新版本时红点隐藏", badgeDot.style.display === "none" && panelDot.style.display === "none");
@@ -1682,8 +1720,8 @@ check("明确无新版本时红点隐藏", badgeDot.style.display === "none" && 
 // 版本不匹配 / 同版本 / newer=false 三种脏数据都不能亮红点。
 const dotCases = [
   ["缓存版本与当前版本不一致", { current: "0.3.6", latest: "9.9.9", newer: true }],
-  ["latest 与当前版本相同", { current: "0.3.10", latest: "0.3.10", newer: true }],
-  ["newer 为 false", { current: "0.3.10", latest: "9.9.9", newer: false }],
+  ["latest 与当前版本相同", { current: "0.4.0", latest: "0.4.0", newer: true }],
+  ["newer 为 false", { current: "0.4.0", latest: "9.9.9", newer: false }],
 ];
 for (const [name, st] of dotCases) {
   localStorage.setItem(UPDATE_KEY, JSON.stringify({ ...st, resultAt: Date.now() }));
@@ -1704,7 +1742,7 @@ localStorage.setItem(UPDATE_KEY, JSON.stringify(manualOnlyKey));
 check("关闭自动检查后不再自动请求", collect().updateCheck === 0);
 // 留一份“有新版本”的缓存给 __lagfixOff 清理用例。
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.3.10", latest: "9.9.9", newer: true, resultAt: Date.now(),
+  current: "0.4.0", latest: "9.9.9", newer: true, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("恢复新版本缓存后红点重新显示",
@@ -1833,7 +1871,7 @@ if (upBtn) {
 }
 
 console.log("-- v0.3.9 更新状态：当前版本高于最新发布 --");
-window.__lagfixUpdate = { status: "ok", current: "0.3.10", latest: "0.3.4", newer: false,
+window.__lagfixUpdate = { status: "ok", current: "0.4.0", latest: "0.3.4", newer: false,
   url: "https://example.invalid/releases", at: Date.now() + 5 };
 window.__lagfixSettings();
 panel = documentStub.getElementById("lagfix-settings-panel");
@@ -2446,6 +2484,8 @@ check("默认 loadOlderPageLimitOn=false（实验默认关）", initialSettings.
   `snapshot=${initialSettings.loadOlderPageLimitOn}`);
 check("默认 autoUpdateCheckOn=false（自动检查默认关）", initialSettings.autoUpdateCheckOn === false,
   `snapshot=${initialSettings.autoUpdateCheckOn}`);
+check("默认 timerDiagOn=false（实验默认关）", initialSettings.timerDiagOn === false,
+  `snapshot=${initialSettings.timerDiagOn}`);
 documentStub.hidden = false;   // 后台窗口会走 hiddenSkipOn，通知不会立即 flush
 writeSettings({ throttleOn: true, lafCtxOn: true });
 check("P0 前置：合并刷新已启用并已装到当前 store",
@@ -2576,6 +2616,162 @@ writeSettings({ turnContentVisOn: false });
 check("关闭后属性移除", docEl.getAttribute("data-lagfix-cv") === null,
   `attr=${docEl.getAttribute("data-lagfix-cv")}`);
 
+// ---------- v0.4.0 T1：第三方定时器归因（默认关） ----------
+console.log("-- v0.4.0 T1：第三方定时器归因（默认关） --");
+const t1RealTimeout = globalThis.setTimeout;
+const t1RealInterval = globalThis.setInterval;
+check("T1 前置：默认关闭", collect().settings.timerDiagOn === false,
+  `timerDiagOn=${collect().settings.timerDiagOn}`);
+check("T1 前置：默认样本 timer=null", collect().timer === null,
+  JSON.stringify(collect().timer));
+writeSettings({ timerDiagOn: true });
+check("T1 开启后 setTimeout/setInterval 被替换",
+  globalThis.setTimeout !== t1RealTimeout && globalThis.setInterval !== t1RealInterval
+    && typeof globalThis.setTimeout === "function"
+    && typeof globalThis.setInterval === "function",
+  `timeout=${globalThis.setTimeout === t1RealTimeout} interval=${globalThis.setInterval === t1RealInterval}`);
+const t1On = collect().timer;
+check("T1 开启后样本 supported=1、count=0、detail=[]",
+  t1On && t1On.supported === 1 && t1On.count === 0 && Array.isArray(t1On.detail),
+  JSON.stringify(t1On));
+
+// <50ms 的回调不记录。
+await new Promise((resolve) => {
+  const id = window.setTimeout(() => resolve(), 1);
+  check("T1 保留原始定时器 id", id !== undefined && id !== null, String(id));
+});
+check("T1 短回调不记录", collect().timer.count === 0, JSON.stringify(collect().timer));
+
+// ≥50ms 的超时回调：参数、this、耗时、请求延迟、回调名与调用点都要对。
+// this 由宿主原始实现决定：浏览器为 window，Node 测试环境为该定时器对象本身。
+let t1ArgSum = 0;
+let t1This = null;
+let t1TimerId = null;
+await new Promise((resolve) => {
+  t1TimerId = window.setTimeout(function slowHeartbeat(a, b) {
+    t1This = this;
+    t1ArgSum = a + b;
+    const t0 = performance.now();
+    while (performance.now() - t0 < 60) { /* 占住主线程 */ }
+    resolve();
+  }, 10, 2, 3);
+});
+check("T1 保留回调参数", t1ArgSum === 5, `sum=${t1ArgSum}`);
+check("T1 保留回调 this（宿主原始语义）",
+  t1This === t1TimerId || t1This === globalThis,
+  String(t1This));
+const t1Slow = collect().timer;
+check("T1 记录 ≥50ms 超时回调",
+  t1Slow && t1Slow.count === 1 && t1Slow.max >= 50 && t1Slow.detail.length === 1,
+  JSON.stringify(t1Slow));
+const t1Rec = t1Slow.detail[0] || {};
+check("T1 明细字段：ms/delay/kind/src/invoker",
+  t1Rec.ms >= 50 && t1Rec.delay === 10 && t1Rec.kind === "timeout"
+    && t1Rec.src === "slowHeartbeat"
+    && typeof t1Rec.invoker === "string" && t1Rec.invoker.length > 0
+    && t1Rec.invoker.length <= 120
+    && typeof t1Rec.t === "number",
+  JSON.stringify(t1Rec));
+check("T1 明细未变化时发 []", JSON.stringify(collect().timer.detail) === "[]",
+  JSON.stringify(collect().timer.detail));
+
+// 周期计数：间隔回调按 interval 记录。
+await new Promise((resolve) => {
+  let n = 0;
+  const id = window.setInterval(function slowTick() {
+    const t0 = performance.now();
+    while (performance.now() - t0 < 55) { /* 占住主线程 */ }
+    n++;
+    if (n >= 1) { clearInterval(id); resolve(); }
+  }, 5);
+});
+const t1Int = collect().timer;
+check("T1 记录 ≥50ms 间隔回调",
+  t1Int && t1Int.count >= 1 && t1Int.detail.length >= 1
+    && t1Int.detail[t1Int.detail.length - 1].kind === "interval",
+  JSON.stringify(t1Int));
+
+// 回调抛错：先照实记录，再把原异常抛给宿主（用 uncaughtException 接住，避免测试进程退出）。
+const t1Boom = await new Promise((resolve) => {
+  const onErr = (e) => { process.removeListener("uncaughtException", onErr); resolve(String(e && e.message)); };
+  process.on("uncaughtException", onErr);
+  window.setTimeout(function slowThrowTimer() {
+    const t0 = performance.now();
+    while (performance.now() - t0 < 55) { /* 占住主线程 */ }
+    throw new Error("t1-boom");
+  }, 0);
+});
+check("T1 回调异常仍抛给宿主", t1Boom === "t1-boom", t1Boom);
+const t1ThrowDetail = collect().timer.detail;
+check("T1 抛出前仍记录耗时",
+  t1ThrowDetail.some((d) => d && d.src === "slowThrowTimer" && d.ms >= 50),
+  JSON.stringify(t1ThrowDetail));
+
+// 字符串 handler 原样放行：不包装、不记录，直接交给原方法。
+writeSettings({ timerDiagOn: false });
+check("T1 关闭后恢复原始 setTimeout/setInterval",
+  globalThis.setTimeout === t1RealTimeout && globalThis.setInterval === t1RealInterval,
+  `timeout=${globalThis.setTimeout === t1RealTimeout} interval=${globalThis.setInterval === t1RealInterval}`);
+const t1Spy = { args: null };
+const t1SpyFn = function (...a) { t1Spy.args = a; return 123; };
+globalThis.setTimeout = t1SpyFn;
+writeSettings({ timerDiagOn: true });   // 以 spy 为“原始方法”安装包装
+t1Spy.args = null;
+const t1StrId = window.setTimeout("globalThis.__t1x=1", 7);
+check("T1 字符串 handler 原样放行",
+  t1StrId === 123 && Array.isArray(t1Spy.args)
+    && t1Spy.args[0] === "globalThis.__t1x=1" && t1Spy.args.length === 2
+    && t1Spy.args[1] === 7,
+  `id=${t1StrId} args=${JSON.stringify(t1Spy.args)}`);
+writeSettings({ timerDiagOn: false });  // 先把 spy 还回来
+globalThis.setTimeout = t1RealTimeout;
+globalThis.setInterval = t1RealInterval;
+check("T1 关闭后全局方法恢复为测试原引用",
+  globalThis.setTimeout === t1RealTimeout && globalThis.setInterval === t1RealInterval);
+
+// 明细环最多 10 条。
+writeSettings({ timerDiagOn: true });
+await Promise.all(Array.from({ length: 12 }, () => new Promise((resolve) => {
+  window.setTimeout(() => {
+    const t0 = performance.now();
+    while (performance.now() - t0 < 55) { /* 占住主线程 */ }
+    resolve();
+  }, 0);
+})));
+const t1Ring = collect().timer;
+check("T1 明细环最多 10 条",
+  t1Ring && t1Ring.detail.length === 10 && t1Ring.count >= 12,
+  `detail=${t1Ring && t1Ring.detail.length} count=${t1Ring && t1Ring.count}`);
+
+// 插件自己调度的定时器不进明细：用栈里带 lagfix-observe 的调度点模拟自测噪声。
+collect();   // 清周期计数
+const t1SelfScheduler = {
+  "lagfix-observe": function (fn) { return window.setTimeout(fn, 0); },
+};
+await new Promise((resolve) => {
+  t1SelfScheduler["lagfix-observe"](function selfSlow() {
+    const t0 = performance.now();
+    while (performance.now() - t0 < 60) { /* 占住主线程 */ }
+    resolve();
+  });
+});
+const t1Self = collect().timer;
+check("T1 自己调度的定时器不进明细",
+  t1Self && t1Self.count === 0 && t1Self.detail.length === 0,
+  JSON.stringify(t1Self));
+
+// 暂停观测：恢复原始定时器、样本 timer=null；恢复后按开关重新安装。
+writeSettings({ observe: false });
+check("T1 暂停观测后恢复原始定时器",
+  globalThis.setTimeout === t1RealTimeout && globalThis.setInterval === t1RealInterval,
+  `timeout=${globalThis.setTimeout === t1RealTimeout}`);
+check("T1 暂停样本 timer=null", collect().timer === null, JSON.stringify(collect().timer));
+writeSettings({ observe: true });
+check("T1 恢复观测后按开关重新安装",
+  globalThis.setTimeout !== t1RealTimeout && collect().timer
+    && collect().timer.supported === 1,
+  `timeout=${globalThis.setTimeout === t1RealTimeout}`);
+
 // 给下面的 __lagfixOff 清理用例留一个已打开、保护属性在身上的现场。
 paneFrame.setAttribute("aria-hidden", "false");
 fireMutation(paneFrame, "aria-hidden", "true");
@@ -2688,13 +2884,19 @@ check("一键还原同时关掉 v0.3.6 O8",
   `pageLimit=${saved.loadOlderPageLimitOn}`);
 check("一键还原同时关掉自动检查更新", saved.autoUpdateCheckOn === false,
   `auto=${saved.autoUpdateCheckOn}`);
+check("一键还原同时关掉定时器归因（v0.4.0 T1）", saved.timerDiagOn === false,
+  `timerDiagOn=${saved.timerDiagOn}`);
+check("__lagfixOff 恢复原始定时器并清空样本/明细",
+  globalThis.setTimeout === t1RealTimeout && globalThis.setInterval === t1RealInterval
+    && collect().timer === null && window.__lagfixDiag().timer.detail === 0,
+  `timeout=${globalThis.setTimeout === t1RealTimeout} timer=${JSON.stringify(collect().timer)}`);
 check("__lagfixOff 清掉更新缓存与两处红点",
   localStorage.getItem("lagfix.update.v1") === null
     && documentStub.getElementById("lagfix-overlay-badge-update-dot").style.display === "none"
     && documentStub.getElementById("lagfix-settings-panel-updatedot").style.display === "none",
   `key=${localStorage.getItem("lagfix.update.v1")}`);
 // 还原前已发出的检查可能在还原后才回来：没有新的用户动作，不得写回缓存/红点/状态文案。
-window.__lagfixUpdate = { status: "ok", current: "0.3.10", latest: "9.9.9", newer: true,
+window.__lagfixUpdate = { status: "ok", current: "0.4.0", latest: "9.9.9", newer: true,
   url: "https://example.invalid/releases", at: Date.now() + 1 };
 window.__lagfixSettings();
 check("__lagfixOff 后到达的在途结果不写缓存/红点",
