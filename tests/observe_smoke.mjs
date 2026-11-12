@@ -93,7 +93,7 @@ function makeEl(tag) {
       return String(sel).includes("data-v4-turn-unit") ? (el._turns || []) : [];
     },
     checkVisibility() { return el._visible !== false; },
-    focus() {},
+    focus() { try { documentStub.activeElement = el; } catch (e) {} },
     click() { (el._listeners.click || []).forEach((fn) => fn({ target: el })); },
   };
   listenBag(el);
@@ -131,6 +131,7 @@ const documentStub = {
   body,
   head,
   documentElement: docEl,
+  activeElement: body,
   hidden: false,
   getElementById(id) { return nodes.get(id) || null; },
   createElement: makeEl,
@@ -1547,6 +1548,28 @@ function allText(root) {
   for (const c of root.children || []) out.push(allText(c));
   return out.join(" | ");
 }
+function findCheckbox(root) {
+  if (root.tagName === "INPUT" && root.type === "checkbox"
+    && (root._listeners.change || []).length) return root;
+  for (const c of root.children || []) {
+    const hit = findCheckbox(c);
+    if (hit) return hit;
+  }
+  return null;
+}
+function findLab(root, text) {
+  if (root.className === "lab" && String(root.textContent || "") === text) return root;
+  for (const c of root.children || []) {
+    const hit = findLab(c, text);
+    if (hit) return hit;
+  }
+  return null;
+}
+function findRowCheckbox(root, label) {
+  const lab = findLab(root, label);
+  return lab && lab.parentNode && lab.parentNode.parentNode
+    ? findCheckbox(lab.parentNode.parentNode) : null;
+}
 const panelText = panel ? allText(panel) : "";
 check("弹窗有左侧分类：状态条/观测/性能/维护",
   ["状态条", "观测", "性能", "维护"].every((t) => panelText.includes(t)));
@@ -1575,7 +1598,7 @@ check("A8：面板不再提供「显示角标」开关", !panelText.includes("�
 check("性能页含「侧栏与回前台」四项",
   ["侧栏与回前台统计", "侧栏开合保护", "面板常开保护", "回前台保护"]
     .every((t) => panelText.includes(t)));
-check("面板版本行是 v0.3.8", panelText.includes("v0.3.8"));
+check("面板版本行是 v0.3.9", panelText.includes("v0.3.9"));
 check("面板不再出现版本号式标题", !panelText.includes("v0.3 性能增强"));
 check("维护页写明日志路径与上限",
   panelText.includes("日志存储路径") && panelText.includes("日志上限"));
@@ -1625,7 +1648,7 @@ check("自动检查把 checkedAt 写入独立 key",
   JSON.stringify(autoKey));
 
 // 模拟主进程注入结果：写入缓存、跨窗口可读，并画出红点。
-window.__lagfixUpdate = { status: "ok", current: "0.3.8", latest: "9.9.9", newer: true,
+window.__lagfixUpdate = { status: "ok", current: "0.3.9", latest: "9.9.9", newer: true,
   url: "https://example.invalid/releases", at: Date.now() };
 window.__lagfixSettings();   // 重建面板 → renderPanelStatus 同步缓存
 panel = documentStub.getElementById("lagfix-settings-panel");
@@ -1639,19 +1662,19 @@ check("维护页显示发现新版本", allText(panel).includes("发现新版本
 check("更新缓存写入独立 key 且含 latest/newer",
   (() => {
     const st = JSON.parse(localStorage.getItem(UPDATE_KEY) || "{}");
-    return st.current === "0.3.8" && st.latest === "9.9.9" && st.newer === true
+    return st.current === "0.3.9" && st.latest === "9.9.9" && st.newer === true
       && typeof st.resultAt === "number";
   })(), localStorage.getItem(UPDATE_KEY));
 
 // 另一个窗口写入缓存：storage 事件应即时更新红点，不需要重建面板。
 const onUpdateStorage = (window._listeners.storage || [])[0];
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.3.8", latest: "10.0.0", newer: true, resultAt: Date.now(),
+  current: "0.3.9", latest: "10.0.0", newer: true, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("跨窗口缓存显示红点", badgeDot.style.display === "" && panelDot.style.display === "");
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.3.8", latest: "10.0.0", newer: false, resultAt: Date.now(),
+  current: "0.3.9", latest: "10.0.0", newer: false, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("明确无新版本时红点隐藏", badgeDot.style.display === "none" && panelDot.style.display === "none");
@@ -1659,8 +1682,8 @@ check("明确无新版本时红点隐藏", badgeDot.style.display === "none" && 
 // 版本不匹配 / 同版本 / newer=false 三种脏数据都不能亮红点。
 const dotCases = [
   ["缓存版本与当前版本不一致", { current: "0.3.6", latest: "9.9.9", newer: true }],
-  ["latest 与当前版本相同", { current: "0.3.8", latest: "0.3.8", newer: true }],
-  ["newer 为 false", { current: "0.3.8", latest: "9.9.9", newer: false }],
+  ["latest 与当前版本相同", { current: "0.3.9", latest: "0.3.9", newer: true }],
+  ["newer 为 false", { current: "0.3.9", latest: "9.9.9", newer: false }],
 ];
 for (const [name, st] of dotCases) {
   localStorage.setItem(UPDATE_KEY, JSON.stringify({ ...st, resultAt: Date.now() }));
@@ -1681,11 +1704,85 @@ localStorage.setItem(UPDATE_KEY, JSON.stringify(manualOnlyKey));
 check("关闭自动检查后不再自动请求", collect().updateCheck === 0);
 // 留一份“有新版本”的缓存给 __lagfixOff 清理用例。
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.3.8", latest: "9.9.9", newer: true, resultAt: Date.now(),
+  current: "0.3.9", latest: "9.9.9", newer: true, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("恢复新版本缓存后红点重新显示",
   badgeDot.style.display === "" && panelDot.style.display === "");
+
+console.log("-- v0.3.9 面板重建保留滚动位置 --");
+let contentEl = documentStub.getElementById("lagfix-settings-panel-content");
+check("设置面板内容区有固定 id（滚动容器）", !!contentEl);
+contentEl.scrollTop = 240;
+const panelBeforeToggle = panel;
+const scrollCb = findRowCheckbox(panel, "自动检查更新");
+check("面板内找到会触发重建的开关", !!scrollCb);
+scrollCb.checked = !scrollCb.checked;
+(scrollCb._listeners.change || [])[0]();
+panel = documentStub.getElementById("lagfix-settings-panel");
+const contentAfterToggle = documentStub.getElementById("lagfix-settings-panel-content");
+check("开关重建后面板是新 DOM", !!panel && panel !== panelBeforeToggle);
+check("开关重建后滚动位置保持",
+  !!contentAfterToggle && contentAfterToggle.scrollTop === 240,
+  `scrollTop=${contentAfterToggle && contentAfterToggle.scrollTop}`);
+// 把刚才切换的开关拨回原值，避免影响后续用例；第二次重建仍应保持滚动位置。
+const scrollCbBack = findRowCheckbox(panel, "自动检查更新");
+scrollCbBack.checked = !scrollCbBack.checked;
+(scrollCbBack._listeners.change || [])[0]();
+panel = documentStub.getElementById("lagfix-settings-panel");
+contentEl = documentStub.getElementById("lagfix-settings-panel-content");
+check("第二次重建仍保持滚动位置",
+  !!contentEl && contentEl.scrollTop === 240,
+  `scrollTop=${contentEl && contentEl.scrollTop}`);
+
+console.log("-- v0.3.9 打开/关闭面板的焦点接管与回报 --");
+// 用真实关窗路径（点遮罩）先关掉，再把焦点交给齿轮后重开。
+let maskNow = documentStub.getElementById("lagfix-modal-mask");
+(maskNow._listeners.mousedown || [])[0]({ target: maskNow });
+documentStub.activeElement = gear;
+window.__lagfixSettings();
+panel = documentStub.getElementById("lagfix-settings-panel");
+check("打开面板后焦点进面板容器", documentStub.activeElement === panel,
+  `active=${documentStub.activeElement && documentStub.activeElement.tagName}`);
+
+// Tab 循环：临时给面板两个可聚焦控件（假 DOM 不解析选择器）。
+const panelQsaOrig = panel.querySelectorAll;
+const tabA = makeEl("button");
+const tabB = makeEl("button");
+panel.appendChild(tabA);
+panel.appendChild(tabB);
+panel.querySelectorAll = () => [tabA, tabB];
+const pressTab = (shift) => {
+  const ev = {
+    key: "Tab",
+    shiftKey: !!shift,
+    target: documentStub.activeElement,
+    defaultPrevented: false,
+    preventDefault() { ev.defaultPrevented = true; },
+  };
+  (documentStub._listeners.keydown || []).forEach((fn) => fn(ev));
+  return ev;
+};
+documentStub.activeElement = tabB;
+let tabEv = pressTab(false);
+check("Tab 在最后一个控件时回到第一个",
+  tabEv.defaultPrevented === true && documentStub.activeElement === tabA);
+documentStub.activeElement = tabA;
+tabEv = pressTab(true);
+check("Shift+Tab 在第一个控件时回到最后一个",
+  tabEv.defaultPrevented === true && documentStub.activeElement === tabB);
+documentStub.activeElement = body;
+tabEv = pressTab(false);
+check("焦点不在面板时 Tab 拉回面板第一个控件",
+  tabEv.defaultPrevented === true && documentStub.activeElement === tabA);
+panel.querySelectorAll = panelQsaOrig;
+
+maskNow = documentStub.getElementById("lagfix-modal-mask");
+(maskNow._listeners.mousedown || [])[0]({ target: maskNow });
+check("关闭面板后焦点回到打开前元素", documentStub.activeElement === gear,
+  `active=${documentStub.activeElement && documentStub.activeElement.tagName}`);
+window.__lagfixSettings();   // 给后面的 Esc 用例保留打开现场
+panel = documentStub.getElementById("lagfix-settings-panel");
 
 
 function findButton(root, text) {
@@ -1734,6 +1831,22 @@ if (upBtn) {
     !!upStatus && String(upStatus.textContent).includes("正在检查"),
     `text=${upStatus && upStatus.textContent}`);
 }
+
+console.log("-- v0.3.9 更新状态：当前版本高于最新发布 --");
+window.__lagfixUpdate = { status: "ok", current: "0.3.9", latest: "0.3.4", newer: false,
+  url: "https://example.invalid/releases", at: Date.now() + 5 };
+window.__lagfixSettings();
+panel = documentStub.getElementById("lagfix-settings-panel");
+badgeDot = documentStub.getElementById("lagfix-overlay-badge-update-dot");
+panelDot = documentStub.getElementById("lagfix-settings-panel-updatedot");
+const gtStatus = documentStub.getElementById("lagfix-settings-panel-updatestatus");
+check("当前版本高于最新 Release 时说明发布通道尚未更新",
+  !!gtStatus && String(gtStatus.textContent).includes("高于最新发布")
+  && String(gtStatus.textContent).includes("0.3.4"),
+  `text=${gtStatus && gtStatus.textContent}`);
+check("当前版本高于最新 Release 时不显示红点",
+  badgeDot.style.display === "none" && panelDot.style.display === "none",
+  `badge=${badgeDot.style.display} panel=${panelDot.style.display}`);
 
 const infoBtn = panel ? findButton(panel, "!") : null;
 check("修复项标题后有圆圈感叹号按钮", !!infoBtn);
@@ -1801,6 +1914,48 @@ check("旧 store 实例的 loadOlder 观测已还原",
 check("换 store 后旧会话补页明细不混入新会话",
   window.__lagfixDiag().loadOlderDetail === 0,
   `n=${window.__lagfixDiag().loadOlderDetail}`);
+
+console.log("-- v0.3.9 restoreTarget 只还原自己装的那一层 --");
+const s3Rec = s3.proto.__lagfixThrottle;
+check("前置：s3 原型上的包装记录完整",
+  !!s3Rec && typeof s3Rec.orig === "function" && typeof s3Rec.wrapped === "function");
+const hostOwnSubscribe = function hostOwnSubscribe() { return function () {}; };
+s3.proto.subscribe = hostOwnSubscribe;
+writeSettings({ throttleOn: false });
+check("宿主替换 subscribe 后关闭合并刷新不覆盖宿主实现",
+  s3.proto.subscribe === hostOwnSubscribe && !s3.proto.__lagfixThrottle,
+  `same=${s3.proto.subscribe === hostOwnSubscribe} marker=${!!s3.proto.__lagfixThrottle}`);
+s3.proto.subscribe = s3Rec.orig;
+writeSettings({ throttleOn: true });
+const s3Rec2 = s3.proto.__lagfixThrottle;
+check("重新开启后包装的是恢复后的原实现",
+  !!s3Rec2 && s3Rec2.orig === s3Rec.orig && s3.proto.subscribe === s3Rec2.wrapped);
+writeSettings({ throttleOn: false });
+check("仍是我们包装时正常还原为原实现",
+  s3.proto.subscribe === s3Rec.orig && !s3.proto.__lagfixThrottle,
+  `same=${s3.proto.subscribe === s3Rec.orig} marker=${!!s3.proto.__lagfixThrottle}`);
+writeSettings({ throttleOn: true });
+check("恢复开启供后续用例", !!s3.proto.__lagfixThrottle);
+
+console.log("-- v0.3.9 订阅回调异常只留痕一次 --");
+const listenerErrs = [];
+const realConsoleError = console.error;
+let throwHits = 0;
+let unThrow = null;
+console.error = (...args) => { listenerErrs.push(args.map((x) => String(x)).join(" ")); };
+try {
+  unThrow = s3.store.subscribe(() => { throwHits++; throw new Error("listener-boom"); });
+  s3.store.emit();
+  s3.store.emit();
+  await wait(220);
+} finally {
+  console.error = realConsoleError;
+  if (unThrow) unThrow();
+}
+check("抛错的 listener 两次都被调用（不影响后续通知）", throwHits === 2, `hits=${throwHits}`);
+const listenerErrLines = listenerErrs.filter((s) => s.includes("订阅回调异常"));
+check("订阅回调异常只打印一次", listenerErrLines.length === 1,
+  `lines=${listenerErrLines.length}`);
 
 console.log("-- v0.3.3 侧栏：默认值、检测与 420ms 保护 --");
 // 宿主形状：frame 始终挂载，aria-hidden 表示开合；外层是 react-resizable-panels
@@ -2539,7 +2694,7 @@ check("__lagfixOff 清掉更新缓存与两处红点",
     && documentStub.getElementById("lagfix-settings-panel-updatedot").style.display === "none",
   `key=${localStorage.getItem("lagfix.update.v1")}`);
 // 还原前已发出的检查可能在还原后才回来：没有新的用户动作，不得写回缓存/红点/状态文案。
-window.__lagfixUpdate = { status: "ok", current: "0.3.8", latest: "9.9.9", newer: true,
+window.__lagfixUpdate = { status: "ok", current: "0.3.9", latest: "9.9.9", newer: true,
   url: "https://example.invalid/releases", at: Date.now() + 1 };
 window.__lagfixSettings();
 check("__lagfixOff 后到达的在途结果不写缓存/红点",
