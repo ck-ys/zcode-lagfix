@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ck-ys/zcode-lagfix/tree/plugin-releases"><img src="https://img.shields.io/badge/version-0.3.8-blue.svg" alt="version"></a>
+  <a href="https://github.com/ck-ys/zcode-lagfix/tree/plugin-releases"><img src="https://img.shields.io/badge/version-0.3.9-blue.svg" alt="version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license"></a>
   <a href="#兼容性"><img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey.svg" alt="platform"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.8%2B-3776ab.svg" alt="python"></a>
@@ -57,7 +57,8 @@ ZCode 桌面版**超长会话卡顿**的观测与缓解插件。它做两件事�
 - **v0.3.5**：长帧归因补上上下文——每条 ≥100 毫秒长帧记录距上次通知、补发、滚动、消息提交的时间，并归类为节流补发 / 通知到达 / 滚动 / 其它；样本新增面板开合与「面板期合并是否生效」，报告新增来源分布。另加一项默认关闭的实验「面板常开时进一步合并」（面板期刷新下限 400ms、角标 3s）；右侧预览是 Electron `<webview>`，其绘制成本插件改不了，相关证据只作为上游文档，不包装成已解决。
 - **v0.3.6**：新增默认关闭的实验「补页批量」——自动加载更早历史时，把单次请求的页大小从宿主默认 60 行提到 200 行（仍在上限内），减少同一段历史需要的加载次数。只改请求页大小，不跳过、不删除、不改变顺序；带独立开关，报告显示生效/放行次数。是否进入默认路径取决于实机 A/B，不把「少发请求」直接当成「已不卡」。
 - **v0.3.7**：角标右侧与维护页「检查更新」行新增「有新版本」小红点；新增可选的自动检查更新（默认关闭，开启后 24 小时内最多一次，只请求公开 GitHub Releases，不自动下载/安装、不上报本机数据）。检查结果缓存在本机，跨窗口与重启后仍能看到红点；缓存版本与当前版本不一致、最新版本与当前相同或已是最新时都不显示。
-- **v0.3.8（当前）**：日志清理加固（只删，不覆盖）。只认白名单内的插件日志；`observe-` 日期必须真实，运行目录本身是符号链接/非目录时整轮跳过；最近 10 分钟写入的文件不删；删前重新 `lstat` 复核并按当前大小修正预算。安装器清理临时文件也收紧为只认运行时文件名，不再误碰用户或其它插件的 `*.tmp-<pid>`。
+- **v0.3.8**：日志清理加固（只删，不覆盖）。只认白名单内的插件日志；`observe-` 日期必须真实，运行目录本身是符号链接/非目录时整轮跳过；最近 10 分钟写入的文件不删；删前重新 `lstat` 复核并按当前大小修正预算。安装器清理临时文件也收紧为只认运行时文件名，不再误碰用户或其它插件的 `*.tmp-<pid>`。
+- **v0.3.9（当前）**：设置面板交互修复。点开关触发面板重建后保持原来的滚动位置，不再跳回顶部；打开面板时把键盘焦点收进面板，Tab/Shift+Tab 只在面板内循环，关闭后焦点还给原输入框；「合并刷新」还原时只还原插件自己装的那层 `subscribe`，宿主已替换实现时不覆盖；订阅回调异常每个页面只留一条日志；当前版本高于最新 GitHub Release 时，维护页如实显示「发布通道尚未更新」，不再误报「已是最新」。
 
 ## 遇到问题
 
@@ -476,7 +477,7 @@ python tests/smoke_asar.py      # 合成 asar 夹具，byte 级验证重打包�
 python tests/install_remove.py  # install.py 卸载异常边界：Ctrl+C / 占用 / 插件态写入失败 / 临时文件清理只认运行时文件名（11 项）
 python tests/report_session_diag.py # 报告：会话桶/补页明细/侧栏与回前台/卡顿归因/翻页降频/补页批量/长帧来源分类/暂停回退/关闭边界/坏行（80 项）
 python tests/probe_latency.py   # 外部探针方法有效性：空闲 vs UI 线程占死
-node tests/observe_smoke.mjs    # 渲染端：可见性/角标/节流/滚动诊断/输入延迟/多会话/loadOlder/侧栏与回前台/卡顿归因/长帧上下文/补页批量/更新红点/反馈入口/翻页降频/渲染减负/面板期合并/日志/一键还原（479 项）
+node tests/observe_smoke.mjs    # 渲染端：可见性/角标/节流/滚动诊断/输入延迟/多会话/loadOlder/侧栏与回前台/卡顿归因/长帧上下文/补页批量/更新红点/反馈入口/翻页降频/渲染减负/面板期合并/面板滚动与焦点/还原边界/日志/一键还原（498 项）
 node tests/update_check.mjs     # 主进程检查更新：白名单/重定向/过滤/版本比较/体积上限/注入/自动检查去重（25 项，不联网）
 node tests/log_budget.mjs      # 主进程日志预算：超限删最旧/保留活动文件/14 天清理/符号链接与目录跳过/权限失败/非法日期/最小年龄/目录安全（33 项，假 fs 不写盘）
 ```
