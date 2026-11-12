@@ -48,6 +48,13 @@ def run_pane(rows: list[dict]) -> str:
     return buf.getvalue()
 
 
+def run_scroll(rows: list[dict]) -> str:
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        lr.print_scroll_diag(rows)
+    return buf.getvalue()
+
+
 def main() -> int:
     print("-- _fmt_ts --")
     check("None/0/负数都显示 -",
@@ -585,6 +592,145 @@ def main() -> int:
                                                "invoker": None, "t": None}]}}])
     check("timer 条目坏字段回退且不炸",
           "Traceback" not in out and "anonymous" in out, out)
+
+    # 包装失配必须和「未装上」分开说明。
+    out = run_timer([{"settings": {"timerDiagOn": True},
+                      "timer": {"supported": 0, "lost": 1, "count": 0,
+                                "max": None, "detail": []}}])
+    check("timer lost=1 时说明归因包装已失效",
+          "归因包装已失效" in out and "全局定时器被替换" in out, out)
+
+    print("-- v0.4.2 报告一致性 --")
+    scroll_on = {
+        "settings": {"scrollDiagOn": True, "inputLagOn": True},
+        "scroll": {"p95": 48, "max": 210, "frames": 120, "events": 9,
+                   "anyEvents": 12, "loadOlderCalls": 3, "loadOlderP95": 500,
+                   "loadOlderMax": 7298, "loadOlderErrors": 0,
+                   "mountedTurns": 4, "domPeak": 3200, "lafCount": 2,
+                   "lafMax": 180},
+        "input": {"p95": 32, "max": 90, "samples": 20},
+    }
+    scroll_off = {"settings": {"scrollDiagOn": False, "inputLagOn": False},
+                  "scroll": None, "input": None}
+    out = run_scroll([scroll_on, scroll_off])
+    check("最新样本关闭滚动诊断时明示、不回显旧 P95",
+          "滚动诊断已关闭" in out and "48ms" not in out, out)
+    check("最新样本关闭输入观测时明示、不回显旧 P95",
+          "输入延迟观测已关闭" in out and "32ms" not in out, out)
+
+    paused_scroll = {"settings": {"scrollDiagOn": True, "inputLagOn": True},
+                     "scroll": None, "input": None}
+    out = run_scroll([scroll_on, paused_scroll])
+    check("暂停时滚动数据回退并标注最近一次有效样本",
+          "滚动诊断：窗口内帧 P95=48ms" in out and "（最近一次有效样本）" in out, out)
+    check("暂停时输入数据回退并标注最近一次有效样本",
+          "输入延迟：按键→下一帧 P95=32ms" in out and out.count("（最近一次有效样本）") >= 2, out)
+
+    # 补页明细跨代际：新样本 epoch 不同且明细为空，不能回退到上一轮。
+    old_detail = {
+        "settings": {"scrollDiagOn": True},
+        "scroll": {"p95": 50, "loadOlderEpoch": 1},
+        "loadOlderDetail": [{"t": 1730000001000, "ms": 7298, "ok": True,
+                             "rowsBefore": 60, "rowsAfter": 120, "trigger": "scroll"}],
+    }
+    new_epoch = {
+        "settings": {"scrollDiagOn": True},
+        "scroll": {"p95": 40, "loadOlderEpoch": 2},
+        "loadOlderDetail": [],
+    }
+    out = run_print([old_detail, new_epoch])
+    check("loadOlder 明细跨代际停止回退",
+          "7298ms" not in out and "未记录到补页明细" in out, out)
+
+    # LAF / timer 明细跨代际同理。
+    laf_old = {
+        "settings": {"lafDiagOn": True},
+        "laf": {"supported": 1, "count": 1, "max": 200, "epoch": 1,
+                "detail": [{"t": 1730000099000, "ms": 200, "styleMs": 0,
+                            "scripts": [{"src": "old.js", "invoker": "f", "ms": 200}]}]},
+    }
+    laf_new = {"settings": {"lafDiagOn": True},
+               "laf": {"supported": 1, "count": 0, "max": None, "epoch": 2,
+                       "detail": []}}
+    out = run_laf([laf_old, laf_new])
+    check("LAF 明细跨代际停止回退", "old.js" not in out, out)
+
+    timer_old = {
+        "settings": {"timerDiagOn": True, "observe": True},
+        "timer": {"supported": 1, "count": 1, "max": 96, "epoch": 1,
+                  "detail": [{"t": 1730000099000, "ms": 96, "delay": 100,
+                              "kind": "timeout", "src": "oldTimer", "invoker": "f"}]},
+    }
+    timer_new = {"settings": {"timerDiagOn": True, "observe": True},
+                 "timer": {"supported": 1, "count": 0, "max": None, "epoch": 2,
+                           "detail": []}}
+    out = run_timer([timer_old, timer_new])
+    check("timer 明细跨代际停止回退", "oldTimer" not in out, out)
+
+    # 结构合法但语义越界的时间戳不能让报告崩，也不能显示 1970。
+    check("越界时间戳返回 -",
+          lr._fmt_ts_full(1e300) == "-" and lr._fmt_ts_full(None) == "-"
+          and lr._fmt_ts_full(0) == "-")
+    check("正常时间戳带日期显示",
+          bool(re.fullmatch(r"\d\d-\d\d \d\d:\d\d:\d\d",
+                            lr._fmt_ts_full(1730000099000))))
+    bad_ts = {"settings": {"timerDiagOn": True},
+              "timer": {"supported": 1, "count": 1, "max": 60,
+                        "detail": [{"t": 1e300, "ms": 60, "delay": 0,
+                                    "kind": "timeout", "src": "badTs", "invoker": "f"}]}}
+    out = run_timer([bad_ts])
+    check("t=1e300 不抛异常且显示 -", "Traceback" not in out and "badTs" in out, out)
+
+    # 帧汇总：窗口值与历史值必须分两行，旧样本没有窗口字段时明确标注。
+    with tempfile.TemporaryDirectory(prefix="lagfix-frame-") as td:
+        p = Path(td) / "observe-20261112.jsonl"
+        p.write_text("\n".join(json.dumps({"win": 1, "t": 1, "d": r}) for r in [
+            {"frames": 300, "dt": 5, "frameP95": 40,
+             "frameMax": 816, "frameMaxAll": 816, "frameMaxWindow": 120},
+            {"frames": 300, "dt": 5, "frameP95": 50, "frameMax": 640},
+        ]), "utf-8")
+        old_dir = lr.pi.DATA_DIR
+        old_diag = lr.diagnose
+        old_logs = lr.print_logs
+        buf = io.StringIO()
+        try:
+            lr.pi.DATA_DIR = Path(td)
+            lr.diagnose = lambda: None
+            lr.print_logs = lambda: None
+            with contextlib.redirect_stdout(buf):
+                lr.main()
+        finally:
+            lr.pi.DATA_DIR = old_dir
+            lr.diagnose = old_diag
+            lr.print_logs = old_logs
+        out = buf.getvalue()
+        check("帧汇总优先打印 30s 窗口最长",
+              "单帧最长（30s 窗口）：120ms" in out, out)
+        check("帧汇总另行打印历史最长",
+              "历史最长（attach/切会话以来）：816ms" in out, out)
+
+    with tempfile.TemporaryDirectory(prefix="lagfix-frame-old-") as td:
+        p = Path(td) / "observe-20261112.jsonl"
+        p.write_text(json.dumps(
+            {"win": 1, "t": 1, "d": {"frames": 300, "dt": 5,
+                                     "frameP95": 50, "frameMax": 640}}), "utf-8")
+        old_dir = lr.pi.DATA_DIR
+        old_diag = lr.diagnose
+        old_logs = lr.print_logs
+        buf = io.StringIO()
+        try:
+            lr.pi.DATA_DIR = Path(td)
+            lr.diagnose = lambda: None
+            lr.print_logs = lambda: None
+            with contextlib.redirect_stdout(buf):
+                lr.main()
+        finally:
+            lr.pi.DATA_DIR = old_dir
+            lr.diagnose = old_diag
+            lr.print_logs = old_logs
+        out = buf.getvalue()
+        check("旧样本帧汇总标注历史值",
+              "单帧最长（旧样本为历史值）：640ms" in out, out)
 
     print("== report_session_diag 结果：", "PASS" if ok else "FAIL", "==")
     return 0 if ok else 1

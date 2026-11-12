@@ -1,5 +1,13 @@
 /**
- * zcode-lagfix renderer 观测脚本 v0.4.1
+ * zcode-lagfix renderer 观测脚本 v0.4.2
+ *
+ * v0.4.2（观测口径与包装器生命周期加固，不新增缓解项）：
+ *   - 帧环扩到 30 秒（3600 帧）；窗口最大值与 attach/切会话以来的历史最大值
+ *     分开输出，角标/悬停只看最近 30 秒。
+ *   - subscribe / loadAllOlder marker 记录 {orig, wrapped}，宿主运行期替换实现后
+ *     不复用旧记录、关闭时只还原自己那层；O3 旧 wrapper 用代际门控立即失效。
+ *   - T1 定时器 probe 校验全局 identity，失配时如实上报 lost=1，重装包住宿主实现。
+ *   - 报告侧：滚动/输入关闭态明示、明细带 epoch、异常时间戳安全格式化。
  *
  * v0.4.1（角标更新红点移到齿轮右上角）：
  *   - 红点作为齿轮按钮子元素绝对定位到右上角（6px，带背景色描边），
@@ -149,7 +157,9 @@
   var ACQUIRE_POLL_MS = 2000;
   var ACQUIRE_RETRY_MS = 30000;     // 找不到锚点时降频重试（不永久放弃）
   var ACQUIRE_TIMEOUT_MS = 10 * 60 * 1000;
-  var RING_MAX = 300;
+  // v0.4.2：与 30s 窗口对齐（120Hz × 30s）。旧值 300 在 120Hz 下只有 2.5s，
+  // 会让 P95/角标漏掉 5–30 秒内的尖峰，和“最近 30 秒”的文案不一致。
+  var RING_MAX = 3600;
   var INPUT_RING_MAX = 3600;        // 30s × 120Hz：高频输入不截断 30s 窗口
   var WINDOW_MS = 30000;            // P95 只看最近 30 秒
   var SCROLL_HOLD_MS = 200;         // 滚动后 200ms 内的帧才算「滚动帧」
@@ -182,7 +192,7 @@
   var REFOCUS_WINDOW_MS = 800;     // 回前台帧窗口
   var PANE_SWITCH_DEDUPE_MS = 150; // aria-hidden 与 class 双信号去重
   var REFOCUS_DEDUPE_MS = 500;     // visibilitychange 与 focus 双信号去重
-  var VERSION = "0.4.1";
+  var VERSION = "0.4.2";
   var ERR_LIMIT = 50;
   var OVERLAY_ID = "lagfix-overlay-badge";
   // v0.3.7：更新检查结果的跨窗口缓存 + 自动检查间隔。
@@ -379,6 +389,7 @@
   var loadOlderDetail = [];  // 最近 10 次 loadOlder 调用（只记元数据）
   var detailVersion = 0;     // 每次追加都 +1，防止 t/ms/ok 恰好相同的指纹碰撞
   var lastDetailKey = "";    // 上次随样本发出的明细指纹；未变化时只发 []，避免日志膨胀
+  var loadOlderEpoch = 0;    // v0.4.2：补页明细代际；清空明细时递增，报告不跨代回退
   var domPeak = 0;           // 最近 30s 内采样到的最大 DOM 数
   var domPeakAt = 0;         // 峰值窗口起点
   var domProbeAt = 0;        // 上次 domPeak 采样时间（独立于旧 domAt，避免降频后被冻结）
@@ -434,6 +445,7 @@
   var LAF_MIN_DETAIL_MS = 100;
   var lafDetail = [];         // [{t, ms, styleMs, scripts:[{src, invoker, ms}]}]
   var lafDetailKey = "";      // 上次随样本发出的归因指纹；未变化时只发 []
+  var lafEpoch = 0;           // v0.4.2：长帧明细代际；清空明细时递增，报告不跨代回退
   var lafSupported = false;   // 浏览器是否支持 long-animation-frame 条目
   // v0.3.5 P0：本周期每条 ≥100ms 长帧的来源计数；随采集周期清零。
   var lafCtxCounts = { flush: 0, notify: 0, scroll: 0, other: 0 };
@@ -444,7 +456,9 @@
   var lastTimerDetailVersion = -1;
   var timerCount = 0;         // 本周期 ≥50ms 回调次数
   var timerMax = 0;           // 本周期最长回调耗时
-  var timerProbe = null;      // { timeout, interval, wrappedTimeout, wrappedInterval, ... }
+  var timerProbe = null;      // { active, timeout, interval, wrappedTimeout, wrappedInterval, ... }
+  var timerLost = false;      // v0.4.2：宿主替换/包裹全局定时器后 probe 失配
+  var timerEpoch = 0;         // v0.4.2：明细代际；resetTimerStats() 时递增
 
   function resetLafCtx() {
     lastNotifyAt = 0;
@@ -472,6 +486,20 @@
       }
     }
     if (changed) lafDetailKey = "";
+  }
+
+  // v0.4.2：明细清空的唯一入口。清空时递增 epoch，报告端遇到代际不一致
+  // 立即停止向前回退，避免把上一轮实验的明细贴到当前轮。
+  function clearLafDetail() {
+    lafDetail.length = 0;
+    lafDetailKey = "";
+    lafEpoch++;
+  }
+
+  function clearLoadOlderDetail() {
+    loadOlderDetail.length = 0;
+    lastDetailKey = "";
+    loadOlderEpoch++;
   }
 
   // ---- v0.4.0 T1：第三方定时器归因（只读，默认关） ----
@@ -537,10 +565,19 @@
     lastTimerDetailVersion = -1;
     timerCount = 0;
     timerMax = 0;
+    timerEpoch++;
   }
 
-  function recordTimer(startPerf, startedAt, delay, kind, handler, callerErr) {
+  function timerProbeLive(p) {
+    return !!(p && p.active
+      && window.setTimeout === p.wrappedTimeout
+      && window.setInterval === p.wrappedInterval);
+  }
+
+  function recordTimer(probe, startPerf, startedAt, delay, kind, handler, callerErr) {
     try {
+      // v0.4.2：旧 probe 失配后，在途回调和残留 wrapper 不得再写统计。
+      if (!probe || !probe.active || timerProbe !== probe || !timerProbeLive(probe)) return;
       if (!settings.timerDiagOn || !settings.observe || state.dead) return;
       var ms = Math.round(performance.now() - startPerf);
       if (!(ms >= TIMER_DIAG_MIN_MS)) return;
@@ -565,11 +602,32 @@
 
   function setTimerProbe(on) {
     var want = !!on && !state.dead;
-    if (want && timerProbe) return true;
+    if (want && timerProbe) {
+      if (timerProbeLive(timerProbe)) return true;
+      // v0.4.2：宿主替换/包裹了全局定时器。旧 probe 立即失效，避免继续抓栈；
+      // 若某一侧仍指向旧 wrapper，先还原该侧，避免新包装套旧包装。不覆盖宿主。
+      var old = timerProbe;
+      old.active = false;
+      timerProbe = null;
+      timerLost = true;
+      try {
+        if (window.setTimeout === old.wrappedTimeout) {
+          if (old.hadOwnTimeout) window.setTimeout = old.timeout;
+          else delete window.setTimeout;
+        }
+        if (window.setInterval === old.wrappedInterval) {
+          if (old.hadOwnInterval) window.setInterval = old.interval;
+          else delete window.setInterval;
+        }
+      } catch (e) {}
+      resetTimerStats();
+    }
     if (!want) {
       var p = timerProbe;
       timerProbe = null;
+      timerLost = false;
       if (p) {
+        p.active = false;
         try {
           if (window.setTimeout === p.wrappedTimeout) {
             if (p.hadOwnTimeout) window.setTimeout = p.timeout;
@@ -591,7 +649,17 @@
     var origInterval = window.setInterval;
     var hadOwnTimeout = Object.prototype.hasOwnProperty.call(window, "setTimeout");
     var hadOwnInterval = Object.prototype.hasOwnProperty.call(window, "setInterval");
+    var probe = {
+      active: true,
+      timeout: origTimeout, interval: origInterval,
+      wrappedTimeout: null, wrappedInterval: null,
+      hadOwnTimeout: hadOwnTimeout, hadOwnInterval: hadOwnInterval,
+    };
     var wrappedTimeout = function (handler, delay) {
+      // 旧 probe 失配后在途/残留调用一律直通：不抓栈、不记录、不计数。
+      if (!probe.active || timerProbe !== probe || !timerProbeLive(probe)) {
+        return origTimeout.apply(window, arguments);
+      }
       if (typeof handler !== "function") return origTimeout.apply(window, arguments);
       // 只在调度时抓结构化栈（不格式化），回调确认 ≥50ms 后才读取。
       var callerErr = null;
@@ -602,17 +670,23 @@
       } catch (e) { callerErr = null; }
       var args = Array.prototype.slice.call(arguments, 2);
       var fn = function () {
+        if (!probe.active || timerProbe !== probe || !timerProbeLive(probe)) {
+          return handler.apply(this, args);
+        }
         var startedAt = Date.now();
         var t0 = performance.now();
         try {
           return handler.apply(this, args);
         } finally {
-          recordTimer(t0, startedAt, delay, "timeout", handler, callerErr);
+          recordTimer(probe, t0, startedAt, delay, "timeout", handler, callerErr);
         }
       };
       return origTimeout.apply(window, [fn, delay].concat(args));
     };
     var wrappedInterval = function (handler, delay) {
+      if (!probe.active || timerProbe !== probe || !timerProbeLive(probe)) {
+        return origInterval.apply(window, arguments);
+      }
       if (typeof handler !== "function") return origInterval.apply(window, arguments);
       var callerErr = null;
       try {
@@ -622,22 +696,28 @@
       } catch (e) { callerErr = null; }
       var args = Array.prototype.slice.call(arguments, 2);
       var fn = function () {
+        if (!probe.active || timerProbe !== probe || !timerProbeLive(probe)) {
+          return handler.apply(this, args);
+        }
         var startedAt = Date.now();
         var t0 = performance.now();
         try {
           return handler.apply(this, args);
         } finally {
-          recordTimer(t0, startedAt, delay, "interval", handler, callerErr);
+          recordTimer(probe, t0, startedAt, delay, "interval", handler, callerErr);
         }
       };
       return origInterval.apply(window, [fn, delay].concat(args));
     };
+    probe.wrappedTimeout = wrappedTimeout;
+    probe.wrappedInterval = wrappedInterval;
     try {
       window.setTimeout = wrappedTimeout;
       window.setInterval = wrappedInterval;
     } catch (e) {}
     if (window.setTimeout !== wrappedTimeout || window.setInterval !== wrappedInterval) {
       // 冻结/不可写：回滚已经换上的那一半，不能留下半个包装。
+      probe.active = false;
       try {
         if (window.setTimeout === wrappedTimeout) {
           if (hadOwnTimeout) window.setTimeout = origTimeout;
@@ -650,11 +730,8 @@
       } catch (e2) {}
       return false;
     }
-    timerProbe = {
-      timeout: origTimeout, interval: origInterval,
-      wrappedTimeout: wrappedTimeout, wrappedInterval: wrappedInterval,
-      hadOwnTimeout: hadOwnTimeout, hadOwnInterval: hadOwnInterval,
-    };
+    timerProbe = probe;
+    timerLost = false;
     resetTimerStats();
     return true;
   }
@@ -667,8 +744,12 @@
     if (!settings.timerDiagOn || !settings.observe || state.dead) return null;
     var detail = lastTimerDetailVersion === timerDetailVersion ? [] : timerDetail.slice();
     lastTimerDetailVersion = timerDetailVersion;
+    var live = timerProbeLive(timerProbe);
     return {
-      supported: timerProbe ? 1 : 0,
+      supported: live ? 1 : 0,
+      // v0.4.2：失配和“从未装上”必须分开，否则报告会把假 supported 当成有效归因。
+      lost: (timerLost || (timerProbe && !live)) ? 1 : 0,
+      epoch: timerEpoch,
       count: timerCount,
       max: timerMax || null,
       detail: detail,
@@ -676,13 +757,13 @@
   }
 
   // v0.4.0 T1：插件自己的定时器一律走宿主原始实现，避免观测器测量自己。
-  // T1 开启时主动绕过自己的包装；T1 关闭时仍尊重宿主当前的全局实现（测试/宿主替换）。
+  // v0.4.2：只有 probe 仍有效时才绕行；失配后使用宿主当前实现，尊重替换。
   function lafSetTimeout(fn, ms) {
-    var raw = timerProbe ? timerProbe.timeout : window.setTimeout;
+    var raw = timerProbeLive(timerProbe) ? timerProbe.timeout : window.setTimeout;
     return raw.call(window, fn, ms);
   }
   function lafSetInterval(fn, ms) {
-    var raw = timerProbe ? timerProbe.interval : window.setInterval;
+    var raw = timerProbeLive(timerProbe) ? timerProbe.interval : window.setInterval;
     return raw.call(window, fn, ms);
   }
 
@@ -1185,11 +1266,9 @@
     // 自禁用后不再有下一次 collect，环形窗口与周期计数一并清掉。
     scrollRing.length = 0;
     loadOlderRing.length = 0;
-    loadOlderDetail.length = 0;
-    lastDetailKey = "";
+    clearLoadOlderDetail();
     // v0.3.4：归因环与 CV 属性同样不留痕（state.dead 已置位，syncCvAttr 会移除属性）。
-    lafDetail.length = 0;
-    lafDetailKey = "";
+    clearLafDetail();
     paceInScrollDispatch = false;
     try { syncCvAttr(); } catch (e) {}
     inputRing.length = 0;
@@ -1265,7 +1344,11 @@
   function frameStats() {
     var now = performance.now();
     var vals = windowValues(frameRing, now);
-    return { p50: pctOf(vals, 0.5), p95: pctOf(vals, 0.95), n: vals.length };
+    var mx = null;
+    for (var i = 0; i < vals.length; i++) {
+      if (mx === null || vals[i] > mx) mx = vals[i];
+    }
+    return { p50: pctOf(vals, 0.5), p95: pctOf(vals, 0.95), max: mx, n: vals.length };
   }
 
   // ---- rAF 采样：真实绘制帧间隔 ----
@@ -1749,6 +1832,9 @@
     // 而不是被 sloppy 规则换成 globalThis。保持与原方法完全一致的 this 语义。
     var wrapped = function () {
       "use strict";
+      // v0.4.2：宿主可能缓存了旧 wrapper。释放/换 store/宿主替换实现后，旧引用
+      // 必须彻底直通——不能再执行 O3 跳过、不能再计数或写明细。
+      if (gen !== loadOlderGen) return orig.apply(this, arguments);
       // v0.3.4 O3 触发降频：与观测开关独立（节流/大会话保护同样不依赖 observe）。
       // 只对**滚动触发**的调用降频：宿主还有非滚动补拉——SessionPane 检测到首 turn
       // 缺 header 时 `void lease.store.loadOlder()`，并用 cursor 去重（跳过就不会
@@ -1840,8 +1926,7 @@
     if (loadOlderTarget && loadOlderTarget !== store) {
       releaseLoadOlderProbe();
       // 明细环是“当前主 store”口径：切到新会话后不把上一个会话的补页记录混进来。
-      loadOlderDetail.length = 0;
-      lastDetailKey = "";
+      clearLoadOlderDetail();
     }
     var marker = store.__lagfixLoadOlder;
     // marker 带安装代际：release 在冻结 store 上可能删不掉 marker，代际不一致时
@@ -1854,6 +1939,9 @@
       return true;   // 已包装：复用，不套两层
     }
     if (marker) {
+      // v0.4.2：丢弃旧 wrapper 时立即作废旧代际。宿主缓存了旧函数引用时，
+      // 旧 wrapper 会在入口直通，不再跳过补页/计数。
+      loadOlderGen++;
       // 宿主换过方法：旧 wrapper 已失效。只清理仍指向旧 wrapper 的自有属性，
       // 不覆盖宿主的新实现。
       try {
@@ -2605,14 +2693,8 @@
     return FRAME_TIERS[FRAME_TIERS.length - 1];
   }
 
-  // 最近 30 秒真实帧的最差值。配色只看近期：不能因为历史上一次 788ms
-  // 就一直红（用户实测截图里帧 14ms 却是红点，就是这个原因）。
-  function recentFrameMax() {
-    var vals = windowValues(frameRing, performance.now());
-    var m = 0;
-    for (var i = 0; i < vals.length; i++) if (vals[i] > m) m = vals[i];
-    return m || null;
-  }
+  // 最近 30 秒真实帧的最差值由 frameStats().max 提供：同一窗口只扫一遍，
+  // 避免角标每秒再遍历一次 frameRing（v0.4.2）。
 
   // 所有配色都走这里：面板里的黄/红阈值是唯一口径。
   // 档位/状态只决定文案（"卡死""刚卡过"），不再各自硬编码红黄——
@@ -3133,7 +3215,7 @@
       var stallMs = document.hidden ? 0 : Math.round(dt * 1000) - OVERLAY_TICK_MS;
 
       var fs = frameStats();
-      var rmax = recentFrameMax();
+      var rmax = fs.max;
       var v = verdictOf(fs.p95, stallMs, rmax, commitRate);
 
       var dotEl = document.getElementById(OVERLAY_ID + "-dot");
@@ -3215,7 +3297,8 @@
     if (state.dead) return;   // 自禁用后悬停定时器可能仍在路上，别把浮层又建回来
     var el = ensureStats();
     el.style.display = "block";
-    updateStats(frameStats(), recentFrameMax(), state.lastCommitRate || 0);
+    var fs = frameStats();
+    updateStats(fs, fs.max, state.lastCommitRate || 0);
     positionStats();
   }
 
@@ -4771,14 +4854,36 @@
       : Object.getPrototypeOf(store);
     if (!target || typeof target.loadAllOlder !== "function") return false;
     if (target.__lagfixLoadAll) {
-      fixState.loadTarget = target;
-      fixState.loadOrig = target.__lagfixLoadAll.orig;
-      return true;
+      var m = target.__lagfixLoadAll;
+      // v0.4.2：只在 marker 仍指向我们装的那一层时复用。宿主/其它插件在运行期
+      // 替换 loadAllOlder 后，marker 可能仍在，但方法已经不是我们的；继续复用在
+      // 关闭保护时会把宿主的新实现覆盖回旧 orig。
+      if (typeof m.wrapped === "function" && target.loadAllOlder === m.wrapped) {
+        fixState.loadTarget = target;
+        fixState.loadOrig = m.orig;
+        return true;
+      }
+      // 旧实现/旧 marker 兼容：v0.4.1 的 marker 没有 wrapped，但 wrapper 上
+      // 有自证属性；只有两者都对上才认。
+      if (!m.wrapped && target.loadAllOlder
+        && target.loadAllOlder.__lagfixLoadAllGuard === true) {
+        fixState.loadTarget = target;
+        fixState.loadOrig = m.orig;
+        return true;
+      }
+      try { delete target.__lagfixLoadAll; } catch (e) {}
     }
     if (fixState.loadTarget && fixState.loadTarget !== target) releaseLoadAllGuard();
     var orig = target.loadAllOlder;
-    target.loadAllOlder = makeGuardedLoadAll(orig);
-    target.__lagfixLoadAll = { orig: orig };
+    var wrapped = makeGuardedLoadAll(orig);
+    try { wrapped.__lagfixLoadAllGuard = true; } catch (e) {}
+    target.loadAllOlder = wrapped;
+    try { target.__lagfixLoadAll = { orig: orig, wrapped: wrapped }; } catch (e) {}
+    if (!target.__lagfixLoadAll || target.__lagfixLoadAll.wrapped !== wrapped) {
+      // marker 写不进去（frozen/sealed）：回滚方法，避免下次再包一层后无法识别。
+      try { if (target.loadAllOlder === wrapped) target.loadAllOlder = orig; } catch (e2) {}
+      return false;
+    }
     fixState.loadTarget = target;
     fixState.loadOrig = orig;
     return true;
@@ -4791,7 +4896,11 @@
     if (!target) return;
     try {
       var rec = target.__lagfixLoadAll;
-      if (rec && typeof rec.orig === "function") target.loadAllOlder = rec.orig;
+      // v0.4.2：只还原本插件装的那一层；宿主已替换时保留宿主实现。
+      var ours = rec && (rec.wrapped
+        ? target.loadAllOlder === rec.wrapped
+        : target.loadAllOlder && target.loadAllOlder.__lagfixLoadAllGuard === true);
+      if (ours && typeof rec.orig === "function") target.loadAllOlder = rec.orig;
       delete target.__lagfixLoadAll;
     } catch (e) {}
   }
@@ -4900,11 +5009,20 @@
       fixState.applied = false;
     }
     if (target.__lagfixThrottle) {   // 已装过（例如上一次重试/另一窗口先装）
-      fixState.target = target;
-      fixState.orig = target.__lagfixThrottle.orig;
-      fixState.applied = true;
-      fixState.reason = "";
-      return true;
+      var tm = target.__lagfixThrottle;
+      // v0.4.2：只有 marker 仍指向我们装的那一层才复用。宿主替换 subscribe 后
+      // 旧 marker 可能还在；继续 applied=true 会让面板谎报已生效，实际通知
+      // 已经绕过 wrapper。
+      if (typeof tm.wrapped === "function" && target.subscribe === tm.wrapped
+        && typeof tm.orig === "function") {
+        fixState.target = target;
+        fixState.orig = tm.orig;
+        fixState.applied = true;
+        fixState.reason = "";
+        return true;
+      }
+      try { delete target.__lagfixThrottle; } catch (e) {}
+      fixState.applied = false;
     }
     var orig = target.subscribe;
     var wrapped = makeThrottledSubscribe(orig);
@@ -4945,8 +5063,7 @@
       loadOlderDiagGen++;   // 作废在途回调：不能把关闭前的那次补页写回空环
       scrollRing.length = 0;
       loadOlderRing.length = 0;
-      loadOlderDetail.length = 0;
-      lastDetailKey = "";
+      clearLoadOlderDetail();
       scrollEvents = 0;
       anyScrollEvents = 0;
       loadOlderCalls = 0;
@@ -4971,8 +5088,7 @@
     if (!settings.loadOlderPaceOn || state.dead) paceInScrollDispatch = false;
     // v0.3.4：LoAF 计数随滚动诊断，归因环随 lafDiagOn；两者任一需要才保留观察器。
     if (!settings.lafDiagOn || state.dead) {
-      lafDetail.length = 0;
-      lafDetailKey = "";
+      clearLafDetail();
       paceInScrollDispatch = false;
     }
     // v0.3.5：P0 关闭（或父开关关）时清掉上下文时间戳与周期计数；重新开启从 0 起算。
@@ -5035,10 +5151,8 @@
       syncCvAttr();
       scrollRing.length = 0;
       loadOlderRing.length = 0;
-      loadOlderDetail.length = 0;
-      lastDetailKey = "";
-      lafDetail.length = 0;
-      lafDetailKey = "";
+      clearLoadOlderDetail();
+      clearLafDetail();
       paceInScrollDispatch = false;
       inputRing.length = 0;
       inputPendingAt = 0;
@@ -5336,6 +5450,7 @@
       loadOlderP95: pctOf(loVals, 0.95),
       loadOlderMax: ringMax(loadOlderRing, now),
       loadOlderErrors: loadOlderErrors,
+      loadOlderEpoch: loadOlderEpoch,
       mountedTurns: turns,
       domPeak: domPeak || null,
       lafCount: lafCount,
@@ -5375,6 +5490,7 @@
     lafDetailKey = key;
     return {
       supported: lafSupported ? 1 : 0,
+      epoch: lafEpoch,
       count: lafCount,
       max: lafMax || null,
       // v0.3.5 P0：本周期来源分布；开关关闭时为 null（不假装有数据）。
@@ -5439,7 +5555,8 @@
       return JSON.stringify({
         sid: state.sid, frames: 0, dt: 0,
         commitP50: null, commitP95: null, frameP50: null, frameP95: null,
-        frameMax: null, samples: 0, heapMB: null, dom: null,
+        frameMax: null, frameMaxAll: null, frameMaxWindow: null,
+        samples: 0, heapMB: null, dom: null,
         hidden: document.hidden, dead: true,
         miss: state.missedReason || true, errs: state.errCount,
         settings: cfg, fix: fixSnapshot(),
@@ -5473,7 +5590,8 @@
       return JSON.stringify({
         sid: state.sid, frames: 0, dt: 0,
         commitP50: null, commitP95: null, frameP50: null, frameP95: null,
-        frameMax: null, samples: 0, heapMB: null, dom: null,
+        frameMax: null, frameMaxAll: null, frameMaxWindow: null,
+        samples: 0, heapMB: null, dom: null,
         hidden: document.hidden, dead: false, paused: true,
         miss: false, errs: state.errCount,
         settings: cfg, fix: fixSnapshot(),
@@ -5516,6 +5634,7 @@
         t: Date.now(),
         p95: fs.p95,
         fmax: frameMaxAll || null,
+        fmaxWin: fs.max,
         rate: dtS > 0 ? Math.round((state.frames / dtS) * 10) / 10 : 0,
         lt: longTaskCount,
         heap: heap,
@@ -5538,7 +5657,11 @@
         dt: Math.round(dtS * 100) / 100,
         commitP50: cs.p50, commitP95: cs.p95,
         frameP50: fs.p50, frameP95: fs.p95,
+        // v0.4.2：frameMax 保留旧语义（attach/切会话以来），新增显式历史值与
+        // 30 秒窗口值；报告优先用 frameMaxWindow，旧消费端不受影响。
         frameMax: frameMaxAll || null,
+        frameMaxAll: frameMaxAll || null,
+        frameMaxWindow: fs.max,
         commitMaxAll: state.allTimeMax || null,
         longTasks: longTaskCount, maxLongTask: maxLongTaskMs || null,
         samples: cs.n,
@@ -5572,6 +5695,7 @@
     } catch (e) {
       err();
       return JSON.stringify({ sid: state.sid, frames: 0, dt: 0, dead: false, errs: state.errCount,
+        frameMax: null, frameMaxAll: null, frameMaxWindow: null,
         settings: cfg, fix: fixSnapshot(),
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
         pane: null, refocus: null, laf: null, pace: null,
@@ -5611,16 +5735,20 @@
       primed: state.primed, missed: state.missedReason || state.missed,
       samples: state.ring.length, frameSamples: frameRing.length,
       allTimeMax: state.allTimeMax, frameMaxAll: frameMaxAll,
+      frameMaxWindow: frameStats().max,
       longTaskCount: longTaskCount, maxLongTaskMs: maxLongTaskMs,
       scrollFrames: scrollRing.length, loadOlderCalls: loadOlderCalls,
       loadOlderErrors: loadOlderErrors, inputSamples: inputRing.length,
       sessionBuckets: sessionBuckets.length, sessionPanes: sessionPanes.length,
-      loadOlderDetail: loadOlderDetail.length,
+      loadOlderDetail: loadOlderDetail.length, loadOlderEpoch: loadOlderEpoch,
+      lafEpoch: lafEpoch,
       pace: paceSnapshot(),
       page: pageSnapshot(),
       // 只读摘要：不消费 timerSnapshot 的明细版本，避免把待发明细提前吞掉。
       timer: {
-        supported: timerProbe ? 1 : 0,
+        supported: timerProbeLive(timerProbe) ? 1 : 0,
+        lost: (timerLost || (timerProbe && !timerProbeLive(timerProbe))) ? 1 : 0,
+        epoch: timerEpoch,
         count: timerCount, max: timerMax || null,
         detail: timerDetail.length,
       },

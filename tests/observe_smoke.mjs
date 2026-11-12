@@ -1636,7 +1636,7 @@ check("A8：面板不再提供「显示角标」开关", !panelText.includes("�
 check("性能页含「侧栏与回前台」四项",
   ["侧栏与回前台统计", "侧栏开合保护", "面板常开保护", "回前台保护"]
     .every((t) => panelText.includes(t)));
-check("面板版本行是 v0.4.1", panelText.includes("v0.4.1"));
+check("面板版本行是 v0.4.2", panelText.includes("v0.4.2"));
 check("面板不再出现版本号式标题", !panelText.includes("v0.3 性能增强"));
 check("维护页写明日志路径与上限",
   panelText.includes("日志存储路径") && panelText.includes("日志上限"));
@@ -1702,7 +1702,7 @@ check("自动检查把 checkedAt 写入独立 key",
   JSON.stringify(autoKey));
 
 // 模拟主进程注入结果：写入缓存、跨窗口可读，并画出红点。
-window.__lagfixUpdate = { status: "ok", current: "0.4.1", latest: "9.9.9", newer: true,
+window.__lagfixUpdate = { status: "ok", current: "0.4.2", latest: "9.9.9", newer: true,
   url: "https://example.invalid/releases", at: Date.now() };
 window.__lagfixSettings();   // 重建面板 → renderPanelStatus 同步缓存
 panel = documentStub.getElementById("lagfix-settings-panel");
@@ -1718,19 +1718,19 @@ check("维护页显示发现新版本", allText(panel).includes("发现新版本
 check("更新缓存写入独立 key 且含 latest/newer",
   (() => {
     const st = JSON.parse(localStorage.getItem(UPDATE_KEY) || "{}");
-    return st.current === "0.4.1" && st.latest === "9.9.9" && st.newer === true
+    return st.current === "0.4.2" && st.latest === "9.9.9" && st.newer === true
       && typeof st.resultAt === "number";
   })(), localStorage.getItem(UPDATE_KEY));
 
 // 另一个窗口写入缓存：storage 事件应即时更新红点，不需要重建面板。
 const onUpdateStorage = (window._listeners.storage || [])[0];
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.4.1", latest: "10.0.0", newer: true, resultAt: Date.now(),
+  current: "0.4.2", latest: "10.0.0", newer: true, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("跨窗口缓存显示红点", badgeDot.style.display === "inline-block" && panelDot.style.display === "inline-block");
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.4.1", latest: "10.0.0", newer: false, resultAt: Date.now(),
+  current: "0.4.2", latest: "10.0.0", newer: false, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("明确无新版本时红点隐藏", badgeDot.style.display === "none" && panelDot.style.display === "none");
@@ -1739,8 +1739,8 @@ check("无新版本时齿轮提示恢复为打开设置", badgeGear.title === "�
 // 版本不匹配 / 同版本 / newer=false 三种脏数据都不能亮红点。
 const dotCases = [
   ["缓存版本与当前版本不一致", { current: "0.3.6", latest: "9.9.9", newer: true }],
-  ["latest 与当前版本相同", { current: "0.4.1", latest: "0.4.1", newer: true }],
-  ["newer 为 false", { current: "0.4.1", latest: "9.9.9", newer: false }],
+  ["latest 与当前版本相同", { current: "0.4.2", latest: "0.4.2", newer: true }],
+  ["newer 为 false", { current: "0.4.2", latest: "9.9.9", newer: false }],
 ];
 for (const [name, st] of dotCases) {
   localStorage.setItem(UPDATE_KEY, JSON.stringify({ ...st, resultAt: Date.now() }));
@@ -1761,7 +1761,7 @@ localStorage.setItem(UPDATE_KEY, JSON.stringify(manualOnlyKey));
 check("关闭自动检查后不再自动请求", collect().updateCheck === 0);
 // 留一份“有新版本”的缓存给 __lagfixOff 清理用例。
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.4.1", latest: "9.9.9", newer: true, resultAt: Date.now(),
+  current: "0.4.2", latest: "9.9.9", newer: true, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("恢复新版本缓存后红点重新显示",
@@ -1890,7 +1890,7 @@ if (upBtn) {
 }
 
 console.log("-- v0.3.9 更新状态：当前版本高于最新发布 --");
-window.__lagfixUpdate = { status: "ok", current: "0.4.1", latest: "0.3.4", newer: false,
+window.__lagfixUpdate = { status: "ok", current: "0.4.2", latest: "0.3.4", newer: false,
   url: "https://example.invalid/releases", at: Date.now() + 5 };
 window.__lagfixSettings();
 panel = documentStub.getElementById("lagfix-settings-panel");
@@ -2791,6 +2791,49 @@ check("T1 恢复观测后按开关重新安装",
     && collect().timer.supported === 1,
   `timeout=${globalThis.setTimeout === t1RealTimeout}`);
 
+// v0.4.2：宿主替换 setTimeout 后，probe 必须识别失配，停止抓栈/计数；
+// 再次应用设置时以宿主新实现为 original 重装，关闭时不覆盖宿主。
+const t1WrappedBeforeHost = globalThis.setTimeout;
+const t1HostNewTimeout = function (...args) { return t1RealTimeout.apply(this, args); };
+globalThis.setTimeout = t1HostNewTimeout;
+const t1LostSample = collect().timer;
+check("T1 宿主替换 setTimeout 后 supported=0/lost=1",
+  t1LostSample && t1LostSample.supported === 0 && t1LostSample.lost === 1,
+  JSON.stringify(t1LostSample));
+const t1CountBeforeOld = t1LostSample ? t1LostSample.count : 0;
+await new Promise((resolve) => {
+  t1WrappedBeforeHost(function staleSlow() {
+    const t0 = performance.now();
+    while (performance.now() - t0 < 60) { /* 占住主线程 */ }
+    resolve();
+  }, 0);
+});
+const t1AfterOld = collect().timer;
+check("T1 失配后旧 wrapper 不再计数",
+  t1AfterOld && t1AfterOld.count === t1CountBeforeOld,
+  JSON.stringify(t1AfterOld));
+writeSettings({ timerDiagOn: false });
+check("T1 关闭后恢复宿主替换实现，不覆盖",
+  globalThis.setTimeout === t1HostNewTimeout
+    && globalThis.setInterval === t1RealInterval,
+  `timeoutHost=${globalThis.setTimeout === t1HostNewTimeout}`);
+writeSettings({ timerDiagOn: true });
+const t1Re = collect().timer;
+check("T1 失配后重新应用以宿主实现为 original",
+  t1Re && t1Re.supported === 1 && t1Re.lost === 0
+    && globalThis.setTimeout !== t1HostNewTimeout
+    && globalThis.setTimeout !== t1WrappedBeforeHost,
+  JSON.stringify(t1Re));
+writeSettings({ timerDiagOn: false });
+check("T1 关闭后恢复宿主替换实现，不覆盖（二次）",
+  globalThis.setTimeout === t1HostNewTimeout
+    && globalThis.setInterval === t1RealInterval,
+  `timeoutHost=${globalThis.setTimeout === t1HostNewTimeout}`);
+globalThis.setTimeout = t1RealTimeout;
+globalThis.setInterval = t1RealInterval;
+check("T1 清理后全局引用恢复测试原值",
+  globalThis.setTimeout === t1RealTimeout && globalThis.setInterval === t1RealInterval);
+
 // 给下面的 __lagfixOff 清理用例留一个已打开、保护属性在身上的现场。
 paneFrame.setAttribute("aria-hidden", "false");
 fireMutation(paneFrame, "aria-hidden", "true");
@@ -2918,7 +2961,7 @@ check("__lagfixOff 后齿轮提示不再提有新版本",
   documentStub.getElementById("lagfix-gear").title === "打开设置",
   documentStub.getElementById("lagfix-gear").title);
 // 还原前已发出的检查可能在还原后才回来：没有新的用户动作，不得写回缓存/红点/状态文案。
-window.__lagfixUpdate = { status: "ok", current: "0.4.1", latest: "9.9.9", newer: true,
+window.__lagfixUpdate = { status: "ok", current: "0.4.2", latest: "9.9.9", newer: true,
   url: "https://example.invalid/releases", at: Date.now() + 1 };
 window.__lagfixSettings();
 check("__lagfixOff 后到达的在途结果不写缓存/红点",
@@ -3097,6 +3140,79 @@ check("只重开观测时 pagehide 监听挂回来（P2-4）",
   (window._listeners.pagehide || []).length === 1,
   `pagehide=${(window._listeners.pagehide || []).length}`);
 
+console.log("-- v0.4.2 帧窗口与最大值 --");
+const v42RealNow = Date.now;
+let v42Now = v42RealNow() + 3600000;
+Date.now = () => v42Now;
+const v42Base = v42Now;
+// 先注入一条 39 秒前的 816ms 历史尖峰，再注入 2500 帧近期帧，
+// 然后注入一条 10 秒前的 300ms 尖峰和 625 帧近期帧。
+// 旧 RING_MAX=300 会把 10 秒前的尖峰挤掉；新环保留，窗口最大值为 300，
+// 历史最大值为 816。
+driveFrame(v42Base - 40016);          // 建基线，跨 1 小时的旧间隔被忽略
+driveFrame(v42Base - 39200);          // 816ms，窗口外
+let v42T = v42Base - 50300;
+for (let i = 0; i < 2500; i++) { driveFrame(v42T); v42T += 16; }
+driveFrame(v42Base - 10300);
+driveFrame(v42Base - 10000);          // 300ms，10 秒前
+for (let i = 0; i < 625; i++) driveFrame(v42Base - 9984 + i * 16);
+const v42Diag = window.__lagfixDiag();
+const v42Sample = JSON.parse(window.__lagfixCollect());
+check("v0.4.2 frameRing 保留超过 300 帧（30s 窗口）",
+  v42Diag.frameSamples > 3000,
+  `frameSamples=${v42Diag.frameSamples}`);
+check("v0.4.2 窗口最大值只看最近 30 秒",
+  v42Sample.frameMaxWindow === 300,
+  `window=${v42Sample.frameMaxWindow}`);
+check("v0.4.2 历史最大值保留窗口外尖峰",
+  v42Sample.frameMaxAll === 816 && v42Sample.frameMax === 816,
+  `all=${v42Sample.frameMaxAll} legacy=${v42Sample.frameMax}`);
+check("v0.4.2 frameMaxWindow 与 frameMaxAll 不等",
+  v42Sample.frameMaxWindow !== v42Sample.frameMaxAll,
+  `window=${v42Sample.frameMaxWindow} all=${v42Sample.frameMaxAll}`);
+Date.now = v42RealNow;
+
+console.log("-- v0.4.2 包装器身份校验 --");
+// 前面最后一次 __lagfixOff 已把包装还原，这里等看门狗重新拿到 store 再测。
+writeSettings({ throttleOn: true, bigSessionOn: true });
+await wait(5200);
+const v42Target = s3.proto;
+const v42SubRec = v42Target.__lagfixThrottle;
+const v42LoadRec = v42Target.__lagfixLoadAll;
+check("v0.4.2 前置：subscribe/loadAll 都装上了",
+  !!v42SubRec && typeof v42SubRec.wrapped === "function"
+    && !!v42LoadRec && typeof v42LoadRec.wrapped === "function",
+  `sub=${!!v42SubRec} load=${!!v42LoadRec}`);
+const v42HostSub = function hostNewSubscribe(l) {
+  this._listeners.add(l);
+  return () => { this._listeners.delete(l); };
+};
+const v42HostLoad = function hostNewLoadAll() {
+  this.loadAllCalls = (this.loadAllCalls || 0) + 1;
+  return Promise.resolve({ status: "host-new" });
+};
+v42Target.subscribe = v42HostSub;
+v42Target.loadAllOlder = v42HostLoad;
+await wait(5200);   // 等看门狗（5s）重新核对目标
+check("v0.4.2 宿主替换 subscribe 后重新包装宿主实现",
+  v42Target.subscribe !== v42HostSub
+    && v42Target.__lagfixThrottle
+    && v42Target.__lagfixThrottle.orig === v42HostSub
+    && v42Target.__lagfixThrottle.wrapped === v42Target.subscribe,
+  `sameHost=${v42Target.subscribe === v42HostSub}`);
+check("v0.4.2 宿主替换 loadAllOlder 后重新包装宿主实现",
+  v42Target.loadAllOlder !== v42HostLoad
+    && v42Target.__lagfixLoadAll
+    && v42Target.__lagfixLoadAll.orig === v42HostLoad
+    && v42Target.__lagfixLoadAll.wrapped === v42Target.loadAllOlder,
+  `sameHost=${v42Target.loadAllOlder === v42HostLoad}`);
+writeSettings({ throttleOn: false, bigSessionOn: false });
+check("v0.4.2 关闭后只还原自己那层，subscribe 宿主实现保留",
+  v42Target.subscribe === v42HostSub && !v42Target.__lagfixThrottle,
+  `same=${v42Target.subscribe === v42HostSub} marker=${!!v42Target.__lagfixThrottle}`);
+check("v0.4.2 关闭后只还原自己那层，loadAllOlder 宿主实现保留",
+  v42Target.loadAllOlder === v42HostLoad && !v42Target.__lagfixLoadAll,
+  `same=${v42Target.loadAllOlder === v42HostLoad} marker=${!!v42Target.__lagfixLoadAll}`);
 
 console.log("== 结果：", failures === 0 ? "PASS" : `FAIL(${failures})`, "==");
 process.exit(failures === 0 ? 0 : 1);
