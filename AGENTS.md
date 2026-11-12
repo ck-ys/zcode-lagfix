@@ -225,6 +225,15 @@ v0.3.10 已拍板范围（更新红点可见性，单点修复）：
 - 明确不做：不改检查更新请求、24 小时自动检查、缓存 key、红点判定条件、注入链或其它缓解项。
 - 行为规格见 `docs/specs/v0.3.10-update-dot-visibility.md`；发布说明见 `docs/releases/v0.3.10.md`。
 
+v0.4.0 已拍板范围（推荐 A：T1 + U2 + O8b）：
+
+- T1 第三方定时器归因（`timerDiagOn`，默认关，只读）：包装 `window.setTimeout` / `setInterval` 的函数 handler，只记录单次同步执行 ≥50ms 的明细 `t/ms/delay/kind/src/invoker`；`src` 只留函数名，`invoker` 只留 `basename:line:col` 并截断 120；环 10 条、未变化发 `[]`；`count/max` 周期口径。不改时机/参数/返回值/异常；字符串 handler 原样放行；插件自己的定时器统一走安装前原始方法（`lafSetTimeout`/`lafSetInterval`），不测自己；调用栈命中 `lagfix-(observe|main)` 的外部调度也跳过。关闭/暂停/自禁用/`__lagfixOff()` 四条路径恢复原引用并清空。
+- O8b 自适应补页（`loadOlderPageLimitOn`，默认关，实验）：常量 120 行 / 3000 行门槛 / 600ms 连续窗口；只对无参调用且窗口 >3000 行生效；600ms 内第二次回到宿主默认 60；小窗口/行数不可读按 60；显式参数原样放行；**不跳过**、不合并/缓存/删除/改序，保留 `this`/Promise/异常/`loadingOlder`/`canLoadOlder`。计数 `applied/downgraded/small/passthrough`，从关到开/换 store/自禁用/`__lagfixOff()` 清零，暂停观测不清零。替代 v0.3.6 固定 200 行。
+- U2 共存文档：zusage 1.5.17 每 100ms `getState()` 深拷贝 6868 行（≈86ms/次）是已确认的卡顿源，1.5.18 已修（#309）；README/发布说明写清证据与升级建议，不声称插件已修上游。
+- 报告：新增 `timer` 段（关闭/暂停/未装上/0 条分别说明；明细与按回调名聚合 top3）；补页段显示 120 与四类计数，旧样本只显示已有字段。
+- 明确不做：不修改/延迟/取消定时器，不读回调参数或内容；不跳过补页、不合并分页；不改注入链、消息/会话/工具结果；不读 `db.sqlite`、不开 CDP、不联网上报。
+- A/B 门槛：O8b 调用次数下降 ≥30%，补页总耗时或滚动 P95/长任务不退化 >10%，锚点漂移 ≤48px，DOM 峰值增加 ≤20%；未过线保持默认关闭，调用次数也没明显下降则退役该项。行为规格见 `docs/specs/v0.4.0-t1-timer-attribution.md`、`docs/specs/v0.4.0-o8b-adaptive-page.md`；发布说明见 `docs/releases/v0.4.0.md`。
+
 ## 7. 版本与发布
 
 每次版本变更必须同步以下位置，缺一不可：
