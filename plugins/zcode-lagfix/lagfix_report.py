@@ -659,6 +659,9 @@ def print_laf_diag(rows: list[dict]) -> None:
     page_enabled = newest_settings.get("loadOlderPageLimitOn")
     if page_enabled is False:
         print(f"  {INFO} 补页批量已关闭（实验项，默认关闭）")
+    elif page_enabled is None:
+        # 降级/混合版本日志：最新样本没有该设置，不能越过它回显旧计数。
+        print(f"  {INFO} 本版本未记录补页批量（旧样本）")
     elif page_no_data:
         print(f"  {INFO} 最新样本没有补页计数（自禁用或序列化失败），不显示更早的计数")
     elif page_row is not None:

@@ -482,6 +482,10 @@ def main() -> int:
                    {"settings": {"loadOlderPageLimitOn": True}, "page": None}])
     check("最新样本 page=null 时不回显旧计数",
           "已生效 12 次" not in out and "没有补页计数" in out, out)
+    # 降级/混合版本日志：最新样本没有该设置，也不能回显旧的 page 计数。
+    out = run_laf([page_ok, {"settings": {}, "ver": "0.3.5"}])
+    check("最新样本无该设置时不回显旧计数",
+          "本版本未记录补页批量" in out and "已生效 12 次" not in out, out)
     # 旧样本没有该字段。
     out = run_laf([{"settings": {}, "ver": "0.3.5"}])
     check("旧样本无 page 字段时提示本版本未记录",

@@ -868,6 +868,17 @@ check("O8 重开前置：已生效 1 次",
 await cachedO8Wrapper.call(store);
 check("释放后旧 wrapper 引用不再替换参数",
   JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
+// 冻结 store 可能让 release 删不掉 marker；代际不一致时必须重装，不能复用旧 wrapper。
+store.__lagfixLoadOlder.gen = -1;
+writeSettings({ loadOlderPageLimitOn: false });
+writeSettings({ loadOlderPageLimitOn: true });
+const o8StalePage = collect().page;
+check("过期 marker 不复用：installed=true 且计数归零",
+  o8StalePage && o8StalePage.installed === true && o8StalePage.applied === 0,
+  JSON.stringify(o8StalePage));
+await store.loadOlder();
+check("过期 marker 重装后仍替换为 200",
+  JSON.stringify(store.loadOlderArgs) === "[200]", JSON.stringify(store.loadOlderArgs));
 writeSettings({ loadOlderPageLimitOn: false });
 check("关闭 O8 但包装保留时 page 为 null", collect().page === null,
   JSON.stringify(collect().page));

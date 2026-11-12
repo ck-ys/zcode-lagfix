@@ -1535,7 +1535,10 @@
       lastDetailKey = "";
     }
     var marker = store.__lagfixLoadOlder;
-    if (marker && marker.wrapped && store.loadOlder === marker.wrapped) {
+    // marker 带安装代际：release 在冻结 store 上可能删不掉 marker，代际不一致时
+    // 必须重装；直接复用会让已过期的 wrapper 永远跳过替换，却仍显示 installed=true。
+    if (marker && marker.wrapped && marker.gen === loadOlderGen
+      && store.loadOlder === marker.wrapped) {
       loadOlderTarget = store;
       paceStats = marker.pace || null;   // v0.3.4：复用已包装时恢复计数归属
       pageStats = marker.page || null;   // v0.3.6：O8 计数同样恢复
@@ -1569,7 +1572,7 @@
     if (store.loadOlder !== wrapped) return false;
     try {
       // v0.3.4：pace 随 marker 存亡——marker 命中分支据此恢复 paceStats。
-      store.__lagfixLoadOlder = { orig: orig, hadOwn: hadOwn, wrapped: wrapped, pace: paceOf(wrapped), page: pageOf(wrapped) };
+      store.__lagfixLoadOlder = { orig: orig, hadOwn: hadOwn, wrapped: wrapped, pace: paceOf(wrapped), page: pageOf(wrapped), gen: loadOlderGen };
     } catch (e2) {
       // 方法已替换但 marker 写不进去（不可扩展 store）：回滚方法，避免下次
       // 再包一层后既无法识别也无法还原。
