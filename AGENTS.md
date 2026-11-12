@@ -188,6 +188,15 @@ v0.3.6 已拍板范围（推荐 A：O8 补页批量，默认关闭的实验）�
 - 明确不做：O3 行为改动、O3b 自动补拉降频、O6/O7 隐藏 pane 策略、预览 HTML 优化；不折叠/不隐藏任何内容；不改消息、会话、工具结果；不读 `db.sqlite`；不开 CDP；不联网。
 - A/B 门槛：同一会话、同一段历史、同一滚动路径做关→开→关至少 3 轮；补页次数下降 ≥50%（目标约 -66%），且补页总阻塞或滚动 P95/长任务下降 ≥20%，顶部空白 ≤300ms、锚点漂移 ≤48px、DOM 峰值不增加 >20%；未过线保持默认关闭并如实标注。行为规格见 `docs/specs/v0.3.6-loadolder-page.md`；拍板页见 `docs/decisions/v0.3.6-loadolder-page.html`。
 
+v0.3.7 已拍板范围（更新提醒：小红点 + 可选自动检查）：
+
+- U2 有新版本小红点：检查结果缓存在 `localStorage["lagfix.update.v1"]`（只含版本号、`newer`、release 链接、时间戳），跨窗口与重启保留；仅当 `newer===true`、缓存 `current===VERSION` 且 `latest!==VERSION` 时，在角标右侧（文字与齿轮之间）与维护页「检查更新」行显示红点。缓存版本不一致、`latest` 与当前相同、`newer=false` 一律不显示。
+- U3 自动检查更新（`autoUpdateCheckOn`，默认关）：开启后 ZCode 启动/窗口打开时最多检查一次，`checkedAt` 写本机，24 小时内不重复；主进程再按 24 小时去重并缓存成功结果，多窗口同时到期只发一次网络请求。只请求公开 GitHub Releases（`api.github.com`、HTTPS、最多 2 跳、10 秒总时限、2MB 上限），不带 token，不自动下载/安装，不上报本机数据。
+- 手动检查保持原样：点击后置 `updateCheckRequested` 并清 `updateCheckAuto`；样本带 `updateAuto=0/1`。`__lagfixOff()` 关闭自动检查、清更新缓存与两处红点、清在途标记；手动按钮仍可用。
+- 反馈入口（U4）：维护页「反馈问题」按钮只打开固定 GitHub issue 模板（优先 `window.zcode.openExternal`，失败退回 `window.open`）；README 增加「遇到问题」章节，issue 模板要求 `/lagfix report`、`main.log` 与最近一个 `observe-*.jsonl`。插件不自动读取或上传日志。
+- 明确不做：自动下载、自动安装、自动重启、后台常驻轮询、把更新结果写进会话或日志正文；不改注入链与其他缓解项。
+- 行为规格见 `docs/specs/v0.3.7-update-dot.md`；发布说明见 `docs/releases/v0.3.7.md`。
+
 ## 7. 版本与发布
 
 每次版本变更必须同步以下位置，缺一不可：
