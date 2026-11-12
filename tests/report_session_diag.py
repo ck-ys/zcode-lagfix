@@ -242,6 +242,12 @@ def main() -> int:
             lr.print_laf_diag(rows2)
         return buf.getvalue()
 
+    def run_timer(rows2):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            lr.print_timer_diag(rows2)
+        return buf.getvalue()
+
     laf_entry = {
         "t": 1730000099000, "ms": 812, "styleMs": 143,
         "scripts": [
@@ -448,25 +454,38 @@ def main() -> int:
     out = run_laf([bad_ctx])
     check("ctx/paneOpen 坏形状不炸", "Traceback" not in out, out)
 
-    print("-- v0.3.6 O8 补页批量 --")
+    print("-- v0.4.0 O8b 自适应补页 --")
     page_ok = {"settings": {"loadOlderPageLimitOn": True},
-               "page": {"limit": 200, "installed": True, "applied": 12, "passthrough": 3}}
+               "page": {"limit": 120, "minRows": 3000, "burstMs": 600,
+                        "installed": True, "applied": 12, "downgraded": 5,
+                        "small": 2, "passthrough": 3}}
     out = run_laf([page_ok])
-    check("page 正常形状打印页大小与生效/放行次数",
-          "补页批量（实验）：每页最多 200 行" in out
-          and "已生效 12 次" in out and "显式参数放行 3 次" in out, out)
+    check("page 正常形状打印页大小与四类计数",
+          "补页批量（实验）：每页最多 120 行" in out
+          and "已生效 12 次" in out and "连续补页降回 60 行 5 次" in out
+          and "窗口未超过 3000 行按 60 行 2 次" in out
+          and "显式参数放行 3 次" in out, out)
+    # 旧样本（v0.3.6，200 行、没有 downgraded/small）只显示已有字段。
+    out = run_laf([{"settings": {"loadOlderPageLimitOn": True},
+                    "page": {"limit": 200, "installed": True,
+                             "applied": 4, "passthrough": 1}}])
+    check("旧 page 样本不把缺失字段当 0",
+          "每页最多 200 行" in out and "已生效 4 次" in out
+          and "显式参数放行 1 次" in out
+          and "降回 60 行" not in out and "按 60 行" not in out, out)
     # 包装没装上：必须明说计数不可用，不能显示成 0 次生效。
     out = run_laf([{"settings": {"loadOlderPageLimitOn": True},
-                    "page": {"limit": 200, "installed": False,
+                    "page": {"limit": 120, "installed": False,
                              "applied": 0, "passthrough": 0}}])
     check("installed=false 时提示包装尚未装上",
           "包装尚未装上，计数不可用" in out, out)
     # 开关开着但还没发生过无参补页：要明确提示，不能让人以为已生效。
     out = run_laf([{"settings": {"loadOlderPageLimitOn": True},
-                    "page": {"limit": 200, "installed": True,
-                             "applied": 0, "passthrough": 0}}])
-    check("page applied=0 时提示还没有无参补页调用",
-          "还没有无参补页调用" in out, out)
+                    "page": {"limit": 120, "installed": True,
+                             "applied": 0, "downgraded": 0, "small": 1,
+                             "passthrough": 0}}])
+    check("page applied=0 时提示还没有大窗口无参补页",
+          "还没有大窗口无参补页" in out, out)
     # 关闭态优先于旧 page 数据：不能拿旧计数冒充当前状态。
     out = run_laf([page_ok,
                    {"settings": {"loadOlderPageLimitOn": False}, "page": None}])
@@ -496,8 +515,76 @@ def main() -> int:
     out = run_laf([{"settings": {"loadOlderPageLimitOn": True},
                     "page": {"limit": "many", "applied": -3, "passthrough": None}}])
     check("page 坏字段回退为默认值且不炸",
-          "每页最多 200 行" in out and "已生效 0 次" in out
+          "每页最多 120 行" in out and "已生效 0 次" in out
           and "显式参数放行 0 次" in out and "Traceback" not in out, out)
+
+    print("-- v0.4.0 T1 第三方定时器归因 --")
+    timer_on = {
+        "settings": {"timerDiagOn": True, "observe": True},
+        "timer": {"supported": 1, "count": 2, "max": 96, "detail": [
+            {"t": 1730000099000, "ms": 96, "delay": 100, "kind": "interval",
+             "src": "bridgeTick", "invoker": "bridgeTick (overlay.js:13440:5)"},
+            {"t": 1730000099100, "ms": 60, "delay": 0, "kind": "timeout",
+             "src": "bridgeTick", "invoker": "flush (overlay.js:99:1)"},
+            {"t": 1730000099200, "ms": 55, "delay": 5, "kind": "interval",
+             "src": "otherTick", "invoker": "otherTick (a.js:1:2)"},
+        ]},
+    }
+    out = run_timer([timer_on])
+    check("timer 正常形状：本周期次数/最长/明细",
+          "本周期 2 次 >=50ms 回调" in out and "最长 96ms" in out
+          and "bridgeTick" in out and "interval" not in out
+          and "间隔" in out and "一次性" in out
+          and "overlay.js:13440:5" in out, out)
+    check("timer 按回调名聚合 top3",
+          "按回调名聚合" in out and "bridgeTick：合计 156ms / 2 次" in out
+          and "otherTick：合计 55ms / 1 次" in out, out)
+    # 开关关闭 → 只报关闭，不回显旧明细。
+    out = run_timer([timer_on, {"settings": {"timerDiagOn": False}, "timer": None}])
+    check("timer 关闭态不回显旧明细",
+          "第三方定时器归因已关闭" in out and "bridgeTick" not in out, out)
+    # 旧样本没有该设置。
+    out = run_timer([{"settings": {}, "ver": "0.3.10"}])
+    check("timer 旧样本提示本版本未记录",
+          "本版本未记录第三方定时器归因" in out and "Traceback" not in out, out)
+    # 暂停 / 自禁用。
+    out = run_timer([timer_on, {"settings": {"timerDiagOn": True, "observe": False},
+                                "timer": None}])
+    check("timer 暂停时说明已暂停", "第三方定时器归因已暂停" in out, out)
+    out = run_timer([timer_on, {"settings": {"timerDiagOn": True}, "timer": None,
+                                "dead": True}])
+    check("timer 自禁用时说明已停止", "观测器已自禁用" in out and "bridgeTick" not in out, out)
+    # 包装未装上：不能把 0 条说成没有卡顿。
+    out = run_timer([{"settings": {"timerDiagOn": True},
+                      "timer": {"supported": 0, "count": 0, "max": None, "detail": []}}])
+    check("timer supported=0 时明确包装未装上",
+          "包装未装上" in out and "计数不可用" in out, out)
+    # 本周期 0 条：明确「不等于没有卡顿」。
+    out = run_timer([{"settings": {"timerDiagOn": True},
+                      "timer": {"supported": 1, "count": 0, "max": None, "detail": []}}])
+    check("timer 0 条时提示不等于没有卡顿",
+          "不等于没有卡顿" in out, out)
+    # 关掉再打开：不能越过中间显式 timer=null 的样本，把上一轮旧明细当成现在的。
+    out = run_timer([
+        timer_on,
+        {"settings": {"timerDiagOn": False}, "timer": None},
+        {"settings": {"timerDiagOn": True},
+         "timer": {"supported": 1, "count": 0, "max": None, "detail": []}},
+    ])
+    check("timer 重开后不隔着关闭样本回显旧明细",
+          "bridgeTick" not in out and "不等于没有卡顿" in out, out)
+    # 坏形状：detail 非列表、条目非字典、ms 非数值 → 不抛异常。
+    out = run_timer([{"settings": {"timerDiagOn": True},
+                      "timer": {"supported": 1, "count": 1, "max": 80,
+                                "detail": 7}}])
+    check("timer detail 非列表时不炸", "Traceback" not in out, out)
+    out = run_timer([{"settings": {"timerDiagOn": True},
+                      "timer": {"supported": 1, "count": 1, "max": 80,
+                                "detail": [7, {"src": None, "ms": None,
+                                               "delay": None, "kind": None,
+                                               "invoker": None, "t": None}]}}])
+    check("timer 条目坏字段回退且不炸",
+          "Traceback" not in out and "anonymous" in out, out)
 
     print("== report_session_diag 结果：", "PASS" if ok else "FAIL", "==")
     return 0 if ok else 1

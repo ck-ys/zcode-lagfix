@@ -1,5 +1,15 @@
 /**
- * zcode-lagfix renderer 观测脚本 v0.3.10
+ * zcode-lagfix renderer 观测脚本 v0.4.0
+ *
+ * v0.4.0（第三方定时器归因 + 自适应补页）：
+ *   - T1 timerDiagOn（默认关，只读）：包装 window.setTimeout/setInterval，
+ *     只记录函数回调单次同步执行 ≥50ms 的明细（t/ms/delay/kind/src/invoker），
+ *     环 10 条；不改时机/参数/返回值/异常，插件自己的定时器不记录。
+ *     关闭/暂停/自禁用/__lagfixOff 立即恢复原引用并清空计数。
+ *   - O8b loadOlderPageLimitOn（默认关，实验）：仅无参调用且窗口 >3000 行时
+ *     请求 120 行；距上次无参补页 <600ms 时这一次回到宿主默认 60 行；
+ *     显式参数原样放行。不跳过、不合并、不缓存，保留 this/Promise/异常语义。
+ *   - 报告新增 timer 段与 page 的 applied/downgraded/small/passthrough 计数。
  *
  * v0.3.10（更新红点实际可见）：
  *   - 两个更新红点的 CSS 默认 display:none；syncUpdateDot 显示时改为写
@@ -22,11 +32,12 @@
  *     版本不一致、latest 与当前相同或 newer=false 时都不显示。
  *   - 手动检查保持原样；__lagfixOff 关闭自动检查并清缓存/红点。
  *
- * v0.3.6（补页批量，默认关的实验）：
- *   - O8 loadOlderPageLimitOn：无参 loadOlder() 的默认页大小 60 → 200；
- *     只改 limit 参数，不跳过调用、不改返回值/this/异常/在途状态。
+ * v0.3.6（补页批量，默认关的实验；v0.4.0 起改为自适应 120/60）：
+ *   - O8 loadOlderPageLimitOn：无参 loadOlder() 的默认页大小在窗口 >3000 行时
+ *     提到 120，连续补页（<600ms）回到 60；只改 limit 参数，不跳过调用、
+ *     不改返回值/this/异常/在途状态。
  *     与观测、O3 降频独立；关闭/自禁用/__lagfixOff 立即恢复，暂停观测不关闭替换。
- *   - 报告新增 page 计数（实际替换次数、显式参数放行次数）；O3 保持原样。
+ *   - 报告新增 page 计数（生效/降回/小窗口/显式参数）；O3 保持原样。
  *
  * v0.3.5（长帧上下文归因 + 面板期进一步合并）：
  *   - P0 lafCtxOn（默认开，只读）：每条 ≥100ms 长帧记录距上次通知/补发/滚动/
@@ -153,15 +164,19 @@
   var PANEL_QUIET_BADGE_MS = 3000; // 面板期角标定位上限频率
   // v0.3.5 P0：长帧能被归因到某个信号的最大滞后。
   var LAF_CTX_WINDOW_MS = 1000;
-  // v0.3.6 O8：协议允许的单页上限；宿主 loadAllOlder 也按这个值分页。
-  var LOAD_OLDER_PAGE_LIMIT = 200;
+  // v0.3.6 O8 / v0.4.0 O8b：协议允许的单页上限；宿主 loadAllOlder 也按这个值分页。
+  // O8b 不再固定 200：孤立补页 120，连续补页（<600ms）降回宿主默认 60，
+  // 且只在窗口 >3000 行时生效；不跳过任何调用。
+  var LOAD_OLDER_PAGE_LIMIT = 120;
+  var LOAD_OLDER_PAGE_MIN_ROWS = 3000;
+  var LOAD_OLDER_PAGE_BURST_MS = 600;
   var REFOCUS_DELAY_MS = 120;      // 回前台合并补发延迟
   var REFOCUS_GUARD_MS = 700;      // 回前台节流下限窗口
   var REFOCUS_BADGE_SKIP_MS = 300; // 回前台前 300ms 不定位角标
   var REFOCUS_WINDOW_MS = 800;     // 回前台帧窗口
   var PANE_SWITCH_DEDUPE_MS = 150; // aria-hidden 与 class 双信号去重
   var REFOCUS_DEDUPE_MS = 500;     // visibilitychange 与 focus 双信号去重
-  var VERSION = "0.3.10";
+  var VERSION = "0.4.0";
   var ERR_LIMIT = 50;
   var OVERLAY_ID = "lagfix-overlay-badge";
   // v0.3.7：更新检查结果的跨窗口缓存 + 自动检查间隔。
@@ -176,6 +191,10 @@
   var SETTINGS_KEY = "lagfix.settings.v1";
   var OVERLAY_TICK_MS = 1000;
   var LONG_TASK_MS = 50;
+  // v0.4.0 T1：第三方定时器归因。只记同步执行 ≥50ms 的回调；明细最多 10 条。
+  var TIMER_DIAG_MIN_MS = 50;
+  var TIMER_DETAIL_MAX = 10;
+  var TIMER_INVOKER_MAX = 120;
 
   var DEFAULTS = {
     observe: true,      // 观测开关
@@ -205,6 +224,8 @@
     panelQuietOn: false,       // O5 面板期进一步合并（实验）
     // v0.3.6 O8 补页批量（默认关，A/B 达标前不进默认路径）
     loadOlderPageLimitOn: false,
+    // v0.4.0 T1 第三方定时器归因（默认关，只读；开启后记录 ≥50ms 的定时器回调）
+    timerDiagOn: false,
     // v0.3.7 自动检查更新（默认关；开启后 24h 内最多一次，只查 GitHub Releases）
     autoUpdateCheckOn: false,
     logMaxMB: 50,       // 观测日志总预算（MB），超过自动删最旧
@@ -250,6 +271,8 @@
     if (typeof o.lafCtxOn === "boolean") s.lafCtxOn = o.lafCtxOn;
     if (typeof o.panelQuietOn === "boolean") s.panelQuietOn = o.panelQuietOn;
     if (typeof o.loadOlderPageLimitOn === "boolean") s.loadOlderPageLimitOn = o.loadOlderPageLimitOn;
+    // v0.4.0 T1：第三方定时器归因（只读，默认关）。
+    if (typeof o.timerDiagOn === "boolean") s.timerDiagOn = o.timerDiagOn;
     if (typeof o.autoUpdateCheckOn === "boolean") s.autoUpdateCheckOn = o.autoUpdateCheckOn;
     if (o.logMaxMB != null) s.logMaxMB = clampNum(o.logMaxMB, 5, 1000, DEFAULTS.logMaxMB);
     if (o.warnMs != null) s.warnMs = clampNum(o.warnMs, 1, 5000, DEFAULTS.warnMs);
@@ -409,6 +432,14 @@
   // v0.3.5 P0：本周期每条 ≥100ms 长帧的来源计数；随采集周期清零。
   var lafCtxCounts = { flush: 0, notify: 0, scroll: 0, other: 0 };
 
+  // ---- v0.4.0 T1：第三方定时器归因 ----
+  var timerDetail = [];       // [{t, ms, delay, kind, src, invoker}]
+  var timerDetailVersion = 0; // 每次追加/清空都 +1，用于「未变化发 []」
+  var lastTimerDetailVersion = -1;
+  var timerCount = 0;         // 本周期 ≥50ms 回调次数
+  var timerMax = 0;           // 本周期最长回调耗时
+  var timerProbe = null;      // { timeout, interval, wrappedTimeout, wrappedInterval, ... }
+
   function resetLafCtx() {
     lastNotifyAt = 0;
     lastFlushAt = 0;
@@ -435,6 +466,218 @@
       }
     }
     if (changed) lafDetailKey = "";
+  }
+
+  // ---- v0.4.0 T1：第三方定时器归因（只读，默认关） ----
+  // 只记录同步执行 ≥50ms 的函数回调；不读参数/源码，不改定时器时机。
+  // 明细里的 src 是回调函数名，invoker 是调度点（只留文件 basename:line:col）。
+  function timerSrcOf(handler) {
+    var name = "";
+    try { name = handler && handler.name ? String(handler.name) : ""; } catch (e) {}
+    if (!name) name = "anonymous";
+    return name.length > 80 ? name.slice(0, 80) : name;
+  }
+
+  function sanitizeTimerLoc(loc) {
+    var s = String(loc || "").replace(/^file:\/\/\/?/i, "").trim();
+    // 保留 basename:line:col；去掉目录、盘符、协议与查询串。
+    var m = s.match(/([^\\/:\s]+):(\d+):(\d+)/);
+    if (m) return m[1] + ":" + m[2] + ":" + m[3];
+    return s.split(/[\\/]/).pop() || "";
+  }
+
+  function sanitizeTimerFrame(line) {
+    var s = String(line || "").replace(/^\s*at\s+/i, "").trim();
+    if (!s) return "";
+    // V8: "fn (file:///.../x.js:1:2)"；Firefox: "fn@file:///.../x.js:1:2"
+    var m = s.match(/^(.*?)[@(]([^()]*?)[)]?$/);
+    if (m && m[2]) {
+      var fn = String(m[1] || "").trim();
+      var loc = sanitizeTimerLoc(m[2]);
+      s = (fn ? fn + " (" + loc + ")" : loc);
+    } else {
+      s = sanitizeTimerLoc(s);
+    }
+    return s.length > TIMER_INVOKER_MAX ? s.slice(0, TIMER_INVOKER_MAX) : s;
+  }
+
+  // 找到 setTimeout/setInterval 的调用方：跳过本文件的包装帧，取第一帧外部调用点。
+  // 同时判断调用方是否仍是 lagfix 自己（自测噪声不进明细）。
+  // 只在确认回调 ≥50ms 后才调用：Error 在调度时创建、栈在此时才格式化，
+  // 避免每次调度定时器都解析一遍调用栈（T1 不能自己制造卡顿）。
+  function timerCallerInfo(err) {
+    try {
+      var stack = String((err && err.stack) || "");
+      var lines = stack.split("\n");
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i] || "";
+        if (!line) continue;
+        // 跳过 Error 头与包装帧（Chrome/Firefox 两种格式都按函数名过滤）。
+        if (line.indexOf("timerCallerInfo") >= 0
+          || line.indexOf("wrappedTimer") >= 0
+          || line.indexOf("wrappedTimeout") >= 0
+          || line.indexOf("wrappedInterval") >= 0) continue;
+        if (/^\s*Error\b/.test(line)) continue;
+        var self = /lagfix-(observe|main)/.test(line);
+        return { self: self, frame: sanitizeTimerFrame(line) };
+      }
+    } catch (e) {}
+    return { self: false, frame: "" };
+  }
+
+  function resetTimerStats() {
+    timerDetail.length = 0;
+    timerDetailVersion++;
+    lastTimerDetailVersion = -1;
+    timerCount = 0;
+    timerMax = 0;
+  }
+
+  function recordTimer(startPerf, startedAt, delay, kind, handler, callerErr) {
+    try {
+      if (!settings.timerDiagOn || !settings.observe || state.dead) return;
+      var ms = Math.round(performance.now() - startPerf);
+      if (!(ms >= TIMER_DIAG_MIN_MS)) return;
+      // 自测噪声（调用栈命中 lagfix-observe/lagfix-main）既不计明细也不计次数。
+      var caller = timerCallerInfo(callerErr);
+      if (caller.self) return;
+      timerCount++;
+      if (ms > timerMax) timerMax = ms;
+      var d = Number(delay);
+      timerDetail.push({
+        t: startedAt,
+        ms: ms,
+        delay: isFinite(d) && d > 0 ? Math.round(d) : 0,
+        kind: kind,
+        src: timerSrcOf(handler),
+        invoker: caller.frame || "",
+      });
+      if (timerDetail.length > TIMER_DETAIL_MAX) timerDetail.shift();
+      timerDetailVersion++;
+    } catch (e) {}
+  }
+
+  function setTimerProbe(on) {
+    var want = !!on && !state.dead;
+    if (want && timerProbe) return true;
+    if (!want) {
+      var p = timerProbe;
+      timerProbe = null;
+      if (p) {
+        try {
+          if (window.setTimeout === p.wrappedTimeout) {
+            if (p.hadOwnTimeout) window.setTimeout = p.timeout;
+            else delete window.setTimeout;
+          }
+          if (window.setInterval === p.wrappedInterval) {
+            if (p.hadOwnInterval) window.setInterval = p.interval;
+            else delete window.setInterval;
+          }
+        } catch (e) {}
+      }
+      resetTimerStats();
+      return false;
+    }
+    if (typeof window.setTimeout !== "function" || typeof window.setInterval !== "function") {
+      return false;
+    }
+    var origTimeout = window.setTimeout;
+    var origInterval = window.setInterval;
+    var hadOwnTimeout = Object.prototype.hasOwnProperty.call(window, "setTimeout");
+    var hadOwnInterval = Object.prototype.hasOwnProperty.call(window, "setInterval");
+    var wrappedTimeout = function (handler, delay) {
+      if (typeof handler !== "function") return origTimeout.apply(window, arguments);
+      // 只在调度时抓结构化栈（不格式化），回调确认 ≥50ms 后才读取。
+      var callerErr = null;
+      try {
+        callerErr = {};
+        if (typeof Error.captureStackTrace === "function") Error.captureStackTrace(callerErr, wrappedTimeout);
+        else callerErr = new Error();
+      } catch (e) { callerErr = null; }
+      var args = Array.prototype.slice.call(arguments, 2);
+      var fn = function () {
+        var startedAt = Date.now();
+        var t0 = performance.now();
+        try {
+          return handler.apply(this, args);
+        } finally {
+          recordTimer(t0, startedAt, delay, "timeout", handler, callerErr);
+        }
+      };
+      return origTimeout.apply(window, [fn, delay].concat(args));
+    };
+    var wrappedInterval = function (handler, delay) {
+      if (typeof handler !== "function") return origInterval.apply(window, arguments);
+      var callerErr = null;
+      try {
+        callerErr = {};
+        if (typeof Error.captureStackTrace === "function") Error.captureStackTrace(callerErr, wrappedInterval);
+        else callerErr = new Error();
+      } catch (e) { callerErr = null; }
+      var args = Array.prototype.slice.call(arguments, 2);
+      var fn = function () {
+        var startedAt = Date.now();
+        var t0 = performance.now();
+        try {
+          return handler.apply(this, args);
+        } finally {
+          recordTimer(t0, startedAt, delay, "interval", handler, callerErr);
+        }
+      };
+      return origInterval.apply(window, [fn, delay].concat(args));
+    };
+    try {
+      window.setTimeout = wrappedTimeout;
+      window.setInterval = wrappedInterval;
+    } catch (e) {}
+    if (window.setTimeout !== wrappedTimeout || window.setInterval !== wrappedInterval) {
+      // 冻结/不可写：回滚已经换上的那一半，不能留下半个包装。
+      try {
+        if (window.setTimeout === wrappedTimeout) {
+          if (hadOwnTimeout) window.setTimeout = origTimeout;
+          else delete window.setTimeout;
+        }
+        if (window.setInterval === wrappedInterval) {
+          if (hadOwnInterval) window.setInterval = origInterval;
+          else delete window.setInterval;
+        }
+      } catch (e2) {}
+      return false;
+    }
+    timerProbe = {
+      timeout: origTimeout, interval: origInterval,
+      wrappedTimeout: wrappedTimeout, wrappedInterval: wrappedInterval,
+      hadOwnTimeout: hadOwnTimeout, hadOwnInterval: hadOwnInterval,
+    };
+    resetTimerStats();
+    return true;
+  }
+
+  function applyTimerSettings() {
+    return setTimerProbe(settings.timerDiagOn && settings.observe && !state.dead);
+  }
+
+  function timerSnapshot() {
+    if (!settings.timerDiagOn || !settings.observe || state.dead) return null;
+    var detail = lastTimerDetailVersion === timerDetailVersion ? [] : timerDetail.slice();
+    lastTimerDetailVersion = timerDetailVersion;
+    return {
+      supported: timerProbe ? 1 : 0,
+      count: timerCount,
+      max: timerMax || null,
+      detail: detail,
+    };
+  }
+
+  // v0.4.0 T1：插件自己的定时器一律走宿主原始实现，避免观测器测量自己。
+  // T1 开启时主动绕过自己的包装；T1 关闭时仍尊重宿主当前的全局实现（测试/宿主替换）。
+  function lafSetTimeout(fn, ms) {
+    var raw = timerProbe ? timerProbe.timeout : window.setTimeout;
+    return raw.call(window, fn, ms);
+  }
+  function lafSetInterval(fn, ms) {
+    var raw = timerProbe ? timerProbe.interval : window.setInterval;
+    return raw.call(window, fn, ms);
   }
 
   // 长帧归因可用的上下文时间戳：父开关/观测/自禁用任一不满足就不更新。
@@ -560,7 +803,7 @@
       if (root) root.setAttribute("data-lagfix-pane-switch", "1");
     } catch (e) {}
     if (paneGuardTimer) { clearTimeout(paneGuardTimer); paneGuardTimer = null; }
-    paneGuardTimer = setTimeout(function () {
+    paneGuardTimer = lafSetTimeout(function () {
       paneGuardTimer = null;
       paneGuardUntil = 0;
       try {
@@ -733,7 +976,7 @@
         // 不再在 visibilitychange 里同步遍历所有 flusher：先让窗口完成恢复/首帧，
         // 120ms 后把所有 pending 合并到同一任务里补发一次。
         if (!refocusFlushTimer) {
-          refocusFlushTimer = setTimeout(function () {
+          refocusFlushTimer = lafSetTimeout(function () {
             refocusFlushTimer = null;
             flushBackgroundNow();
           }, REFOCUS_DELAY_MS);
@@ -919,6 +1162,8 @@
     // v0.3.1：自禁用时必须把滚动观测/遮罩一起收干净，不能留半个包装或属性。
     try { releaseLoadOlderProbe(); } catch (e) {}
     try { releaseSessionProbe(); } catch (e) {}
+    // v0.4.0 T1：自禁用必须把宿主定时器还原，不能留下包装。
+    try { setTimerProbe(false); } catch (e) {}
     // v0.3.3：自禁用不能留下侧栏/回前台属性、观察器或监听。
     try { releasePaneProbe(); } catch (e) {}
     try { setRefocusListeners(); } catch (e) {}
@@ -1243,7 +1488,7 @@
         // 用 deadline + 单定时器自重排：滚动事件每秒可达 60 次，
         // 每个事件都 clearTimeout+setTimeout 会白白制造 60 次/秒的定时器抖动。
         scrollMaskDeadline = performance.now() + MASK_IDLE_MS;
-        if (!scrollMaskTimer) scrollMaskTimer = setTimeout(checkScrollMaskIdle, MASK_IDLE_MS);
+        if (!scrollMaskTimer) scrollMaskTimer = lafSetTimeout(checkScrollMaskIdle, MASK_IDLE_MS);
       } else {
         if (scrollMaskTimer) { clearTimeout(scrollMaskTimer); scrollMaskTimer = null; }
         scrollMaskDeadline = 0;
@@ -1257,7 +1502,7 @@
     try {
       var left = scrollMaskDeadline - performance.now();
       if (left > 0 && !state.dead && settings.maskOffOnScroll) {
-        scrollMaskTimer = setTimeout(checkScrollMaskIdle, Math.ceil(left));
+        scrollMaskTimer = lafSetTimeout(checkScrollMaskIdle, Math.ceil(left));
         return;
       }
       scrollMaskDeadline = 0;
@@ -1381,6 +1626,8 @@
   setScrollListener(scrollWatchNeeded());
   setInputListener(settings.inputLagOn && settings.observe);
   syncCvAttr();   // v0.3.4：启动即对齐一次（幂等，属性只在开关开时出现）
+  // v0.4.0 T1：启动即按设置安装/还原第三方定时器归因（默认关）。
+  try { applyTimerSettings(); } catch (e) { err(); }
 
   // 页面卸载时别把属性留在 DOM 上（多窗口/热重载会保留 documentElement）
   function onPageUnload() {
@@ -1437,6 +1684,16 @@
     try { return wrapped.__lagfixPage || null; } catch (e) { return null; }
   }
 
+  // v0.4.0 O8b：从关到开 / 换包装时清零，连 lastAt 一起重置；暂停观测不调用。
+  function resetPageStats(p) {
+    if (!p) return;
+    p.applied = 0;
+    p.downgraded = 0;
+    p.small = 0;
+    p.passthrough = 0;
+    p.lastAt = -1e9;
+  }
+
   function makeProbedLoadOlder(orig) {
     var gen = loadOlderGen;
     var diagGen = loadOlderDiagGen;   // v0.3.4：关闭滚动诊断后，在途回调不得写回
@@ -1448,16 +1705,32 @@
     // 初值给一个极小值：performance.now() 在页面启动后可能小于 600，
     // 用 0 会让开机后第一次大窗口补页被误判成"距上次不足 600ms"。
     var pace = { allowed: 0, skipped: 0, lastAllowedAt: -1e9 };
-    // v0.3.6 O8：只统计真正替换过页大小的调用；显式传参的调用单独计数。
-    var page = { applied: 0, passthrough: 0 };
+    // v0.3.6 O8 / v0.4.0 O8b：只统计真正替换过页大小的调用；显式传参的调用单独计数。
+    // lastAt 记录上一次无参调用的时间：连续补页（<600ms）降回宿主默认 60，
+    // 避免 200/120 行大页在一次快速上翻里连续前插；每次无参调用都刷新时间戳。
+    var page = { applied: 0, downgraded: 0, small: 0, passthrough: 0, lastAt: -1e9 };
     // 所有原方法调用统一走这里：只有「开关开 + 未自禁用 + 无参」才替换 limit。
     // 观测关闭时也必须生效（缓解项与 observe 独立），所以放在最早的放行分支之前。
     // gen 校验：包装被释放后，宿主若缓存了旧函数引用，也不能继续替换参数。
     function callOrig(self, args) {
       if (gen === loadOlderGen && settings.loadOlderPageLimitOn && !state.dead) {
         if (!args || args.length === 0) {
-          page.applied++;
-          return orig.call(self, LOAD_OLDER_PAGE_LIMIT);
+          var now = performance.now();
+          var prevAt = page.lastAt;
+          page.lastAt = now;
+          var rowsNow = readLoadedRows(self);
+          if (rowsNow !== null && rowsNow > LOAD_OLDER_PAGE_MIN_ROWS) {
+            if (now - prevAt < LOAD_OLDER_PAGE_BURST_MS) {
+              // 连续补页：不跳过，只把页大小降回宿主默认 60，避免大页连续前插。
+              page.downgraded++;
+              return orig.call(self);
+            }
+            page.applied++;
+            return orig.call(self, LOAD_OLDER_PAGE_LIMIT);
+          }
+          // 小窗口或行数不可读：不承担大页风险，按宿主默认 60 放行。
+          page.small++;
+          return orig.call(self);
         }
         page.passthrough++;
       }
@@ -2193,7 +2466,7 @@
 
   function armWatchdog() {
     if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
-    watchdogTimer = setInterval(function () {
+    watchdogTimer = lafSetInterval(function () {
       if (state.dead) return;
       try {
         if (!state.el || !state.el.isConnected || state.el.getAttribute(ATTR) === null) {
@@ -2224,7 +2497,7 @@
 
   function startReacquire() {
     if (acquireTimer) return;
-    acquireTimer = setInterval(function () {
+    acquireTimer = lafSetInterval(function () {
       if (state.dead) return;
       var a = findAnchor();
       if (a) {
@@ -2238,19 +2511,19 @@
         acquireTimer = null;
         state.missed = true;
         state.missedReason = "anchor-lost-slow-retry";
-        slowRetryTimer = setTimeout(function retry() {
+        slowRetryTimer = lafSetTimeout(function retry() {
           slowRetryTimer = null;
           if (state.dead || !settings.observe) return;
           var a2 = findAnchor();
           if (a2) { state.missed = false; state.missedReason = ""; attach(a2); return; }
-          slowRetryTimer = setTimeout(retry, ACQUIRE_RETRY_MS);
+          slowRetryTimer = lafSetTimeout(retry, ACQUIRE_RETRY_MS);
         }, ACQUIRE_RETRY_MS);
       }
     }, ACQUIRE_POLL_MS);
   }
 
   // 初始锚点获取
-  acquireTimer = setInterval(function () {
+  acquireTimer = lafSetInterval(function () {
     if (state.dead) return;
     var a = findAnchor();
     if (a) {
@@ -2265,7 +2538,7 @@
       state.missedReason = "anchor-not-found";
       // 不能永久放弃：用户可能启动后 10 分钟才打开会话。按慢速轮询继续等锚点，
       // 找到后照常 attach 并补启 rAF（否则角标一直"空闲"、四项增强全部静默失效）。
-      setTimeout(function retry() {
+      lafSetTimeout(function retry() {
         slowRetryTimer = null;
         if (state.dead || !settings.observe) return;
         var a2 = findAnchor();
@@ -2276,7 +2549,7 @@
           startRaf();
           return;
         }
-        slowRetryTimer = setTimeout(retry, ACQUIRE_RETRY_MS);
+        slowRetryTimer = lafSetTimeout(retry, ACQUIRE_RETRY_MS);
       }, ACQUIRE_RETRY_MS);
     }
   }, ACQUIRE_POLL_MS);
@@ -2613,7 +2886,7 @@
     el.addEventListener("mouseenter", function () {
       if (statsHideTimer) { clearTimeout(statsHideTimer); statsHideTimer = null; }
       if (statsShowTimer) clearTimeout(statsShowTimer);
-      statsShowTimer = setTimeout(function () { statsShowTimer = null; showStats(); }, 120);
+      statsShowTimer = lafSetTimeout(function () { statsShowTimer = null; showStats(); }, 120);
     });
     el.addEventListener("mouseleave", function () {
       if (statsShowTimer) { clearTimeout(statsShowTimer); statsShowTimer = null; }
@@ -2922,7 +3195,7 @@
   function scheduleHideStats() {
     if (statsPinned) return;
     if (statsHideTimer) clearTimeout(statsHideTimer);
-    statsHideTimer = setTimeout(function () {
+    statsHideTimer = lafSetTimeout(function () {
       statsHideTimer = null;
       hideStats(false);
     }, 260);
@@ -3346,6 +3619,18 @@
       + "并把这次卡顿归到「刷新合并」「滚动」「通知」或「其它」四类之一，方便判断下一步该优化哪里。\n"
       + "不会做什么：不读对话内容，不改数据，也不让画面变快；只在上面的「卡顿来源定位」已开启时生效。\n"
       + "代价：极低，只多记几个时间差。"));
+    // v0.4.0 T1：第三方定时器归因，默认关闭；用户语言，不写 setTimeout 等内部词。
+    c2b.appendChild(rowEl("第三方定时器归因 · 实验", "找出每隔一段时间自动运行、又占住画面很久的任务来自哪个插件。",
+      switchEl(settings.timerDiagOn, function (v) {
+        settings.timerDiagOn = v; saveSettings(); applyTimerSettings();
+        rebuildPanel(); renderPanelStatus();
+      }),
+      "会做什么：页面里由定时任务触发的代码，单次运行超过 50 毫秒时记一条：耗时、原定间隔、"
+      + "任务名和发起位置（只留文件名和行号），最多保留最近 10 次。用来判断卡顿是不是外部插件的定时刷新造成的。\n"
+      + "不会做什么：不改变任何定时任务的执行时机、次数或结果；不读任务内容、对话内容和输入；"
+      + "不记录完整路径、代码或参数。插件自己的定时任务不会被记录。\n"
+      + "代价：每次定时任务结束时多一次计时，开销极低；只有超过 50 毫秒才会记一条。\n"
+      + "说明：这是一项实验，默认关闭；抓到耗时任务只说明有嫌疑，不等于已找到卡顿根因。"));
     sObs.appendChild(c2b);
     sections.observe = sObs;
 
@@ -3523,17 +3808,16 @@
         var wasPageLimit = settings.loadOlderPageLimitOn;
         settings.loadOlderPageLimitOn = v;
         // 从关到开算一轮新的实验：包装器可能因滚动诊断仍在，计数不能沿用上一轮。
-        if (v && !wasPageLimit && pageStats) {
-          pageStats.applied = 0;
-          pageStats.passthrough = 0;
-        }
+        if (v && !wasPageLimit) resetPageStats(pageStats);
         saveSettings(); applyScrollSettings();
         if (v) { try { applyThrottle(); } catch (e) {} }
         rebuildPanel(); renderPanelStatus();
       }),
-      "会做什么：加载更早消息时一次多取一些（最多 200 行），让同一段历史需要的加载次数变少。\n"
+      "会做什么：会话已显示超过约 3000 行时，上翻加载更早消息一次最多取 120 行；"
+      + "如果连续快速上翻（两次间隔不到 600ms），这一次自动回到 ZCode 原本的 60 行，"
+      + "避免大段历史连续插到前面造成位置跳动。\n"
       + "不会做什么：不跳过、不删除任何消息，也不改变顺序；不改变正在生成的内容或工具执行。\n"
-      + "代价：单次加载的内容更多，个别情况下滚动到更早历史时位置可能有轻微调整。\n"
+      + "代价：单次最多多取 60 行；连续快速上翻时基本维持原样，减少加载次数的收益会变小。\n"
       + "说明：这是一项实验，需要实际对比开/关的卡顿数据；没有明显改善就保持关闭。"));
     c3f.appendChild(rowEl("长回合渲染减负 · 实验", "让画面外的长消息块暂时不参与绘制，滚回附近再恢复绘制。",
       switchEl(settings.turnContentVisOn, function (v) {
@@ -3571,7 +3855,7 @@
         armedAt = now;
         rz.textContent = "确认重启？（5 秒内再点一次）";
         if (disarmTimer) clearTimeout(disarmTimer);
-        disarmTimer = setTimeout(function () {
+        disarmTimer = lafSetTimeout(function () {
           disarmTimer = null;
           armedAt = 0;
           rz.textContent = "重启 ZCode";
@@ -3586,7 +3870,7 @@
       rz.disabled = true;
       rz.textContent = "已请求重启，正在等待 ZCode 响应…";
       renderPanelStatus();
-      setTimeout(function () {
+      lafSetTimeout(function () {
         if (!rz.parentNode || !state.restartRequested) return;
         rz.disabled = false;
         rz.textContent = "重启 ZCode（上次未生效，可再试）";
@@ -3627,7 +3911,7 @@
       renderUpdateStatus();
       // 主进程下一个采集周期（默认 ≤5s）发出请求；15s 仍无结果就恢复按钮，
       // 避免永久卡在「检查中」（结果到了仍会显示）。
-      setTimeout(function () {
+      lafSetTimeout(function () {
         if (!up.parentNode) return;
         up.disabled = false;
         up.textContent = "检查更新";
@@ -3661,7 +3945,7 @@
         + "（仅关闭窗口不算），不要自动重启。";
       var restore = function (label) {
         upCopy.textContent = label;
-        setTimeout(function () { upCopy.textContent = "复制安装口令"; }, 1500);
+        lafSetTimeout(function () { upCopy.textContent = "复制安装口令"; }, 1500);
       };
       try {
         var p = navigator.clipboard && navigator.clipboard.writeText
@@ -3717,7 +4001,7 @@
           navigator.clipboard.writeText(dataDir);
         }
         copyBtn.textContent = "已复制";
-        setTimeout(function () { copyBtn.textContent = "复制路径"; }, 1500);
+        lafSetTimeout(function () { copyBtn.textContent = "复制路径"; }, 1500);
       } catch (e) {}
     });
     var logCtl = document.createElement("div");
@@ -4352,7 +4636,7 @@
         if (settings.hiddenSkipOn && document.hidden) {
           if (!pending) {
             pending = true;
-            timer = setTimeout(function () { timer = null; pending = false; fire(); }, 1000);
+            timer = lafSetTimeout(function () { timer = null; pending = false; fire(); }, 1000);
           }
           return;
         }
@@ -4365,7 +4649,7 @@
           fire();
         } else if (!pending) {
           pending = true;
-          timer = setTimeout(function () { timer = null; pending = false; fire(); }, wait);
+          timer = lafSetTimeout(function () { timer = null; pending = false; fire(); }, wait);
         }
       }
       // 回前台合并补发：只处理本订阅自己的 pending，不影响其它订阅。
@@ -4395,7 +4679,7 @@
       fixState.reason = "ZCode 的会话还没加载好（已停止重试）";
       return;
     }
-    fixState.retryTimer = setTimeout(function () {
+    fixState.retryTimer = lafSetTimeout(function () {
       fixState.retryTimer = null;
       if (state.dead || !settings.throttleOn || fixState.applied) return;
       applyThrottle();
@@ -4515,7 +4799,7 @@
           // stale：宿主正在分页加载；retryable-failure：传输失败可重试。
           // 两者都退避后再试，最多 6 次（约 12s），避免无限循环。
           if (r && (r.status === "stale" || r.status === "retryable-failure")) {
-            setTimeout(function () { resumeStore(st, attempt + 1); }, 600 * (attempt + 1));
+            lafSetTimeout(function () { resumeStore(st, attempt + 1); }, 600 * (attempt + 1));
           }
         }).catch(function () {});
       }
@@ -4531,7 +4815,7 @@
       // 把 store 留在 pending 槽里，等窗口结束后再补一次。
       fixState.blockedStore = st;
       if (!fixState.resumeTimer) {
-        fixState.resumeTimer = setTimeout(function () {
+        fixState.resumeTimer = lafSetTimeout(function () {
           fixState.resumeTimer = null;
           var pending = fixState.blockedStore;
           fixState.blockedStore = null;
@@ -4719,6 +5003,8 @@
       // v0.3.5：上下文归因与面板期合并一并关；时间戳/计数清空。
       settings.lafCtxOn = false;
       settings.panelQuietOn = false;
+      // v0.4.0 T1：定时器归因一并关，原始定时器立即还原，明细/计数清空。
+      settings.timerDiagOn = false;
       // v0.3.7：自动检查更新一并关；缓存/在途标记/红点全部清掉，避免还原后还留着“有新版本”。
       settings.autoUpdateCheckOn = false;
       saveSettings();
@@ -4726,6 +5012,7 @@
       releaseLoadAllGuard();
       releaseLoadOlderProbe();
       releaseSessionProbe();
+      try { setTimerProbe(false); } catch (e) {}
       try { applyPaneSettings(); } catch (e) {}
       setScrollMaskActive(false);
       try { if (lafObserver) lafObserver.disconnect(); } catch (e) {}
@@ -4846,6 +5133,8 @@
     // v0.3.4：__lagfixOff 会把 pagehide/beforeunload 摘掉，而它不置 state.dead；
     // 之后只重新打开「观测」时不经过 applyScrollSettings，卸载清理就再也不会挂回。
     setPageUnloadListener(!state.dead && settings.observe);
+    // v0.4.0 T1：暂停时还原原始定时器，恢复时按开关重新安装。
+    try { applyTimerSettings(); } catch (e) { err(); }
     renderOverlay();
     renderPanelStatus();
   }
@@ -4882,13 +5171,12 @@
     var wasPanelQuiet = settings.panelQuietOn;
     // v0.3.6：O8 补页批量。
     var wasPageLimit = settings.loadOlderPageLimitOn;
+    // v0.4.0 T1：第三方定时器归因。
+    var wasTimerDiag = settings.timerDiagOn;
     mergeStored(o, settings);
     if (settings.badMs <= settings.warnMs) settings.badMs = settings.warnMs + 1;
-    // v0.3.6：O8 从关到开算一轮新的实验；包装器可能因滚动诊断仍在，计数清零。
-    if (!wasPageLimit && settings.loadOlderPageLimitOn && pageStats) {
-      pageStats.applied = 0;
-      pageStats.passthrough = 0;
-    }
+    // v0.3.6 O8 / v0.4.0 O8b：从关到开算一轮新的实验；包装器可能因滚动诊断仍在，计数清零。
+    if (!wasPageLimit && settings.loadOlderPageLimitOn) resetPageStats(pageStats);
     if (settings.observe !== wasObserve) setObserving(settings.observe, true);
     if (settings.scrollDiagOn !== wasScrollDiag || settings.inputLagOn !== wasInputLag
       || settings.maskOffOnScroll !== wasMask
@@ -4902,6 +5190,10 @@
     }
     // CV 属性幂等同步：另一窗口开关实验项时本窗口立即生效/失效。
     if (settings.turnContentVisOn !== wasCv) syncCvAttr();
+    // v0.4.0 T1：另一窗口开关定时器归因时，本窗口立即安装/还原。
+    if (settings.timerDiagOn !== wasTimerDiag) {
+      try { applyTimerSettings(); } catch (e) { err(); }
+    }
     if (settings.sessionDiagOn !== wasSessionDiag) applySessionSettings();
     if (settings.paneDiagOn !== wasPaneDiag
       || settings.paneSwitchGuardOn !== wasPaneGuard
@@ -4954,7 +5246,7 @@
     });
   } catch (e) {}
 
-  overlayTimer = setInterval(renderOverlay, OVERLAY_TICK_MS);
+  overlayTimer = lafSetInterval(renderOverlay, OVERLAY_TICK_MS);
   renderOverlay();   // 立刻画一次，别让角标最多晚 1s 才出现
 
   // ---- 采集入口（主进程每 N 秒调用）----
@@ -4977,6 +5269,7 @@
       lafCtxOn: settings.lafCtxOn,
       panelQuietOn: settings.panelQuietOn,
       loadOlderPageLimitOn: settings.loadOlderPageLimitOn,
+      timerDiagOn: settings.timerDiagOn,
       autoUpdateCheckOn: settings.autoUpdateCheckOn,
       logMaxMB: settings.logMaxMB,
       warnMs: settings.warnMs, badMs: settings.badMs, collectSec: settings.collectSec,
@@ -5098,14 +5391,18 @@
     };
   }
 
-  // v0.3.6 O8：开关关/自禁用时不输出，避免把「没开」或「已停」误报成「0 次生效」。
+  // v0.3.6 O8 / v0.4.0 O8b：开关关/自禁用时不输出，避免把「没开」或「已停」误报成「0 次生效」。
   // installed 用来区分「包装没装上」与「装上了但还没触发」。
   function pageSnapshot() {
     if (!settings.loadOlderPageLimitOn || state.dead) return null;
     return {
       limit: LOAD_OLDER_PAGE_LIMIT,
+      minRows: LOAD_OLDER_PAGE_MIN_ROWS,
+      burstMs: LOAD_OLDER_PAGE_BURST_MS,
       installed: !!pageStats,
       applied: pageStats ? pageStats.applied : 0,
+      downgraded: pageStats ? pageStats.downgraded : 0,
+      small: pageStats ? pageStats.small : 0,
       passthrough: pageStats ? pageStats.passthrough : 0,
     };
   }
@@ -5136,7 +5433,7 @@
         // schema 稳定：dead 样本也带这些字段，消费端不必判 undefined
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
         pane: null, refocus: null,
-        laf: null, pace: null, page: null,
+        laf: null, pace: null, page: null, timer: null,
         paneOpen: null, panelQuiet: 0,
         ver: VERSION, updateCheck: 0, updateAuto: 0,
         restart: state.restartRequested ? 1 : 0,
@@ -5170,7 +5467,7 @@
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
         pane: null, refocus: null,
         // 暂停期归因环不累计（laf=null）；降频/补页批量是缓解项，与 observe 独立，照实上报。
-        laf: null, pace: paceSnapshot(), page: pageSnapshot(),
+        laf: null, pace: paceSnapshot(), page: pageSnapshot(), timer: null,
         paneOpen: null, panelQuiet: 0,
         ver: VERSION, updateCheck: pausedAsk.ask, updateAuto: pausedAsk.auto,
         restart: state.restartRequested ? 1 : 0,
@@ -5248,6 +5545,8 @@
         laf: lafSnapshot(),
         pace: paceSnapshot(),
         page: pageSnapshot(),
+        // v0.4.0 T1：第三方定时器归因（开关关/未装上时 null 或 supported=0）。
+        timer: timerSnapshot(),
         // v0.3.5：P0 的窗口上下文 + O5 是否正在生效；未检测到侧栏时 paneOpen=null。
         paneOpen: paneDetected ? !!paneOpen : null,
         panelQuiet: panelQuietActive() ? 1 : 0,
@@ -5264,6 +5563,7 @@
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
         pane: null, refocus: null, laf: null, pace: null,
         page: null,
+        timer: null,
         paneOpen: null, panelQuiet: 0, ver: VERSION,
         updateCheck: askUpdate,
         updateAuto: askAuto,
@@ -5285,6 +5585,9 @@
       lafMax = 0;
       // v0.3.5：来源分布同样是周期计数。
       lafCtxCounts = { flush: 0, notify: 0, scroll: 0, other: 0 };
+      // v0.4.0 T1：count/max 也是周期口径；明细环保留，靠版本号避免重复发送。
+      timerCount = 0;
+      timerMax = 0;
     }
   };
 
@@ -5302,6 +5605,12 @@
       loadOlderDetail: loadOlderDetail.length,
       pace: paceSnapshot(),
       page: pageSnapshot(),
+      // 只读摘要：不消费 timerSnapshot 的明细版本，避免把待发明细提前吞掉。
+      timer: {
+        supported: timerProbe ? 1 : 0,
+        count: timerCount, max: timerMax || null,
+        detail: timerDetail.length,
+      },
       lafCtx: {
         notify: lastNotifyAt, flush: lastFlushAt,
         scroll: lastLafScrollAt, commit: lastCommitAt,

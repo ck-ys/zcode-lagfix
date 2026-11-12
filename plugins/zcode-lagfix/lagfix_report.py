@@ -668,17 +668,30 @@ def print_laf_diag(rows: list[dict]) -> None:
         limit = page_row.get("limit")
         applied = page_row.get("applied")
         passthrough = page_row.get("passthrough")
+        downgraded = page_row.get("downgraded")
+        small = page_row.get("small")
         installed = page_row.get("installed")
+        # 旧样本（v0.3.6）没有 downgraded/small，也没有 120 的新常量：
+        # 只显示已有字段，不把缺失当 0，也不改写成新语义。
+        page_limit = limit if num(limit) and limit > 0 else 120
         if installed is False:
-            print(f"  补页批量（实验）：每页最多 "
-                  f"{fmt(limit if num(limit) and limit > 0 else 200)} 行，"
+            print(f"  补页批量（实验）：每页最多 {fmt(page_limit)} 行，"
                   f"但包装尚未装上，计数不可用")
         else:
-            print(f"  补页批量（实验）：每页最多 {fmt(limit if num(limit) and limit > 0 else 200)} 行，"
-                  f"已生效 {fmt(applied if num(applied) and applied >= 0 else 0)} 次；"
-                  f"显式参数放行 {fmt(passthrough if num(passthrough) and passthrough >= 0 else 0)} 次")
+            parts = [f"已生效 {fmt(applied if num(applied) and applied >= 0 else 0)} 次"]
+            if "downgraded" in page_row:
+                parts.append(f"连续补页降回 60 行 "
+                             f"{fmt(downgraded if num(downgraded) and downgraded >= 0 else 0)} 次")
+            if "small" in page_row:
+                min_rows = page_row.get("minRows")
+                gate = fmt(min_rows if num(min_rows) and min_rows > 0 else 3000)
+                parts.append(f"窗口未超过 {gate} 行按 60 行 "
+                             f"{fmt(small if num(small) and small >= 0 else 0)} 次")
+            parts.append(f"显式参数放行 "
+                         f"{fmt(passthrough if num(passthrough) and passthrough >= 0 else 0)} 次")
+            print(f"  补页批量（实验）：每页最多 {fmt(page_limit)} 行；" + "；".join(parts))
             if not (num(applied) and applied > 0):
-                hint = "开关开着但本文件内还没有无参补页调用"
+                hint = "开关开着但本文件内还没有大窗口无参补页"
                 if installed is None:
                     hint += "；或包装尚未装上"
                 print(f"    （{hint}）")
@@ -686,6 +699,111 @@ def print_laf_diag(rows: list[dict]) -> None:
         print(f"  {INFO} 补页批量已开启，但本文件内还没有生效记录（旧样本或尚未触发补页）")
     else:
         print(f"  {INFO} 本版本未记录补页批量（旧样本）")
+
+
+def print_timer_diag(rows: list[dict]) -> None:
+    """v0.4.0 T1：第三方定时器归因（只读，默认关闭）。
+
+    状态只看最新样本的设置；计数取最近一条非空 timer。遇到 dead 或显式
+    timer=null 就停下，不越过它回显旧计数（与补页批量同一约定）。
+    """
+    newest = None
+    for r in reversed(rows):
+        if isinstance(r.get("settings"), dict):
+            newest = r
+            break
+    if newest is None:
+        print(f"  {INFO} 本版本未记录第三方定时器归因（旧样本）")
+        return
+    settings = _settings_of(newest)
+    if settings.get("timerDiagOn") is False:
+        print(f"  {INFO} 第三方定时器归因已关闭（实验项，默认关闭）")
+        return
+    if settings.get("timerDiagOn") is None:
+        print(f"  {INFO} 本版本未记录第三方定时器归因（旧样本）")
+        return
+    if settings.get("observe") is False:
+        print(f"  {INFO} 第三方定时器归因已暂停（开关仍开，恢复观测后继续记录）")
+        return
+    if newest.get("dead"):
+        print(f"  {INFO} 观测器已自禁用，第三方定时器归因停止")
+        return
+
+    trow = None
+    no_data = False
+    for r in reversed(rows):
+        if r.get("dead"):
+            no_data = True
+            break
+        val = r.get("timer")
+        if isinstance(val, dict):
+            trow = val
+            break
+        if "timer" in r:
+            no_data = True
+            break
+    if no_data or trow is None:
+        print(f"  {INFO} 第三方定时器归因已开启，但本文件内还没有可用采样")
+        return
+    if trow.get("supported") == 0:
+        print(f"  {INFO} 第三方定时器归因已开启，但包装未装上"
+              f"（全局定时器不可写或被宿主替换），计数不可用")
+        return
+
+    count = trow.get("count")
+    mx = trow.get("max")
+    print(f"  第三方定时器归因（实验）：本周期 "
+          f"{fmt(count if num(count) and count >= 0 else 0)} 次 >=50ms 回调，"
+          f"最长 {fmt(mx if num(mx) and mx > 0 else None, 'ms')}")
+    # 明细只在变化时携带；向前找最近一次非空数组（与补页明细同约定）。
+    # 遇到显式 timer=null（关闭/暂停/序列化失败）或 dead 必须停下：
+    # 那表示当前这一轮已经结束，不能把上一轮开着的旧明细当成现在的。
+    detail = None
+    for r in reversed(rows):
+        if r.get("dead"):
+            break
+        tv = r.get("timer")
+        if isinstance(tv, dict):
+            d = tv.get("detail")
+            if isinstance(d, list) and d:
+                detail = [x for x in d if isinstance(x, dict)]
+                break
+            continue
+        if "timer" in r:
+            break
+    if not detail:
+        if num(count) and count > 0:
+            print("    （本周期有耗时回调，但本文件内没有明细；可能刚轮转）")
+        else:
+            print("    （本周期没有 >=50ms 的定时任务；这不等于没有卡顿）")
+        return
+
+    kinds = {"timeout": "一次性", "interval": "间隔"}
+    print("  最近记录的耗时定时任务（最多 10 条）：")
+    for d in detail[-10:]:
+        ts = d.get("t")
+        when = "-"
+        if num(ts) and ts > 0:
+            when = time.strftime("%m-%d %H:%M:%S", time.localtime(ts / 1000))
+        kind = kinds.get(str(d.get("kind")), str(d.get("kind") or "-"))
+        print(f"    {when}  {fmt(d.get('ms') if num(d.get('ms')) else None, 'ms')}"
+              f"  原定 {fmt(d.get('delay') if num(d.get('delay')) else None, 'ms')}"
+              f"  {kind}  {str(d.get('src') or 'anonymous')}")
+        inv = str(d.get("invoker") or "").strip()
+        if inv:
+            print(f"      调用点：{inv}")
+    agg: dict[str, list] = {}
+    for d in detail:
+        src = str(d.get("src") or "anonymous")
+        ms = d.get("ms") if num(d.get("ms")) else 0
+        slot = agg.setdefault(src, [0, 0])
+        slot[0] += ms
+        slot[1] += 1
+    top = sorted(agg.items(), key=lambda kv: kv[1][0], reverse=True)[:3]
+    if top:
+        print("  按回调名聚合（合计耗时前 3）：")
+        for src, (total, n) in top:
+            print(f"    {src}：合计 {total}ms / {n} 次")
 
 
 def main() -> int:
@@ -796,6 +914,8 @@ def main() -> int:
     print_pane_diag(rows)
     # v0.3.4：卡顿来源定位与翻页降频计数同样独立于 active 判断。
     print_laf_diag(rows)
+    # v0.4.0：第三方定时器的长回调归因（默认关闭的实验）。
+    print_timer_diag(rows)
 
     if rows:
         print(f"  静止占比：{len(idle) * 100 // len(rows)}%")
@@ -877,7 +997,7 @@ def main() -> int:
     print("  · 真实帧间隔 P95 > 50ms 或 单帧最长 > 200ms  → 用户能感知到卡")
     print("  · 长任务次数 > 0 → 主线程被单次阻塞，与卡顿直接相关")
     print("  · 投影提交率高但帧间隔正常 → 宿主在勤快重渲染，暂未卡死")
-    print("[lagfix] v0.3.10：修复更新红点实际不可见——红点默认隐藏的样式下，脚本改为写显式 inline-block，有新版本时角标右侧与维护页「检查更新」行都能看到红点。v0.3.9：设置面板点开关不再跳回顶部（重建后保持滚动位置），打开面板接管键盘焦点、Tab 在面板内循环、关闭后焦点归还；修复宿主替换 subscribe 时被插件误覆盖的风险；订阅回调异常每页面留一条日志；当前版本高于最新 Release 时如实说明发布通道尚未更新。v0.3.8：日志清理加固——只删本插件白名单内的旧日志，校验真实日期、运行目录类型、普通文件非链接与 10 分钟最小年龄，删前复核当前大小；不碰用户文件，宁可超预算也不误删。v0.3.7 起支持「有新版本」小红点与可选自动检查更新（默认关闭、24 小时内最多一次，只请求公开 GitHub Releases）。补页批量仍是默认关闭的实验：无参补页时把每页默认 60 行提到 200 行，只改请求页大小，不跳过、不删除、不改消息顺序。仍不读消息正文、不写 store；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
+    print("[lagfix] v0.4.0：新增「第三方定时器归因 · 实验」（默认关闭）——只记录单次运行超过 50ms 的定时任务：耗时、原定间隔、回调名和调用点（只留文件名与行号），用来判断卡顿是否来自外部插件的定时刷新；不改定时器时机，不读任务参数或对话内容。补页批量改为自适应：已显示超过 3000 行时每页最多 120 行，连续快速上翻（间隔不到 600ms）自动回到 60 行，不跳过、不删除、不改消息顺序。v0.3.10：修复更新红点实际不可见。v0.3.9：设置面板保持滚动位置、打开时接管键盘焦点并在关闭后归还；修复宿主替换 subscribe 时被误覆盖的风险。v0.3.8：日志清理加固——只删白名单内的旧日志，校验真实日期、目录类型、普通文件非链接与 10 分钟最小年龄；宁可超预算也不误删。v0.3.7 起支持小红点与可选自动检查更新（默认关闭、24 小时内最多一次，只请求公开 GitHub Releases）。仍不读消息正文、不写 store；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
     print()
     print_logs()
     return 0
