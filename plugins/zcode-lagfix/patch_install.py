@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""zcode-lagfix v0.3.7 asar 手术库 + CLI（v2：按终审修复 P0-1/P1-1/P1-2/P1-6/P2-*）。
+"""zcode-lagfix v0.3.8 asar 手术库 + CLI（v2：按终审修复 P0-1/P1-1/P1-2/P1-6/P2-*）。
 
 职责：在 ZCode 安装版 app.asar 的入口文件 out/main/index.js 尾部追加一行
 dynamic import，加载我们的主进程 loader（lagfix-main.cjs）。
@@ -169,14 +169,20 @@ def _atomic_copy(src: Path, dst: Path) -> bool:
 def sweep_tmp(dir_path: Path, max_age_s: int = 86400) -> None:
     """清掉原子复制留下的 `*.tmp-<pid>` 孤儿（进程在 copy 与 replace 之间被杀）。
 
-    只匹配我们自己生成的文件名，其它文件一律不碰。
+    v0.3.8：只匹配 RUNTIME_FILES 里每个文件名 + `.tmp-<pid>` 的普通文件；
+    运行目录在用户主目录下，任意 `*.tmp-<pid>` 会误删别人的临时文件。
     """
+    owned = re.compile(
+        r"^(?:" + "|".join(re.escape(n) for n in RUNTIME_FILES) + r")\.tmp-\d+$"
+    )
     try:
         now = time.time()
         for p in Path(dir_path).glob("*.tmp-*"):
-            if not re.match(r"^.+\.tmp-\d+$", p.name):
+            if not owned.match(p.name):
                 continue
             try:
+                if p.is_symlink() or not p.is_file():
+                    continue
                 if now - p.stat().st_mtime > max_age_s:
                     p.unlink()
             except OSError:

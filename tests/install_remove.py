@@ -11,12 +11,17 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import install as inst  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "zcode-lagfix"))
+import patch_install as pi  # noqa: E402
 
 ok = True
 
@@ -95,6 +100,41 @@ f4 = FakePi(present=0, result="removed")
 rc4, _, _ = run_case("plugin-enable-fail", f4, plugin_exc=SystemExit("bad config"))
 check("set_plugin_enabled 失败返回 1", rc4 == 1, f"rc={rc4}")
 check("set_plugin_enabled 失败仍保留 optout", getattr(f4, "marker_existed", False))
+
+print("== 临时文件清理只认本插件运行时文件名（v0.3.8）==")
+
+with tempfile.TemporaryDirectory() as td:
+    d = Path(td)
+    old = time.time() - 2 * 86400
+    names_old = [
+        "lagfix-main.cjs.tmp-123",      # 我们自己的孤儿 → 删
+        "lagfix-observe.js.tmp-456",    # 我们自己的孤儿 → 删
+        "notes.txt.tmp-123",            # 用户/其它插件文件 → 不删
+        "other.tmp-789",                # 非运行时文件名 → 不删
+        "lagfix-main.cjs.tmp-abc",      # 非 pid 后缀 → 不删
+        "user-data.txt",                # 普通用户文件 → 不删
+        "settings.json",                # 设置文件 → 不删
+    ]
+    for n in names_old:
+        p = d / n
+        p.write_text("x", encoding="utf-8")
+        os.utime(p, (old, old))
+    fresh = d / "lagfix-report.py.tmp-999"  # 名字不匹配 + 新文件，双重保护
+    fresh.write_text("x", encoding="utf-8")
+    inst._sweep_tmp(d)
+    pi.sweep_tmp(d)
+    left = sorted(p.name for p in d.iterdir())
+    check("install.py 只删 RUNTIME_FILES 的旧 .tmp-<pid>",
+        "lagfix-main.cjs.tmp-123" not in left and "lagfix-observe.js.tmp-456" not in left,
+        str(left))
+    check("install.py 不碰用户临时文件",
+        all(n in left for n in ("notes.txt.tmp-123", "other.tmp-789",
+                                "lagfix-main.cjs.tmp-abc", "user-data.txt", "settings.json")),
+        str(left))
+    check("patch_install.py 同样只删自己的旧孤儿",
+        "lagfix-report.py.tmp-999" in left
+        and "lagfix-main.cjs.tmp-123" not in left and "lagfix-observe.js.tmp-456" not in left,
+        str(left))
 
 print("== 结果：", "PASS" if ok else "FAIL", "==")
 sys.exit(0 if ok else 1)

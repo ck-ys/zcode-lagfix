@@ -132,9 +132,9 @@ def _print(msg: str) -> None:
 def _version() -> str:
     try:
         data = json.loads((SRC / ".zcode-plugin" / "plugin.json").read_text("utf-8"))
-        return str(data.get("version", "0.3.7"))
+        return str(data.get("version", "0.3.8"))
     except Exception:
-        return "0.3.7"
+        return "0.3.8"
 
 
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".lagfix-optout", "observe-*.jsonl*",
@@ -198,13 +198,24 @@ def _atomic_copy(src: Path, dst: Path) -> None:
 
 
 def _sweep_tmp(dir_path: Path, max_age_s: int = 86400) -> None:
-    """清掉原子复制留下的 `*.tmp-<pid>` 孤儿（只匹配我们自己的命名）。"""
+    """清掉原子复制留下的 `*.tmp-<pid>` 孤儿（只匹配我们自己的命名）。
+
+    v0.3.8：不再匹配任意 `*.tmp-<pid>`。运行目录在用户主目录下，
+    旧规则会误删用户或其它插件恰好同名的临时文件；现在只认
+    RUNTIME_FILES 里每个文件名 + `.tmp-<pid>`，且必须是普通文件、
+    非符号链接，超时才删。
+    """
+    owned = re.compile(
+        r"^(?:" + "|".join(re.escape(n) for n in RUNTIME_FILES) + r")\.tmp-\d+$"
+    )
     try:
         now = time.time()
         for p in dir_path.glob("*.tmp-*"):
-            if not re.match(r"^.+\.tmp-\d+$", p.name):
+            if not owned.match(p.name):
                 continue
             try:
+                if p.is_symlink() or not p.is_file():
+                    continue
                 if now - p.stat().st_mtime > max_age_s:
                     p.unlink()
             except OSError:

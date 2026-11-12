@@ -1575,7 +1575,7 @@ check("A8：面板不再提供「显示角标」开关", !panelText.includes("�
 check("性能页含「侧栏与回前台」四项",
   ["侧栏与回前台统计", "侧栏开合保护", "面板常开保护", "回前台保护"]
     .every((t) => panelText.includes(t)));
-check("面板版本行是 v0.3.7", panelText.includes("v0.3.7"));
+check("面板版本行是 v0.3.8", panelText.includes("v0.3.8"));
 check("面板不再出现版本号式标题", !panelText.includes("v0.3 性能增强"));
 check("维护页写明日志路径与上限",
   panelText.includes("日志存储路径") && panelText.includes("日志上限"));
@@ -1588,7 +1588,7 @@ window.__lagfixCollect();
 check("日志量不足 1MB 时按 KB 显示并实时更新",
   allText(panel).includes("800 KB") && allText(panel).includes("2 个文件"));
 
-console.log("-- v0.3.7 自动检查更新与小红点 --");
+console.log("-- v0.3.8 自动检查更新与小红点 --");
 const UPDATE_KEY = "lagfix.update.v1";
 localStorage.removeItem(UPDATE_KEY);
 check("自动检查默认关闭", collect().settings.autoUpdateCheckOn === false);
@@ -1625,7 +1625,7 @@ check("自动检查把 checkedAt 写入独立 key",
   JSON.stringify(autoKey));
 
 // 模拟主进程注入结果：写入缓存、跨窗口可读，并画出红点。
-window.__lagfixUpdate = { status: "ok", current: "0.3.7", latest: "9.9.9", newer: true,
+window.__lagfixUpdate = { status: "ok", current: "0.3.8", latest: "9.9.9", newer: true,
   url: "https://example.invalid/releases", at: Date.now() };
 window.__lagfixSettings();   // 重建面板 → renderPanelStatus 同步缓存
 panel = documentStub.getElementById("lagfix-settings-panel");
@@ -1639,19 +1639,19 @@ check("维护页显示发现新版本", allText(panel).includes("发现新版本
 check("更新缓存写入独立 key 且含 latest/newer",
   (() => {
     const st = JSON.parse(localStorage.getItem(UPDATE_KEY) || "{}");
-    return st.current === "0.3.7" && st.latest === "9.9.9" && st.newer === true
+    return st.current === "0.3.8" && st.latest === "9.9.9" && st.newer === true
       && typeof st.resultAt === "number";
   })(), localStorage.getItem(UPDATE_KEY));
 
 // 另一个窗口写入缓存：storage 事件应即时更新红点，不需要重建面板。
 const onUpdateStorage = (window._listeners.storage || [])[0];
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.3.7", latest: "10.0.0", newer: true, resultAt: Date.now(),
+  current: "0.3.8", latest: "10.0.0", newer: true, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("跨窗口缓存显示红点", badgeDot.style.display === "" && panelDot.style.display === "");
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.3.7", latest: "10.0.0", newer: false, resultAt: Date.now(),
+  current: "0.3.8", latest: "10.0.0", newer: false, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("明确无新版本时红点隐藏", badgeDot.style.display === "none" && panelDot.style.display === "none");
@@ -1659,8 +1659,8 @@ check("明确无新版本时红点隐藏", badgeDot.style.display === "none" && 
 // 版本不匹配 / 同版本 / newer=false 三种脏数据都不能亮红点。
 const dotCases = [
   ["缓存版本与当前版本不一致", { current: "0.3.6", latest: "9.9.9", newer: true }],
-  ["latest 与当前版本相同", { current: "0.3.7", latest: "0.3.7", newer: true }],
-  ["newer 为 false", { current: "0.3.7", latest: "9.9.9", newer: false }],
+  ["latest 与当前版本相同", { current: "0.3.8", latest: "0.3.8", newer: true }],
+  ["newer 为 false", { current: "0.3.8", latest: "9.9.9", newer: false }],
 ];
 for (const [name, st] of dotCases) {
   localStorage.setItem(UPDATE_KEY, JSON.stringify({ ...st, resultAt: Date.now() }));
@@ -1681,7 +1681,7 @@ localStorage.setItem(UPDATE_KEY, JSON.stringify(manualOnlyKey));
 check("关闭自动检查后不再自动请求", collect().updateCheck === 0);
 // 留一份“有新版本”的缓存给 __lagfixOff 清理用例。
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.3.7", latest: "9.9.9", newer: true, resultAt: Date.now(),
+  current: "0.3.8", latest: "9.9.9", newer: true, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("恢复新版本缓存后红点重新显示",
@@ -2539,7 +2539,7 @@ check("__lagfixOff 清掉更新缓存与两处红点",
     && documentStub.getElementById("lagfix-settings-panel-updatedot").style.display === "none",
   `key=${localStorage.getItem("lagfix.update.v1")}`);
 // 还原前已发出的检查可能在还原后才回来：没有新的用户动作，不得写回缓存/红点/状态文案。
-window.__lagfixUpdate = { status: "ok", current: "0.3.7", latest: "9.9.9", newer: true,
+window.__lagfixUpdate = { status: "ok", current: "0.3.8", latest: "9.9.9", newer: true,
   url: "https://example.invalid/releases", at: Date.now() + 1 };
 window.__lagfixSettings();
 check("__lagfixOff 后到达的在途结果不写缓存/红点",

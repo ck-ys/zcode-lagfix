@@ -1,5 +1,5 @@
 /**
- * zcode-lagfix renderer 观测脚本 v0.3.7
+ * zcode-lagfix renderer 观测脚本 v0.3.8
  *
  * v0.3.7（自动检查更新 + 角标小红点）：
  *   - autoUpdateCheckOn（默认关）：开启后 24h 内最多自动检查一次；结果写入
@@ -147,7 +147,7 @@
   var REFOCUS_WINDOW_MS = 800;     // 回前台帧窗口
   var PANE_SWITCH_DEDUPE_MS = 150; // aria-hidden 与 class 双信号去重
   var REFOCUS_DEDUPE_MS = 500;     // visibilitychange 与 focus 双信号去重
-  var VERSION = "0.3.7";
+  var VERSION = "0.3.8";
   var ERR_LIMIT = 50;
   var OVERLAY_ID = "lagfix-overlay-badge";
   // v0.3.7：更新检查结果的跨窗口缓存 + 自动检查间隔。
