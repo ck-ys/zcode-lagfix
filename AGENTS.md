@@ -217,6 +217,14 @@ v0.3.9 已拍板范围（设置面板滚动/焦点与还原边界，不改观测
 - 明确不做：不把 `__lagfixOff()` 改成完全卸载（v0.3.0–v0.3.2 已拍板保留观测、角标与 Ctrl+Alt+L 入口）；不改 composer、不改消息/会话/工具结果、不改注入链、不新增网络请求。
 - 行为规格见 `docs/specs/v0.3.9-panel-focus.md`；发布说明见 `docs/releases/v0.3.9.md`。
 
+v0.3.10 已拍板范围（更新红点可见性，单点修复）：
+
+- 根因：两处红点样式默认 `display:none`，`syncUpdateDot()` 显示时写空串，浏览器回落到样式表默认值，红点永远不显示。
+- 修复：显示时写显式 `inline-block`，隐藏时写 `none`；条件、位置、颜色、点击行为与缓存结构不变。
+- 自动化：红点可见断言从 `display === ""` 改为 `display === "inline-block"`，覆盖默认隐藏、有新版本、跨窗口、`current > latest`、`__lagfixOff` 五条路径。
+- 明确不做：不改检查更新请求、24 小时自动检查、缓存 key、红点判定条件、注入链或其它缓解项。
+- 行为规格见 `docs/specs/v0.3.10-update-dot-visibility.md`；发布说明见 `docs/releases/v0.3.10.md`。
+
 ## 7. 版本与发布
 
 每次版本变更必须同步以下位置，缺一不可：

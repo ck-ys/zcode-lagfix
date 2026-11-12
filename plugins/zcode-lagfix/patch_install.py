@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""zcode-lagfix v0.3.9 asar 手术库 + CLI（v2：按终审修复 P0-1/P1-1/P1-2/P1-6/P2-*）。
+"""zcode-lagfix v0.3.10 asar 手术库 + CLI（v2：按终审修复 P0-1/P1-1/P1-2/P1-6/P2-*）。
 
 职责：在 ZCode 安装版 app.asar 的入口文件 out/main/index.js 尾部追加一行
 dynamic import，加载我们的主进程 loader（lagfix-main.cjs）。
