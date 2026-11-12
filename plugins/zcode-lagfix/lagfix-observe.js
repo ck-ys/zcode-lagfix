@@ -1,5 +1,10 @@
 /**
- * zcode-lagfix renderer 观测脚本 v0.3.9
+ * zcode-lagfix renderer 观测脚本 v0.3.10
+ *
+ * v0.3.10（更新红点实际可见）：
+ *   - 两个更新红点的 CSS 默认 display:none；syncUpdateDot 显示时改为写
+ *     显式 inline-block。此前写空串会回落到 CSS 的 none，导致有新版本时
+ *     角标旁与维护页「检查更新」行都看不到红点。
  *
  * v0.3.9（设置面板滚动/焦点与还原边界）：
  *   - rebuildPanel() 重建前记住 .dlg-content 的 scrollTop，重建后写回；
@@ -156,7 +161,7 @@
   var REFOCUS_WINDOW_MS = 800;     // 回前台帧窗口
   var PANE_SWITCH_DEDUPE_MS = 150; // aria-hidden 与 class 双信号去重
   var REFOCUS_DEDUPE_MS = 500;     // visibilitychange 与 focus 双信号去重
-  var VERSION = "0.3.9";
+  var VERSION = "0.3.10";
   var ERR_LIMIT = 50;
   var OVERLAY_ID = "lagfix-overlay-badge";
   // v0.3.7：更新检查结果的跨窗口缓存 + 自动检查间隔。
@@ -3870,8 +3875,9 @@
     var on = updateDotVisible();
     var bd = document.getElementById(OVERLAY_ID + "-update-dot");
     var rd = document.getElementById(PANEL_ID + "-updatedot");
-    if (bd) bd.style.display = on ? "" : "none";
-    if (rd) rd.style.display = on ? "" : "none";
+    // 两个红点的 CSS 默认 display:none；这里必须给显式值，写 "" 会回到 CSS 的 none。
+    if (bd) bd.style.display = on ? "inline-block" : "none";
+    if (rd) rd.style.display = on ? "inline-block" : "none";
   }
 
   function writeUpdateState(st) {
