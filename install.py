@@ -132,9 +132,9 @@ def _print(msg: str) -> None:
 def _version() -> str:
     try:
         data = json.loads((SRC / ".zcode-plugin" / "plugin.json").read_text("utf-8"))
-        return str(data.get("version", "0.4.0"))
+        return str(data.get("version", "0.4.1"))
     except Exception:
-        return "0.4.0"
+        return "0.4.1"
 
 
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".lagfix-optout", "observe-*.jsonl*",
