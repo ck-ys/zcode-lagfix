@@ -448,6 +448,53 @@ def main() -> int:
     out = run_laf([bad_ctx])
     check("ctx/paneOpen 坏形状不炸", "Traceback" not in out, out)
 
+    print("-- v0.3.6 O8 补页批量 --")
+    page_ok = {"settings": {"loadOlderPageLimitOn": True},
+               "page": {"limit": 200, "installed": True, "applied": 12, "passthrough": 3}}
+    out = run_laf([page_ok])
+    check("page 正常形状打印页大小与生效/放行次数",
+          "补页批量（实验）：每页最多 200 行" in out
+          and "已生效 12 次" in out and "显式参数放行 3 次" in out, out)
+    # 包装没装上：必须明说计数不可用，不能显示成 0 次生效。
+    out = run_laf([{"settings": {"loadOlderPageLimitOn": True},
+                    "page": {"limit": 200, "installed": False,
+                             "applied": 0, "passthrough": 0}}])
+    check("installed=false 时提示包装尚未装上",
+          "包装尚未装上，计数不可用" in out, out)
+    # 开关开着但还没发生过无参补页：要明确提示，不能让人以为已生效。
+    out = run_laf([{"settings": {"loadOlderPageLimitOn": True},
+                    "page": {"limit": 200, "installed": True,
+                             "applied": 0, "passthrough": 0}}])
+    check("page applied=0 时提示还没有无参补页调用",
+          "还没有无参补页调用" in out, out)
+    # 关闭态优先于旧 page 数据：不能拿旧计数冒充当前状态。
+    out = run_laf([page_ok,
+                   {"settings": {"loadOlderPageLimitOn": False}, "page": None}])
+    check("最新样本关闭时提示已关闭且不打印旧计数",
+          "补页批量已关闭" in out and "已生效 12 次" not in out, out)
+    # dead/显式 page=null：当前没有可用计数，不能越过它回显旧计数。
+    out = run_laf([page_ok,
+                   {"settings": {"loadOlderPageLimitOn": True}, "dead": True,
+                    "page": None}])
+    check("dead 样本不回显旧 page 计数",
+          "已生效 12 次" not in out and "没有补页计数" in out, out)
+    out = run_laf([page_ok,
+                   {"settings": {"loadOlderPageLimitOn": True}, "page": None}])
+    check("最新样本 page=null 时不回显旧计数",
+          "已生效 12 次" not in out and "没有补页计数" in out, out)
+    # 旧样本没有该字段。
+    out = run_laf([{"settings": {}, "ver": "0.3.5"}])
+    check("旧样本无 page 字段时提示本版本未记录",
+          "本版本未记录补页批量" in out and "Traceback" not in out, out)
+    # 坏形状：page 是数字/字符串、字段为负或非数值 → 不抛异常。
+    out = run_laf([{"settings": {"loadOlderPageLimitOn": True}, "page": 7}])
+    check("page 非字典时不炸", "Traceback" not in out, out)
+    out = run_laf([{"settings": {"loadOlderPageLimitOn": True},
+                    "page": {"limit": "many", "applied": -3, "passthrough": None}}])
+    check("page 坏字段回退为默认值且不炸",
+          "每页最多 200 行" in out and "已生效 0 次" in out
+          and "显式参数放行 0 次" in out and "Traceback" not in out, out)
+
     print("== report_session_diag 结果：", "PASS" if ok else "FAIL", "==")
     return 0 if ok else 1
 

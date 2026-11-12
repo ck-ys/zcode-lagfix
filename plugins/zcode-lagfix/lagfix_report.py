@@ -490,7 +490,7 @@ def print_pane_diag(rows: list[dict]) -> None:
 
 
 def print_laf_diag(rows: list[dict]) -> None:
-    """v0.3.4 卡顿来源定位（LoAF 归因）+ v0.3.5 上下文分类 + 翻页降频计数。
+    """v0.3.4 卡顿来源定位（LoAF 归因）+ v0.3.5 上下文分类 + v0.3.6 补页批量计数。
 
     - laf 取最近一条 dict；detail 为 [] 时向前找最近一次非空（与 loadOlderDetail 同约定）。
     - supported=0 明确提示浏览器不支持，不把「不支持」说成「没有卡顿」。
@@ -639,6 +639,50 @@ def print_laf_diag(rows: list[dict]) -> None:
         print(f"  {INFO} 翻页降频已关闭（实验项，默认关闭）")
     else:
         print(f"  {INFO} 无翻页降频数据（旧样本）")
+
+    # v0.3.6 O8：页大小替换计数。状态只看最新样本的设置，避免拿旧的开/关
+    # 样本冒充当前状态；具体计数再向前找最近一条非空 page。遇到 dead 或显式
+    # page=null 必须停下：那表示当前没有可用计数，不能越过它回显旧计数。
+    page_row = None
+    page_no_data = False
+    for r in reversed(rows):
+        if r.get("dead"):
+            page_no_data = True
+            break
+        val = r.get("page")
+        if isinstance(val, dict):
+            page_row = val
+            break
+        if "page" in r:
+            page_no_data = True
+            break
+    page_enabled = newest_settings.get("loadOlderPageLimitOn")
+    if page_enabled is False:
+        print(f"  {INFO} 补页批量已关闭（实验项，默认关闭）")
+    elif page_no_data:
+        print(f"  {INFO} 最新样本没有补页计数（自禁用或序列化失败），不显示更早的计数")
+    elif page_row is not None:
+        limit = page_row.get("limit")
+        applied = page_row.get("applied")
+        passthrough = page_row.get("passthrough")
+        installed = page_row.get("installed")
+        if installed is False:
+            print(f"  补页批量（实验）：每页最多 "
+                  f"{fmt(limit if num(limit) and limit > 0 else 200)} 行，"
+                  f"但包装尚未装上，计数不可用")
+        else:
+            print(f"  补页批量（实验）：每页最多 {fmt(limit if num(limit) and limit > 0 else 200)} 行，"
+                  f"已生效 {fmt(applied if num(applied) and applied >= 0 else 0)} 次；"
+                  f"显式参数放行 {fmt(passthrough if num(passthrough) and passthrough >= 0 else 0)} 次")
+            if not (num(applied) and applied > 0):
+                hint = "开关开着但本文件内还没有无参补页调用"
+                if installed is None:
+                    hint += "；或包装尚未装上"
+                print(f"    （{hint}）")
+    elif page_enabled is True:
+        print(f"  {INFO} 补页批量已开启，但本文件内还没有生效记录（旧样本或尚未触发补页）")
+    else:
+        print(f"  {INFO} 本版本未记录补页批量（旧样本）")
 
 
 def main() -> int:
@@ -830,7 +874,7 @@ def main() -> int:
     print("  · 真实帧间隔 P95 > 50ms 或 单帧最长 > 200ms  → 用户能感知到卡")
     print("  · 长任务次数 > 0 → 主线程被单次阻塞，与卡顿直接相关")
     print("  · 投影提交率高但帧间隔正常 → 宿主在勤快重渲染，暂未卡死")
-    print("[lagfix] v0.3.5：长帧归因补上上下文——每条 ≥100ms 长帧记录距上次通知/补发/滚动/消息提交的毫秒数，并归类为节流补发 / 通知到达 / 滚动 / 其它；样本新增 paneOpen/panelQuiet，报告卡顿段新增面板状态与来源分布。另新增默认关闭的实验「面板常开时进一步合并」（面板期通知下限 400ms、角标 3s）。仍不读消息正文、不写 store、不联网上报；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
+    print("[lagfix] v0.3.6：新增默认关闭的实验「补页批量」——无参补页时把每页默认 60 行提到 200 行，减少同一段历史的加载次数；只改请求页大小，不跳过、不删除、不改消息顺序，带独立开关与生效次数统计。仍不读消息正文、不写 store、不联网上报；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
     print()
     print_logs()
     return 0

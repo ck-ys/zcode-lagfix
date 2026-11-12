@@ -1,5 +1,11 @@
 /**
- * zcode-lagfix renderer 观测脚本 v0.3.5
+ * zcode-lagfix renderer 观测脚本 v0.3.6
+ *
+ * v0.3.6（补页批量，默认关的实验）：
+ *   - O8 loadOlderPageLimitOn：无参 loadOlder() 的默认页大小 60 → 200；
+ *     只改 limit 参数，不跳过调用、不改返回值/this/异常/在途状态。
+ *     与观测、O3 降频独立；关闭/自禁用/__lagfixOff 立即恢复，暂停观测不关闭替换。
+ *   - 报告新增 page 计数（实际替换次数、显式参数放行次数）；O3 保持原样。
  *
  * v0.3.5（长帧上下文归因 + 面板期进一步合并）：
  *   - P0 lafCtxOn（默认开，只读）：每条 ≥100ms 长帧记录距上次通知/补发/滚动/
@@ -126,13 +132,15 @@
   var PANEL_QUIET_BADGE_MS = 3000; // 面板期角标定位上限频率
   // v0.3.5 P0：长帧能被归因到某个信号的最大滞后。
   var LAF_CTX_WINDOW_MS = 1000;
+  // v0.3.6 O8：协议允许的单页上限；宿主 loadAllOlder 也按这个值分页。
+  var LOAD_OLDER_PAGE_LIMIT = 200;
   var REFOCUS_DELAY_MS = 120;      // 回前台合并补发延迟
   var REFOCUS_GUARD_MS = 700;      // 回前台节流下限窗口
   var REFOCUS_BADGE_SKIP_MS = 300; // 回前台前 300ms 不定位角标
   var REFOCUS_WINDOW_MS = 800;     // 回前台帧窗口
   var PANE_SWITCH_DEDUPE_MS = 150; // aria-hidden 与 class 双信号去重
   var REFOCUS_DEDUPE_MS = 500;     // visibilitychange 与 focus 双信号去重
-  var VERSION = "0.3.5";
+  var VERSION = "0.3.6";
   var ERR_LIMIT = 50;
   var OVERLAY_ID = "lagfix-overlay-badge";
   // 宿主浮层（Radix portal）：上下文容量、模型/工具菜单、对话框等。
@@ -171,6 +179,8 @@
     // v0.3.5 P0 归因补强 + O5 面板期进一步合并（默认关，A/B 达标前不进默认路径）
     lafCtxOn: true,            // 长帧上下文归因（只读）
     panelQuietOn: false,       // O5 面板期进一步合并（实验）
+    // v0.3.6 O8 补页批量（默认关，A/B 达标前不进默认路径）
+    loadOlderPageLimitOn: false,
     logMaxMB: 50,       // 观测日志总预算（MB），超过自动删最旧
     warnMs: 50,         // 帧 P95 黄阈值
     badMs: 100,         // 帧 P95 红阈值
@@ -213,6 +223,7 @@
     // v0.3.5：两项独立开关，只接受布尔值。
     if (typeof o.lafCtxOn === "boolean") s.lafCtxOn = o.lafCtxOn;
     if (typeof o.panelQuietOn === "boolean") s.panelQuietOn = o.panelQuietOn;
+    if (typeof o.loadOlderPageLimitOn === "boolean") s.loadOlderPageLimitOn = o.loadOlderPageLimitOn;
     if (o.logMaxMB != null) s.logMaxMB = clampNum(o.logMaxMB, 5, 1000, DEFAULTS.logMaxMB);
     if (o.warnMs != null) s.warnMs = clampNum(o.warnMs, 1, 5000, DEFAULTS.warnMs);
     if (o.badMs != null) s.badMs = clampNum(o.badMs, 2, 10000, DEFAULTS.badMs);
@@ -458,6 +469,7 @@
   // 同步调用的 loadOlder 都在这段窗口内，而 effect 里的自动补拉已经出栈。
   var paceInScrollDispatch = false;
   var paceStats = null;       // 当前 loadOlder 包装闭包里的计数（换 store 归零）
+  var pageStats = null;       // v0.3.6 O8：页大小替换计数（随包装器存亡）
   var CV_ATTR = "data-lagfix-cv";
 
   // v0.3.4 O4：data-lagfix-cv 是 documentElement 上的唯一新增痕迹；所有效果
@@ -1390,6 +1402,11 @@
     try { return wrapped.__lagfixPace || null; } catch (e) { return null; }
   }
 
+  // v0.3.6 O8：包装函数 → 页大小替换计数对象。
+  function pageOf(wrapped) {
+    try { return wrapped.__lagfixPage || null; } catch (e) { return null; }
+  }
+
   function makeProbedLoadOlder(orig) {
     var gen = loadOlderGen;
     var diagGen = loadOlderDiagGen;   // v0.3.4：关闭滚动诊断后，在途回调不得写回
@@ -1401,6 +1418,21 @@
     // 初值给一个极小值：performance.now() 在页面启动后可能小于 600，
     // 用 0 会让开机后第一次大窗口补页被误判成"距上次不足 600ms"。
     var pace = { allowed: 0, skipped: 0, lastAllowedAt: -1e9 };
+    // v0.3.6 O8：只统计真正替换过页大小的调用；显式传参的调用单独计数。
+    var page = { applied: 0, passthrough: 0 };
+    // 所有原方法调用统一走这里：只有「开关开 + 未自禁用 + 无参」才替换 limit。
+    // 观测关闭时也必须生效（缓解项与 observe 独立），所以放在最早的放行分支之前。
+    // gen 校验：包装被释放后，宿主若缓存了旧函数引用，也不能继续替换参数。
+    function callOrig(self, args) {
+      if (gen === loadOlderGen && settings.loadOlderPageLimitOn && !state.dead) {
+        if (!args || args.length === 0) {
+          page.applied++;
+          return orig.call(self, LOAD_OLDER_PAGE_LIMIT);
+        }
+        page.passthrough++;
+      }
+      return orig.apply(self, args);
+    }
     // 不在这里写 paceStats：安装可能失败（冻结/不可扩展 store），那时样本会
     // 显示 0/0，把「没装上」误报成「还没有触发」。由 applyLoadOlderProbe 在
     // marker 写入成功后绑定；任何失败/回滚分支置 null。
@@ -1429,7 +1461,7 @@
         pace.allowed++;
       }
       // 暂停观测或关闭滚动诊断时原样放行：不计数、不写明细、不消耗 initial 判定。
-      if (!settings.observe || !settings.scrollDiagOn || state.dead) return orig.apply(this, arguments);
+      if (!settings.observe || !settings.scrollDiagOn || state.dead) return callOrig(this, arguments);
       var t0 = performance.now();
       var startedAt = Date.now();
       var isFirst = callsInWrap === 0;
@@ -1440,7 +1472,7 @@
       loadOlderCalls++;
       var ret;
       try {
-        ret = orig.apply(this, arguments);
+        ret = callOrig(this, arguments);
       } catch (e) {
         loadOlderErrors++;
         if (gen === loadOlderGen) {
@@ -1484,13 +1516,15 @@
       return ret;
     };
     try { wrapped.__lagfixPace = pace; } catch (e) {}
+    try { wrapped.__lagfixPage = page; } catch (e) {}
     return wrapped;
   }
 
   function applyLoadOlderProbe(store) {
     // v0.3.4：观测（scrollDiagOn）或降频（loadOlderPaceOn）任一需要都要装；
-    // 两者同时关时才不装/卸载，行为回到 v0.3.3。
-    if ((!settings.scrollDiagOn && !settings.loadOlderPaceOn) || state.dead || !store) return false;
+    // v0.3.6：O8 补页批量也需要包装器。三者同时关时才不装/卸载，行为回到 v0.3.5。
+    if ((!settings.scrollDiagOn && !settings.loadOlderPaceOn && !settings.loadOlderPageLimitOn)
+      || state.dead || !store) return false;
     // 宿主的 loadOlder 定义在 ConversationProjectionStore 原型上，但调用点是
     // lease.store.loadOlder()（实例查找）。只包当前主 store 实例：既不把隐藏会话
     // 的补页记进同一份明细，也不在共享原型上留下全局副作用。
@@ -1504,6 +1538,7 @@
     if (marker && marker.wrapped && store.loadOlder === marker.wrapped) {
       loadOlderTarget = store;
       paceStats = marker.pace || null;   // v0.3.4：复用已包装时恢复计数归属
+      pageStats = marker.page || null;   // v0.3.6：O8 计数同样恢复
       return true;   // 已包装：复用，不套两层
     }
     if (marker) {
@@ -1517,6 +1552,9 @@
         delete store.__lagfixLoadOlder;
       } catch (e) {}
     }
+    // 进入重装分支：旧计数不再代表新包装，先清空；成功后再绑定。
+    paceStats = null;
+    pageStats = null;
     var orig = store.loadOlder;
     if (typeof orig !== "function") return false;
     var hadOwn = Object.prototype.hasOwnProperty.call(store, "loadOlder");
@@ -1527,9 +1565,11 @@
     } catch (e) {
       return false;   // 冻结/只读 store：降级为不观测，不能影响宿主
     }
+    // 非严格模式下给 frozen store 赋值会静默失败；必须核对真的换上了。
+    if (store.loadOlder !== wrapped) return false;
     try {
       // v0.3.4：pace 随 marker 存亡——marker 命中分支据此恢复 paceStats。
-      store.__lagfixLoadOlder = { orig: orig, hadOwn: hadOwn, wrapped: wrapped, pace: paceOf(wrapped) };
+      store.__lagfixLoadOlder = { orig: orig, hadOwn: hadOwn, wrapped: wrapped, pace: paceOf(wrapped), page: pageOf(wrapped) };
     } catch (e2) {
       // 方法已替换但 marker 写不进去（不可扩展 store）：回滚方法，避免下次
       // 再包一层后既无法识别也无法还原。
@@ -1540,10 +1580,24 @@
         }
       } catch (e3) {}
       paceStats = null;
+      pageStats = null;
+      return false;
+    }
+    // sealed store 上 marker 赋值也可能静默不生效：同样回滚，避免每 5s 重包。
+    if (!store.__lagfixLoadOlder || store.__lagfixLoadOlder.wrapped !== wrapped) {
+      try {
+        if (store.loadOlder === wrapped) {
+          if (hadOwn) store.loadOlder = orig;
+          else delete store.loadOlder;
+        }
+      } catch (e4) {}
+      paceStats = null;
+      pageStats = null;
       return false;
     }
     loadOlderTarget = store;
     paceStats = paceOf(wrapped);   // 安装成功才绑定计数
+    pageStats = pageOf(wrapped);
     return true;
   }
 
@@ -1552,6 +1606,7 @@
     loadOlderTarget = null;
     loadOlderGen++;   // 在途回调作废：不向已清空的环形窗口写回
     paceStats = null; // v0.3.4：降频计数随包装一起消失，样本回落到 pace=null
+    pageStats = null; // v0.3.6：O8 计数同样清零
     if (!target) return;
     try {
       var rec = target.__lagfixLoadOlder;
@@ -2055,7 +2110,7 @@
             // 切会话可能重建 projection store；立即尝试重装一次，别等 5s 看门狗
             // （冷静期只有 10s，前 5s 的首屏水合最需要保护）。
             if (settings.throttleOn || settings.bigSessionOn || settings.scrollDiagOn
-              || settings.loadOlderPaceOn) {
+              || settings.loadOlderPaceOn || settings.loadOlderPageLimitOn) {
               try { applyThrottle(); } catch (e2) {}
             }
             return;
@@ -2100,7 +2155,7 @@
     try { syncPaneProbe(); } catch (e) {}
     armWatchdog();    // 锚点一挂上就尝试装节流（store 只能从真实 fiber 上取，必须等挂载完成）
     if ((settings.throttleOn && !fixState.applied) || settings.bigSessionOn
-      || settings.scrollDiagOn || settings.loadOlderPaceOn) applyThrottle();
+      || settings.scrollDiagOn || settings.loadOlderPaceOn || settings.loadOlderPageLimitOn) applyThrottle();
   }
 
   function armWatchdog() {
@@ -2124,7 +2179,8 @@
         // 大会话保护也走同一条复核：只判 !loadTarget 的话，宿主中途换原型会让
         // 保护静默失效，而面板仍按旧目标显示"已装"。
         if ((settings.throttleOn && (fixState.applied || fixState.tries < 20))
-          || settings.bigSessionOn || settings.scrollDiagOn || settings.loadOlderPaceOn) {
+          || settings.bigSessionOn || settings.scrollDiagOn || settings.loadOlderPaceOn
+          || settings.loadOlderPageLimitOn) {
           applyThrottle();
         }
         // v0.3.2：新开的会话 pane 不一定伴随锚点变化，看门狗顺带补发现。
@@ -3410,6 +3466,23 @@
       + "不会做什么：只影响滚动引起的加载，ZCode 自己为保证消息完整而发起的补齐不受影响；不丢消息、不改消息内容，也不改变每页条数；被放过的加载会在你继续滚动时自动补上。\n"
       + "代价：快速上翻时更早的历史可能晚一点出现；如果停在半路不再滚动，需要再滚一下才会继续加载。\n"
       + "说明：ZCode 每次加载本身的耗时（随会话总长度增长）这项降不了，它只减少加载的次数。"));
+    c3f.appendChild(rowEl("补页批量 · 实验", "每次自动加载更多历史，减少重复加载的次数。",
+      switchEl(settings.loadOlderPageLimitOn, function (v) {
+        var wasPageLimit = settings.loadOlderPageLimitOn;
+        settings.loadOlderPageLimitOn = v;
+        // 从关到开算一轮新的实验：包装器可能因滚动诊断仍在，计数不能沿用上一轮。
+        if (v && !wasPageLimit && pageStats) {
+          pageStats.applied = 0;
+          pageStats.passthrough = 0;
+        }
+        saveSettings(); applyScrollSettings();
+        if (v) { try { applyThrottle(); } catch (e) {} }
+        rebuildPanel(); renderPanelStatus();
+      }),
+      "会做什么：加载更早消息时一次多取一些（最多 200 行），让同一段历史需要的加载次数变少。\n"
+      + "不会做什么：不跳过、不删除任何消息，也不改变顺序；不改变正在生成的内容或工具执行。\n"
+      + "代价：单次加载的内容更多，个别情况下滚动到更早历史时位置可能有轻微调整。\n"
+      + "说明：这是一项实验，需要实际对比开/关的卡顿数据；没有明显改善就保持关闭。"));
     c3f.appendChild(rowEl("长回合渲染减负 · 实验", "让画面外的长消息块暂时不参与绘制，滚回附近再恢复绘制。",
       switchEl(settings.turnContentVisOn, function (v) {
         settings.turnContentVisOn = v; saveSettings(); syncCvAttr(); rebuildPanel();
@@ -4242,7 +4315,8 @@
   function applyScrollSettings() {
     // v0.3.4：滚动诊断关闭只清观测数据；loadOlder 包装是否卸载还要看降频开关
     // （O3 与观测独立生效）。两者同时关才释放包装，行为回到 v0.3.3。
-    if ((!settings.scrollDiagOn && !settings.loadOlderPaceOn) || state.dead) {
+    if ((!settings.scrollDiagOn && !settings.loadOlderPaceOn && !settings.loadOlderPageLimitOn)
+      || state.dead) {
       releaseLoadOlderProbe();
     }
     if (!settings.scrollDiagOn || state.dead) {
@@ -4315,6 +4389,7 @@
       // 降频包装随 releaseLoadOlderProbe 消失，归因环清空。
       settings.lafDiagOn = false;
       settings.loadOlderPaceOn = false;
+      settings.loadOlderPageLimitOn = false;
       settings.turnContentVisOn = false;
       // v0.3.5：上下文归因与面板期合并一并关；时间戳/计数清空。
       settings.lafCtxOn = false;
@@ -4469,16 +4544,25 @@
     // v0.3.5：P0 上下文与 O5 面板期合并。
     var wasLafCtx = settings.lafCtxOn;
     var wasPanelQuiet = settings.panelQuietOn;
+    // v0.3.6：O8 补页批量。
+    var wasPageLimit = settings.loadOlderPageLimitOn;
     mergeStored(o, settings);
     if (settings.badMs <= settings.warnMs) settings.badMs = settings.warnMs + 1;
+    // v0.3.6：O8 从关到开算一轮新的实验；包装器可能因滚动诊断仍在，计数清零。
+    if (!wasPageLimit && settings.loadOlderPageLimitOn && pageStats) {
+      pageStats.applied = 0;
+      pageStats.passthrough = 0;
+    }
     if (settings.observe !== wasObserve) setObserving(settings.observe, true);
     if (settings.scrollDiagOn !== wasScrollDiag || settings.inputLagOn !== wasInputLag
       || settings.maskOffOnScroll !== wasMask
       || settings.lafDiagOn !== wasLafDiag || settings.loadOlderPaceOn !== wasPace
-      || settings.lafCtxOn !== wasLafCtx) {
+      || settings.lafCtxOn !== wasLafCtx || settings.loadOlderPageLimitOn !== wasPageLimit) {
       applyScrollSettings();
-      // 降频开关打开时立即尝试装包装（scrollDiagOn 可能是关的，不会走上面的 applyThrottle）。
-      if (settings.loadOlderPaceOn) { try { applyThrottle(); } catch (e) {} }
+      // 降频/补页批量开关打开时立即尝试装包装（scrollDiagOn 可能是关的）。
+      if (settings.loadOlderPaceOn || settings.loadOlderPageLimitOn) {
+        try { applyThrottle(); } catch (e) {}
+      }
     }
     // CV 属性幂等同步：另一窗口开关实验项时本窗口立即生效/失效。
     if (settings.turnContentVisOn !== wasCv) syncCvAttr();
@@ -4494,6 +4578,11 @@
       if (!fixState.applied) applyThrottle();
     } else {
       releaseThrottle();
+      // v0.3.6：只开 O8（或 O3）时也要确保 loadOlder 包装存在；applyThrottle
+      // 在 throttleOn=false 时仍会先走 applyLoadOlderProbe，再返回 false。
+      if (settings.loadOlderPaceOn || settings.loadOlderPageLimitOn) {
+        try { applyThrottle(); } catch (e) {}
+      }
     }
     // 大会话保护与节流是两套开关：另一窗口关掉它时必须同步释放本窗口的包装，
     // 否则面板会一直显示"已装"、原型上残留 guard（行为虽放行，状态却是假的）。
@@ -4546,6 +4635,7 @@
       turnContentVisOn: settings.turnContentVisOn,
       lafCtxOn: settings.lafCtxOn,
       panelQuietOn: settings.panelQuietOn,
+      loadOlderPageLimitOn: settings.loadOlderPageLimitOn,
       logMaxMB: settings.logMaxMB,
       warnMs: settings.warnMs, badMs: settings.badMs, collectSec: settings.collectSec,
     };
@@ -4666,6 +4756,18 @@
     };
   }
 
+  // v0.3.6 O8：开关关/自禁用时不输出，避免把「没开」或「已停」误报成「0 次生效」。
+  // installed 用来区分「包装没装上」与「装上了但还没触发」。
+  function pageSnapshot() {
+    if (!settings.loadOlderPageLimitOn || state.dead) return null;
+    return {
+      limit: LOAD_OLDER_PAGE_LIMIT,
+      installed: !!pageStats,
+      applied: pageStats ? pageStats.applied : 0,
+      passthrough: pageStats ? pageStats.passthrough : 0,
+    };
+  }
+
   function fixSnapshot() {
     return {
       on: !!settings.throttleOn, ms: settings.throttleMs,
@@ -4692,7 +4794,7 @@
         // schema 稳定：dead 样本也带这些字段，消费端不必判 undefined
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
         pane: null, refocus: null,
-        laf: null, pace: null,
+        laf: null, pace: null, page: null,
         paneOpen: null, panelQuiet: 0,
         ver: VERSION, updateCheck: 0,
         restart: state.restartRequested ? 1 : 0,
@@ -4724,8 +4826,8 @@
         settings: cfg, fix: fixSnapshot(),
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
         pane: null, refocus: null,
-        // 暂停期归因环不累计（laf=null）；降频是缓解项，与 observe 独立，照实上报。
-        laf: null, pace: paceSnapshot(),
+        // 暂停期归因环不累计（laf=null）；降频/补页批量是缓解项，与 observe 独立，照实上报。
+        laf: null, pace: paceSnapshot(), page: pageSnapshot(),
         paneOpen: null, panelQuiet: 0,
         ver: VERSION, updateCheck: pausedAsk,
         restart: state.restartRequested ? 1 : 0,
@@ -4800,6 +4902,7 @@
         refocus: refocusSnapshot(now),
         laf: lafSnapshot(),
         pace: paceSnapshot(),
+        page: pageSnapshot(),
         // v0.3.5：P0 的窗口上下文 + O5 是否正在生效；未检测到侧栏时 paneOpen=null。
         paneOpen: paneDetected ? !!paneOpen : null,
         panelQuiet: panelQuietActive() ? 1 : 0,
@@ -4814,6 +4917,7 @@
         settings: cfg, fix: fixSnapshot(),
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
         pane: null, refocus: null, laf: null, pace: null,
+        page: null,
         paneOpen: null, panelQuiet: 0, ver: VERSION,
         updateCheck: askUpdate,
         restart: state.restartRequested ? 1 : 0 });
@@ -4848,6 +4952,8 @@
       loadOlderErrors: loadOlderErrors, inputSamples: inputRing.length,
       sessionBuckets: sessionBuckets.length, sessionPanes: sessionPanes.length,
       loadOlderDetail: loadOlderDetail.length,
+      pace: paceSnapshot(),
+      page: pageSnapshot(),
       lafCtx: {
         notify: lastNotifyAt, flush: lastFlushAt,
         scroll: lastLafScrollAt, commit: lastCommitAt,

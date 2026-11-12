@@ -154,6 +154,7 @@ function makeStore() {
     // v0.3.1 观测对象：成功/失败/同步抛错三种路径都要验证 wrapper 不改变原语义。
     // lastLoadOlderPromise 用来断言 wrapper 返回的是**原 promise**，不是 .then 包出来的新 promise。
     loadOlder() {
+      this.loadOlderArgs = Array.from(arguments);
       this.loadOlderHits = (this.loadOlderHits || 0) + 1;
       if (this.loadOlderThrow) throw new Error("sync-boom");
       // v0.3.2：模拟宿主 loadOlder 往 rows.window 追加一页，用于验证
@@ -804,6 +805,118 @@ check("包装重装后 pace 计数归零",
 writeSettings({ scrollDiagOn: true, loadOlderPaceOn: false });
 winRows.length = 1;             // 还原小窗口，不影响后续用例
 
+console.log("-- v0.3.6 O8：补页批量（默认关） --");
+// 先确认默认关闭，再把观测/O3 都关掉，验证「只开 O8 也能装包装」。
+check("O8 前置：默认关闭", collect().settings.loadOlderPageLimitOn === false);
+writeSettings({ scrollDiagOn: false, loadOlderPaceOn: false, loadOlderPageLimitOn: false });
+check("三开关全关后 loadOlder 包装卸载", !store.__lagfixLoadOlder);
+writeSettings({ loadOlderPageLimitOn: true });
+check("只开 O8 也会安装 loadOlder 包装", !!store.__lagfixLoadOlder);
+check("只开 O8 时 pace 为 null", collect().pace === null, JSON.stringify(collect().pace));
+const o8HitsBefore = store.loadOlderHits || 0;
+const o8Promise = store.loadOlder();
+check("O8 无参调用替换为 limit=200",
+  JSON.stringify(store.loadOlderArgs) === "[200]", JSON.stringify(store.loadOlderArgs));
+check("O8 返回原 promise（不是新包装的）", o8Promise === store.lastLoadOlderPromise);
+await o8Promise;
+check("O8 只调用原方法一次", (store.loadOlderHits || 0) === o8HitsBefore + 1,
+  `hits=${store.loadOlderHits}`);
+const o8Page1 = collect().page;
+check("O8 page 快照：limit=200、installed、applied=1",
+  o8Page1 && o8Page1.limit === 200 && o8Page1.installed === true
+    && o8Page1.applied === 1 && o8Page1.passthrough === 0,
+  JSON.stringify(o8Page1));
+// 显式参数必须原样放行，不能被插件覆盖。
+await store.loadOlder(60);
+check("O8 显式 limit 原样放行", JSON.stringify(store.loadOlderArgs) === "[60]",
+  JSON.stringify(store.loadOlderArgs));
+const o8Page2 = collect().page;
+check("O8 显式参数只计 passthrough，不计 applied",
+  o8Page2 && o8Page2.applied === 1 && o8Page2.passthrough === 1,
+  JSON.stringify(o8Page2));
+// this 语义：调用方给别的接收者时，原方法也必须收到同一个接收者。
+const otherReceiver = { loadOlderHits: 0 };
+await store.loadOlder.call(otherReceiver);
+check("O8 保持 this 语义并仍替换为 200",
+  otherReceiver.loadOlderHits === 1 && JSON.stringify(otherReceiver.loadOlderArgs) === "[200]",
+  `hits=${otherReceiver.loadOlderHits} args=${JSON.stringify(otherReceiver.loadOlderArgs)}`);
+// 同步异常也必须原样抛给调用方；页大小已经替换，计数照实增加。
+const o8AppliedBeforeThrow = collect().page.applied;
+store.loadOlderThrow = true;
+let o8Threw = false;
+try { store.loadOlder(); } catch (e) { o8Threw = true; }
+store.loadOlderThrow = false;
+check("O8 同步异常原样抛出", o8Threw);
+check("O8 同步抛错仍照实计入 applied",
+  collect().page.applied === o8AppliedBeforeThrow + 1,
+  `applied=${collect().page.applied} 期望 ${o8AppliedBeforeThrow + 1}`);
+// 关闭 O8（且观测/O3 都关）→ 包装卸载、下一次无参调用回到宿主默认。
+const cachedO8Wrapper = store.loadOlder;
+writeSettings({ loadOlderPageLimitOn: false });
+check("关闭 O8 后包装卸载", !store.__lagfixLoadOlder);
+await store.loadOlder();
+check("关闭 O8 后无参调用不再传 limit",
+  JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
+check("关闭 O8 后 page 为 null", collect().page === null,
+  JSON.stringify(collect().page));
+// 包装因滚动诊断保留时：关闭 O8 只停止替换，不卸载；重新开启从 0 计数。
+writeSettings({ scrollDiagOn: true, loadOlderPageLimitOn: true });
+await store.loadOlder();
+check("O8 重开前置：已生效 1 次",
+  collect().page && collect().page.applied === 1, JSON.stringify(collect().page));
+// 包装释放后宿主若缓存了旧函数引用，也不能继续替换参数（gen 门控）。
+await cachedO8Wrapper.call(store);
+check("释放后旧 wrapper 引用不再替换参数",
+  JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
+writeSettings({ loadOlderPageLimitOn: false });
+check("关闭 O8 但包装保留时 page 为 null", collect().page === null,
+  JSON.stringify(collect().page));
+await store.loadOlder();
+check("关闭 O8 但包装保留时不再传 limit",
+  JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
+writeSettings({ loadOlderPageLimitOn: true });
+const o8Reopen = collect().page;
+check("O8 从关到开重新计数",
+  o8Reopen && o8Reopen.applied === 0 && o8Reopen.passthrough === 0,
+  JSON.stringify(o8Reopen));
+await store.loadOlder();
+check("O8 重新开启后立刻恢复替换",
+  JSON.stringify(store.loadOlderArgs) === "[200]", JSON.stringify(store.loadOlderArgs));
+// 暂停观测与 O8 独立：observe=false 时缓解仍生效，计数继续累计。
+writeSettings({ observe: false });
+check("暂停观测时 O8 包装仍在", !!store.__lagfixLoadOlder);
+await store.loadOlder();
+check("暂停观测时 O8 仍替换为 200", JSON.stringify(store.loadOlderArgs) === "[200]",
+  JSON.stringify(store.loadOlderArgs));
+check("暂停期间 O8 计数继续累计",
+  collect().page && collect().page.applied === 2, JSON.stringify(collect().page));
+writeSettings({ observe: true });
+// 包装重装后计数归零（换主 store 同口径）。
+writeSettings({ scrollDiagOn: false, loadOlderPaceOn: false, loadOlderPageLimitOn: false });
+check("重装前置：包装已卸载", !store.__lagfixLoadOlder);
+writeSettings({ scrollDiagOn: true, loadOlderPaceOn: false, loadOlderPageLimitOn: true });
+const o8Fresh = collect().page;
+check("重装后 O8 计数归零", o8Fresh && o8Fresh.applied === 0 && o8Fresh.passthrough === 0,
+  JSON.stringify(o8Fresh));
+// 与 O3 叠加：O3 跳过的那次不调用原方法，也不计 O8 的 applied。
+for (let i = 0; i < 3200; i++) winRows.push({ rowId: "o8pace" + i });
+writeSettings({ loadOlderPaceOn: true });
+const bothHitsBefore = store.loadOlderHits || 0;
+paceScroll();
+await store.loadOlder();
+const bothApplied = collect().page.applied;
+paceScroll();
+const bothSkipped = store.loadOlder();
+await Promise.all([bothSkipped]);
+check("O3 跳过时原方法只执行一次，O8 只记一次 applied",
+  (store.loadOlderHits || 0) === bothHitsBefore + 1
+    && collect().page.applied === bothApplied
+    && bothApplied >= 1,
+  `hits=${store.loadOlderHits} applied=${collect().page.applied}`);
+writeSettings({ loadOlderPaceOn: false, loadOlderPageLimitOn: false });
+winRows.length = 1;
+writeSettings({ scrollDiagOn: true });
+
 console.log("-- O1b 输入延迟 --");
 const keySurface = makeEl("div");
 keySurface.closest = (sel) =>
@@ -1451,7 +1564,7 @@ check("A8：面板不再提供「显示角标」开关", !panelText.includes("�
 check("性能页含「侧栏与回前台」四项",
   ["侧栏与回前台统计", "侧栏开合保护", "面板常开保护", "回前台保护"]
     .every((t) => panelText.includes(t)));
-check("面板版本行是 v0.3.5", panelText.includes("v0.3.5"));
+check("面板版本行是 v0.3.6", panelText.includes("v0.3.6"));
 check("面板不再出现版本号式标题", !panelText.includes("v0.3 性能增强"));
 check("维护页写明日志路径与上限",
   panelText.includes("日志存储路径") && panelText.includes("日志上限"));
@@ -2048,6 +2161,8 @@ check("默认 lafCtxOn=true（读脚本加载时的快照）", initialSettings.l
   `snapshot=${initialSettings.lafCtxOn}`);
 check("默认 panelQuietOn=false（实验默认关）", initialSettings.panelQuietOn === false,
   `snapshot=${initialSettings.panelQuietOn}`);
+check("默认 loadOlderPageLimitOn=false（实验默认关）", initialSettings.loadOlderPageLimitOn === false,
+  `snapshot=${initialSettings.loadOlderPageLimitOn}`);
 documentStub.hidden = false;   // 后台窗口会走 hiddenSkipOn，通知不会立即 flush
 writeSettings({ throttleOn: true, lafCtxOn: true });
 check("P0 前置：合并刷新已启用并已装到当前 store",
@@ -2285,6 +2400,12 @@ check("一键还原同时关掉 v0.3.4 三项",
 check("一键还原同时关掉 v0.3.5 两项",
   saved.lafCtxOn === false && saved.panelQuietOn === false,
   `ctx=${saved.lafCtxOn} quiet=${saved.panelQuietOn}`);
+check("一键还原同时关掉 v0.3.6 O8",
+  saved.loadOlderPageLimitOn === false,
+  `pageLimit=${saved.loadOlderPageLimitOn}`);
+check("__lagfixOff 后 page 为 null",
+  collect().page === null && window.__lagfixDiag().page === null,
+  `page=${JSON.stringify(collect().page)}`);
 check("__lagfixOff 后 paneOpen=null、panelQuiet=0",
   collect().paneOpen === null && collect().panelQuiet === 0,
   `paneOpen=${collect().paneOpen} panelQuiet=${collect().panelQuiet}`);
@@ -2419,6 +2540,7 @@ console.log("-- v0.3.4 面板与暂停路径 --");
 const panelRootV34 = documentStub.getElementById("lagfix-settings-panel");
 check("面板有「卡顿来源定位」行", !!findRow(panelRootV34, "卡顿来源定位"));
 check("面板有「大会话翻页降频 · 实验」行", !!findRow(panelRootV34, "大会话翻页降频 · 实验"));
+check("面板有「补页批量 · 实验」行", !!findRow(panelRootV34, "补页批量 · 实验"));
 check("面板有「长回合渲染减负 · 实验」行", !!findRow(panelRootV34, "长回合渲染减负 · 实验"));
 check("面板有「卡顿来源细分」行", !!findRow(panelRootV34, "卡顿来源细分"));
 check("面板有「面板常开时进一步合并 · 实验」行",
