@@ -244,6 +244,16 @@ v0.4.1 已拍板范围（角标更新红点移到齿轮右上角，单点视觉�
 - 明确不做：不改网络请求、24 小时自动检查、红点判定条件、角标尺寸/指标文字/齿轮点击行为；不新增设置项或日志字段。
 - 行为规格见 `docs/specs/v0.4.1-update-dot-corner.md`；发布说明见 `docs/releases/v0.4.1.md`。
 
+v0.4.2 已拍板范围（观测口径与包装器生命周期加固，不新增缓解项）：
+
+- S1 帧统计：`frameRing` 扩到 3600（30s × 120Hz）；`frameStats().max` 为窗口内最大值；样本新增 `frameMaxAll`（attach/切会话以来）与 `frameMaxWindow`（最近 30s），旧 `frameMax` 保留为历史值兼容；角标/悬停只用窗口值。
+- S2/S3 包装器 identity：`loadAllOlder` 与 `subscribe` 的 marker 记录 `{orig, wrapped}`；宿主运行期替换实现后不复用旧 marker，按当前实现重装；释放时只还原本插件那一层，不覆盖宿主。
+- S4 O3 代际门控：`loadOlder` 旧 wrapper 在 `gen !== loadOlderGen` 时原样直通，不跳过、不计数、不写明细；丢弃旧 marker 时递增代际。
+- S5 T1 失配：定时器 probe 校验全局 identity；失配时 `supported=0/lost=1`，旧 wrapper 直通、不抓栈；重装以当前实现为 original；关闭只还原自己那层。
+- S6 报告一致性：滚动/输入关闭态明示且不回退旧数据；`timer.epoch`/`laf.epoch`/`scroll.loadOlderEpoch` 跨代际停止回退；`_fmt_ts_full` 只接受 2000–2100 年，越界显示 `-`。
+- 明确不做：不新增设置项、不改默认值、不把实验项转默认；不做插件自身开销微优化与安装器/日志清理改动（v0.4.3 或独立 chore）；不折叠/隐藏内容，不改消息、会话、工具结果，不读 `db.sqlite`，不开 CDP，不联网上报。
+- 行为规格见 `docs/specs/v0.4.2-observability-accuracy.md`；拍板页见 `docs/decisions/v0.4.2-observability-accuracy.html`；发布说明见 `docs/releases/v0.4.2.md`。
+
 ## 7. 版本与发布
 
 每次版本变更必须同步以下位置，缺一不可：
