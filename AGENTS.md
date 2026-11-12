@@ -181,6 +181,13 @@ v0.3.5 已拍板范围（推荐 A：P0 + O5 + U1）：
 - U1 只出文档：把右侧预览是 Electron `<webview>` guest、合成落在宿主 renderer 的证据写进 README/发布说明，不改注入链、不声称插件已修。
 - 两键均可独立关闭；`__lagfixOff()`/自禁用/暂停三条路径必须清空四个时间戳、`ctx` 计数与 `paneOpen/panelQuiet` 输出。行为规格见 `docs/specs/v0.3.5-laf-context.md`；拍板页见 `docs/decisions/v0.3.5-next-optimization.html`。O3b（自动补拉降频）与 O6（非活动 pane 节流）本版不做。
 
+v0.3.6 已拍板范围（推荐 A：O8 补页批量，默认关闭的实验）：
+
+- O8 补页批量（`loadOlderPageLimitOn`，默认关）：只包装当前主 store **实例**的 `loadOlder`；仅当调用方无参且开关开、未自禁用时，改为 `orig.call(this, 200)`（协议上限内）；显式参数、开关关、自禁用一律原样 `orig.apply(this, arguments)`。必须保留 `this`、Promise、异常、`loadingOlder/canLoadOlder` 与返回内容；不跳过、不合并、不缓存、不写 store。包装安装条件扩展为 `scrollDiagOn || loadOlderPaceOn || loadOlderPageLimitOn`；只开 O8 也必须生效。计数 `page={limit,installed,applied,passthrough}` 随包装器生命周期：从关到开/换 store/自禁用/`__lagfixOff()` 清零，暂停观测不重置（替换仍生效）；`__lagfixOff()` 同时把开关置 false。样本 `page` 仅在开关开时上报，关闭为 `null`；`installed=false` 表示包装未装上、计数不可用。报告补页段显示页大小、生效与放行次数，遇到 dead/显式 `page=null` 停止回退，不回显旧计数。
+- 依赖宿主契约：ZCode v3.17.2 源码与安装版 v3.18.1 `app.asar` 均已核对 `loadOlder(limit = 60)` 与 `rowsRangeMaxLimit = 200`；宿主调用点为无参。未来若参数消失或上限变化，本实验必须停用并在报告提示，不得猜参数。
+- 明确不做：O3 行为改动、O3b 自动补拉降频、O6/O7 隐藏 pane 策略、预览 HTML 优化；不折叠/不隐藏任何内容；不改消息、会话、工具结果；不读 `db.sqlite`；不开 CDP；不联网。
+- A/B 门槛：同一会话、同一段历史、同一滚动路径做关→开→关至少 3 轮；补页次数下降 ≥50%（目标约 -66%），且补页总阻塞或滚动 P95/长任务下降 ≥20%，顶部空白 ≤300ms、锚点漂移 ≤48px、DOM 峰值不增加 >20%；未过线保持默认关闭并如实标注。行为规格见 `docs/specs/v0.3.6-loadolder-page.md`；拍板页见 `docs/decisions/v0.3.6-loadolder-page.html`。
+
 ## 7. 版本与发布
 
 每次版本变更必须同步以下位置，缺一不可：
