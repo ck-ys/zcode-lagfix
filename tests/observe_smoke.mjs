@@ -3047,6 +3047,8 @@ check("面板有「大会话翻页降频 · 实验」行", !!findRow(panelRootV3
 check("面板有「补页批量 · 实验」行", !!findRow(panelRootV34, "补页批量 · 实验"));
 check("面板有「长回合渲染减负 · 实验」行", !!findRow(panelRootV34, "长回合渲染减负 · 实验"));
 check("面板有「卡顿来源细分」行", !!findRow(panelRootV34, "卡顿来源细分"));
+check("面板有「第三方定时器归因 · 实验」行",
+  !!findRow(panelRootV34, "第三方定时器归因 · 实验"));
 check("面板有「面板常开时进一步合并 · 实验」行",
   !!findRow(panelRootV34, "面板常开时进一步合并 · 实验"));
 // 暂停观测时 CV 属性必须移除（want 条件含 observe），恢复后补回
