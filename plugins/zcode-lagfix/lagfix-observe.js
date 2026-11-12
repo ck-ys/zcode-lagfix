@@ -1,5 +1,11 @@
 /**
- * zcode-lagfix renderer 观测脚本 v0.4.0
+ * zcode-lagfix renderer 观测脚本 v0.4.1
+ *
+ * v0.4.1（角标更新红点移到齿轮右上角）：
+ *   - 红点作为齿轮按钮子元素绝对定位到右上角（6px，带背景色描边），
+ *     不再挤在指标文字与齿轮之间；pointer-events:none 不挡齿轮点击。
+ *   - 红点 aria-hidden，齿轮 title 在有新版本时补「（有新版本）」。
+ *   - 显示条件、检查逻辑、缓存结构与维护页行内红点不变。
  *
  * v0.4.0（第三方定时器归因 + 自适应补页）：
  *   - T1 timerDiagOn（默认关，只读）：包装 window.setTimeout/setInterval，
@@ -176,7 +182,7 @@
   var REFOCUS_WINDOW_MS = 800;     // 回前台帧窗口
   var PANE_SWITCH_DEDUPE_MS = 150; // aria-hidden 与 class 双信号去重
   var REFOCUS_DEDUPE_MS = 500;     // visibilitychange 与 focus 双信号去重
-  var VERSION = "0.4.0";
+  var VERSION = "0.4.1";
   var ERR_LIMIT = 50;
   var OVERLAY_ID = "lagfix-overlay-badge";
   // v0.3.7：更新检查结果的跨窗口缓存 + 自动检查间隔。
@@ -2654,14 +2660,17 @@
       "white-space:nowrap;overflow:hidden;max-width:calc(100vw - 24px)}",
       "#" + OVERLAY_ID + ":hover{background:var(--color-popover,#1c2129)}",
       "#" + OVERLAY_ID + " .lg-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}",
-      // v0.3.7：有新版本时角标右侧的小红点（不挤占文字，不用绝对定位避免被 overflow 裁掉）
-      "#" + OVERLAY_ID + " .lg-update-dot{width:7px;height:7px;border-radius:50%;",
-      "background:#f85149;flex:0 0 auto;display:none}",
+      // v0.4.1：红点改成齿轮右上角的角标；绝对定位只伸进角标自身内边距，
+      // 不越过 overflow:hidden 的裁切边界；pointer-events:none 不挡齿轮点击。
+      "#" + OVERLAY_ID + " .lg-update-dot{position:absolute;top:-2px;right:-2px;",
+      "width:6px;height:6px;border-radius:50%;background:#f85149;",
+      "box-shadow:0 0 0 1.5px var(--color-popover,#161b22);",
+      "pointer-events:none;display:none}",
       "#" + OVERLAY_ID + " .lg-verdict{font-weight:600}",
       "#" + OVERLAY_ID + " .lg-met{color:var(--color-foreground-subtle,#9aa4b2);overflow:hidden;",
       "min-width:0;",
       "text-overflow:ellipsis}",
-      "#" + OVERLAY_ID + " .lg-gear{border:0;background:transparent;color:inherit;",
+      "#" + OVERLAY_ID + " .lg-gear{position:relative;border:0;background:transparent;color:inherit;",
       "padding:2px;margin-left:1px;border-radius:6px;cursor:pointer;display:inline-flex;",
       "align-items:center;justify-content:center;opacity:.7}",
       "#" + OVERLAY_ID + " .lg-gear:hover{background:rgba(255,255,255,.1);opacity:1}",
@@ -2844,11 +2853,11 @@
     met.id = OVERLAY_ID + "-met";
     met.textContent = "帧 -";
 
-    // v0.3.7：有新版本时的小红点，放在文字与齿轮之间，不参与文字省略。
+    // v0.3.7：有新版本时的小红点；v0.4.1 起挂在齿轮按钮右上角（见下方 appendChild）。
     var updDot = document.createElement("span");
     updDot.className = "lg-update-dot";
     updDot.id = OVERLAY_ID + "-update-dot";
-    updDot.title = "发现新版本，点齿轮 → 维护查看";
+    updDot.setAttribute("aria-hidden", "true");
     updDot.style.display = "none";
 
     var gear = document.createElement("button");
@@ -2877,7 +2886,8 @@
     el.appendChild(dot);
     el.appendChild(verdict);
     el.appendChild(met);
-    el.appendChild(updDot);
+    // v0.4.1：红点作为齿轮的子元素，绝对定位到按钮右上角。
+    gear.appendChild(updDot);
     el.appendChild(gear);
     el.addEventListener("click", function (ev) {
       if (ev.target === gear || (gear.contains && gear.contains(ev.target))) return;
@@ -4162,6 +4172,9 @@
     // 两个红点的 CSS 默认 display:none；这里必须给显式值，写 "" 会回到 CSS 的 none。
     if (bd) bd.style.display = on ? "inline-block" : "none";
     if (rd) rd.style.display = on ? "inline-block" : "none";
+    // v0.4.1：红点不再自带 title，改由齿轮提示；不靠颜色传达唯一信息。
+    var gear = document.getElementById(GEAR_ID);
+    if (gear) gear.title = on ? "打开设置（有新版本）" : "打开设置";
   }
 
   function writeUpdateState(st) {
