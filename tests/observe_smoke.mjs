@@ -853,6 +853,15 @@ check("scrollDiagOn=false 冷装后首调不吞、随后仍能降频（P1-1）",
 check("冷装后的降频计数：2 放行 / 1 跳过",
   paceCold && paceCold.allowed === 2 && paceCold.skipped === 1,
   JSON.stringify(paceCold));
+// v0.4.3 三审 P2：无关开关触发 applyScrollSettings 时，不能把正在累计的
+// 「关→开」误判出来清零（lastPaceOn 已按当前设置播种）。
+writeSettings({ inputLagOn: false });
+writeSettings({ inputLagOn: true });
+const paceAfterUnrelated = JSON.parse(window.__lagfixCollect()).pace;
+check("无关开关切换不清零本轮降频计数",
+  paceAfterUnrelated && paceAfterUnrelated.allowed === 2
+    && paceAfterUnrelated.skipped === 1,
+  JSON.stringify(paceAfterUnrelated));
 writeSettings({ scrollDiagOn: true, loadOlderPaceOn: false });
 winRows.length = 1;             // 还原小窗口，不影响后续用例
 
@@ -948,6 +957,21 @@ check("只有帧切片变化时样本也会重发（帧已进指纹）",
     && swFrameOnly.items[swFrameOnly.items.length - 1].afterMax2s >= 180,
   JSON.stringify(swFrameOnly.items && swFrameOnly.items.slice(-1)));
 
+// v0.4.3 三审 P2：A→B→A 的 150ms 内往返不能留下 from===to 的伪切换。
+await wait(160);                 // 越过与上一条的去重窗口
+anchor.setAttribute("data-session-id", "sess_round_1");
+fireMutation(anchor, "data-session-id");
+const swRoundOut = switchOf();
+const roundLen = swRoundOut.items.length;
+anchor.setAttribute("data-session-id", "sess_beta_2");
+fireMutation(anchor, "data-session-id");   // 150ms 内回到 from
+fireMutation(anchor, "data-session-id");   // 同一次切换的重复信号：必须被吞掉
+const swRoundBack = switchOf();
+check("150ms 内 A→B→A 往返不新增 from===to 的伪切换",
+  swRoundBack.items.length === roundLen - 1
+    && !swRoundBack.items.some((r) => r.from === r.to && r.from !== ""),
+  JSON.stringify(swRoundBack.items.map((r) => r.from + ">" + r.to)));
+
 // A5 + 环上限：连续切换跨过 5 个会话桶上限与 10 条环上限，from/to 仍是短串。
 for (let i = 0; i < 11; i++) {
   await wait(160);               // 越过 150ms 去重窗口
@@ -1000,6 +1024,21 @@ check("重开后继续记录，环里没有空白期的 sid",
   swRe.items.length === Math.min(swBeforeOff + 1, 10)
     && !swRe.items.some((r) => r.to === "sess_off"),
   JSON.stringify(swRe.items.map((r) => r.from + ">" + r.to)));
+
+// v0.4.3 三审：采集间隔可调到 30/60/120 秒，自然结算可能晚于记录 30 秒很久。
+// 容差必须按 collectSec 放大，否则 after 值会被静默判过期（settled=1 但全 null）。
+writeSettings({ collectSec: 30 });
+await wait(160);
+anchor.setAttribute("data-session-id", "sess_late_1");
+fireMutation(anchor, "data-session-id");
+window.__lagfixTest.ageSwitchRecords(31000);   // 记录已过 30 秒，但本轮采集还没跑
+const swLate = switchOf();                      // 采集周期内自然结算
+const lateRec = swLate.items.find((r) => r.to === "sess_lat");
+check("collectSec=30 时 31 秒后的自然结算仍补齐 after 值",
+  !!lateRec && lateRec.settled === 1 && lateRec.settledEarly === 0
+    && typeof lateRec.domAfter === "number",
+  JSON.stringify(lateRec));
+writeSettings({ collectSec: 5 });
 
 // 还原锚点 sid：后面的多会话用例按 sess_test_123 建桶。必须先还原再重建桶，
 // 否则重建时会把临时的 sess_on_* 也建成桶，多会话用例就多出一个。

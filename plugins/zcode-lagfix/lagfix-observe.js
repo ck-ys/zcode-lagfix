@@ -846,13 +846,17 @@
   var paceTotal = { allowed: 0, skipped: 0 };
   // v0.4.3 三审 P2：实验开关「关→开」也要把本轮计数清零（规格 §4.3）。包装器
   // 可能被复用、paceStats 还是同一个对象，所以要在设置切换点显式重置。
-  var lastPaceOn = false;
+  // 必须按已加载的设置播种：面板默认值不是启动时的真实值，若上次会话已开启
+  // 降频，播种成 false 会让启动后第一个无关开关被误判成「关→开」而清零计数。
+  var lastPaceOn = !!settings.loadOlderPaceOn;
   // v0.4.3 P0：会话切换归因环。记录用 live 累加（lafDetail/loadOlderDetail 只有
   // 10 条 FIFO，结算时回头扫环会把切换后最早的长帧/补页丢掉），2s 帧切片存
   // 原始毫秒数组到冻结时再算 max/p95。dom/turns 取缓存值：切换瞬间做 O(DOM)
   // 扫描本身就是几十 ms 的长任务，不能为观测在最重的时刻加成本。
   var switchRing = [];        // [{t, at, from, to, _f2[], _lafN2s, _styleMs2s, ...}]
   var switchLastRecAt = 0;    // 150ms 去重（Date.now 域）
+  var switchSuppressTo = "";  // 往返丢弃后，150ms 内吞掉同一 sid 的重复信号
+  var switchSuppressAt = 0;
   var switchVersion = 0;      // 内容指纹：任何变更 +1，未变化样本发 []
   var switchLastKey = "";     // 上次随样本发出的指纹
   var turnsCount = null;      // 挂载 turn 数缓存（scrollSnapshot 每周期刷新）
@@ -2467,25 +2471,35 @@
     return sid ? String(sid).slice(0, 8) : "";
   }
 
-  // 冻结一条记录：两种入口——30 秒窗口自然到期，或窗口内又发生了下一次切换
-  // （后者必须截断，否则第二次切换的补页潮/长帧/DOM 会被算到第一条头上）。
-  // 只有距离记录时刻仍在窗口 + 一个采集周期的容差内才填 after 值，避免关闭
-  // 开关很久后重开、拿当前 DOM 冒充 30 秒时的 DOM。
+  // 冻结一条记录：两种入口——30 秒窗口自然到期（采集周期内调用），或窗口内又
+  // 发生了下一次切换（early=true，在切换信号里同步调用）。
+  // early 路径**只用缓存、绝不扫描 DOM**：那正是宿主水合新会话最重的时刻，插一次
+  // 全文档查询既违背「不在切换瞬间做 O(DOM)」的承诺，还会把新会话的 DOM 记成上
+  // 一条的 after。自然结算发生在采集周期里，允许补一次缺失/过期的缓存。
+  // 容差按用户可调采集间隔放大：collectSec 可选 1–120s，写死 10s 会让 30s 后
+  // 才送达的样本被误判过期，after 值静默丢失。
   function settleSwitchRecord(r, now, early) {
     r.settled = true;
     r.settledEarly = early ? 1 : 0;
-    var fresh = now - r.t <= SWITCH_ACC_WIN_MS + SWITCH_SETTLE_SLACK_MS;
+    var collectMs = 5000;
+    try { collectMs = clampNum(settings.collectSec, 1, 120, 5) * 1000; } catch (e) {}
+    var slack = Math.max(SWITCH_SETTLE_SLACK_MS, collectMs + 5000);
+    var fresh = now - r.t <= SWITCH_ACC_WIN_MS + slack;
     var domNow = domCount;
     var turnsNow = turnsCount;
-    if (fresh) {
-      // 结算发生在常规采集周期（不是切换瞬间），补一次计数成本可接受；
-      // 只有缓存缺失/过期时才真的扫，避免每个周期重复 O(DOM)。
+    if (fresh && !early) {
+      // 只有缓存缺失/过期时才真的扫；domProbeAt 是 performance.now() 域。
       try {
-        if (typeof domNow !== "number" || !domProbeAt || now - domProbeAt > 5000) {
+        var perfNow = performance.now();
+        if (typeof domNow !== "number" || !domProbeAt || perfNow - domProbeAt > 5000) {
           domNow = document.getElementsByTagName("*").length;
         }
       } catch (e) {}
-      try { turnsNow = document.querySelectorAll('[data-v4-turn-unit="true"]').length; } catch (e) {}
+      try {
+        if (typeof turnsNow !== "number") {
+          turnsNow = document.querySelectorAll('[data-v4-turn-unit="true"]').length;
+        }
+      } catch (e) {}
     }
     r.domAfter = fresh ? domNow : null;
     r.turnsAfter = fresh ? turnsNow : null;
@@ -2506,10 +2520,24 @@
     if (!switchWatchActive()) return;
     var now = Date.now();
     var last = switchRing[switchRing.length - 1];
+    var shortTo = switchSidShort(toSid);
+    // 往返丢弃后，同一次切换的另一个信号（attach/MO）可能紧接着又报同一个 sid；
+    // 150ms 内直接吞掉，避免从更早的记录再派生一条伪切换。
+    if (switchSuppressAt && now - switchSuppressAt < SWITCH_DEDUPE_MS
+      && shortTo === switchSuppressTo) return;
     if (last && !last.settled && now - switchLastRecAt < SWITCH_DEDUPE_MS) {
+      // A→B→A 的快速往返：合并成「没切走」比留一条 from===to 的伪切换更诚实。
+      // 只丢这条记录，不碰更早的已完成记录。
+      if (shortTo === last.from) {
+        switchRing.pop();
+        switchSuppressTo = shortTo;
+        switchSuppressAt = now;
+        switchVersion++;
+        return;
+      }
       // 同一次切换的第二个信号（attach 与 MutationObserver 双路径）：刷新 to 与
       // 时间戳，2s 帧切片从头算；from 保持首次看到的值。
-      last.to = switchSidShort(toSid);
+      last.to = shortTo;
       last.t = now;
       last.at = performance.now();
       last._f2.length = 0;
@@ -2517,9 +2545,12 @@
       return;
     }
     // 上一次切换的 30 秒窗口还没走完就又切了：先把它冻结并标记「被截断」，
-    // 否则后续长帧/补页/DOM 会跨会话混进上一条记录。
+    // 否则后续长帧/补页/DOM 会跨会话混进上一条记录。已经满 30 秒、只是采集
+    // 周期还没跑到的记录按自然到期处理，不能误标「被截断」。
     for (var i = 0; i < switchRing.length; i++) {
-      if (!switchRing[i].settled) settleSwitchRecord(switchRing[i], now, true);
+      if (switchRing[i].settled) continue;
+      var expired = now - switchRing[i].t >= SWITCH_ACC_WIN_MS;
+      settleSwitchRecord(switchRing[i], now, !expired);
     }
     // domBefore/turnsBefore 取缓存值：切换瞬间做 O(DOM) 扫描本身就是几十毫秒的
     // 长任务，不能为观测在最重的时刻加成本。after 值在冻结时补（见上）。
@@ -2605,6 +2636,8 @@
   function clearSwitchRing() {
     switchRing.length = 0;
     switchLastRecAt = 0;
+    switchSuppressTo = "";
+    switchSuppressAt = 0;
     switchVersion++;
   }
 
