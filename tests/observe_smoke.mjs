@@ -877,6 +877,36 @@ check("包装复用下 pace 关→开清零本轮计数、全天累计保留",
   !!paceReuse && paceReuse.allowed === 0 && paceReuse.skipped === 0
     && paceReuse.totalAllowed > 0 && paceReuse.totalSkipped > 0,
   JSON.stringify(paceReuse));
+// 面板入口（用户最常走的路径）也必须传真值触发清零：storage 用例只覆盖
+// reloadSettings，覆盖不到面板 handler 的 applyScrollSettings(v === true)。
+paceScroll();
+await store.loadOlder();        // 放行并计时
+paceScroll();
+await store.loadOlder();        // 600ms 内 → 跳过
+const pacePanelBefore = JSON.parse(window.__lagfixCollect()).pace;
+check("面板用例前置：本轮 1 放行 / 1 跳过",
+  pacePanelBefore && pacePanelBefore.allowed === 1 && pacePanelBefore.skipped === 1,
+  JSON.stringify(pacePanelBefore));
+window.__lagfixSettings();
+let panelNow = documentStub.getElementById("lagfix-settings-panel");
+const paceCb = findRowCheckbox(panelNow, "大会话翻页降频 · 实验");
+check("面板里找到降频开关且为开", !!paceCb && paceCb.checked === true);
+paceCb.checked = false;
+(paceCb._listeners.change || [])[0]();   // 面板关：不清零、包装复用
+check("面板关降频但滚动诊断开：包装复用而非卸载", !!store.__lagfixLoadOlder);
+const paceCbBack = findRowCheckbox(
+  documentStub.getElementById("lagfix-settings-panel"), "大会话翻页降频 · 实验");
+paceCbBack.checked = true;
+(paceCbBack._listeners.change || [])[0]();   // 面板开：必须清零本轮
+const pacePanelAfter = JSON.parse(window.__lagfixCollect()).pace;
+check("面板关→开清零本轮计数、全天累计保留",
+  pacePanelAfter && pacePanelAfter.allowed === 0 && pacePanelAfter.skipped === 0
+    && pacePanelAfter.totalAllowed > 0,
+  JSON.stringify(pacePanelAfter));
+// 收尾：Esc 关面板，避免影响后续角标/面板用例。
+(documentStub._listeners.keydown || []).forEach((fn) => fn({
+  key: "Escape", target: panelNow, stopPropagation() {},
+}));
 writeSettings({ scrollDiagOn: true, loadOlderPaceOn: false });
 winRows.length = 1;             // 还原小窗口，不影响后续用例
 
