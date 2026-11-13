@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>v0.4.3 拍板页（v2 修订）· 会话切换归因 + 修复失灵的翻页降频</title>
+<style>
+  :root{color-scheme:dark}
+  *{box-sizing:border-box}
+  body{margin:0;background:#0d1117;color:#c9d1d9;font:14px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  .wrap{max-width:980px;margin:0 auto;padding:32px 20px 80px}
+  h1{font-size:24px;margin:0 0 4px;color:#f0f6fc}
+  h2{font-size:17px;margin:40px 0 12px;color:#f0f6fc;border-left:3px solid #388bfd;padding-left:10px}
+  h3{font-size:15px;margin:20px 0 8px;color:#e6edf3}
+  .sub{color:#8b949e;font-size:13px}
+  .chips{margin:10px 0 0}
+  .chip{display:inline-block;background:#161b22;border:1px solid #30363d;border-radius:999px;padding:2px 12px;font-size:12px;margin:0 6px 6px 0;color:#8b949e}
+  .chip b{color:#58a6ff}
+  .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 18px;margin:12px 0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}
+  .stat{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px 14px}
+  .stat .v{font-size:22px;color:#58a6ff;font-weight:600}
+  .stat .v.red{color:#f85149}
+  .stat .v.green{color:#3fb950}
+  .stat .k{font-size:12px;color:#8b949e}
+  table{border-collapse:collapse;width:100%;font-size:13px;margin:10px 0}
+  th,td{border:1px solid #30363d;padding:6px 10px;text-align:left;vertical-align:top}
+  th{background:#161b22;color:#e6edf3;white-space:nowrap}
+  td.ms{font-variant-numeric:tabular-nums;white-space:nowrap}
+  .bad{color:#f85149}.good{color:#3fb950}.dim{color:#8b949e}
+  code{background:#1f2937;border-radius:4px;padding:1px 5px;font-size:12px;color:#79c0ff}
+  .rec{border-color:#238636;background:linear-gradient(180deg,rgba(35,134,54,.15),rgba(35,134,54,.05))}
+  .rec .tag{color:#3fb950;font-weight:600}
+  .drop{opacity:.75}
+  ul{margin:8px 0;padding-left:22px}
+  li{margin:4px 0}
+  .q{background:#161b22;border:1px solid #d29922;border-radius:8px;padding:12px 16px;margin:10px 0}
+  .q b{color:#d29922}
+  .v2{background:rgba(210,153,34,.12);border:1px solid #d29922;border-radius:8px;padding:10px 14px;margin:14px 0;font-size:13px}
+  footer{margin-top:48px;color:#484f58;font-size:12px;border-top:1px solid #21262d;padding-top:16px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>v0.4.3（v2 修订）· 会话切换归因 + 修复失灵的翻页降频</h1>
+<div class="sub">2026-11-13 · 基于 v0.4.2 在 ZCode 3.18.2 上的实机观测数据 · v1 结论经复审修订</div>
+<div class="chips">
+  <span class="chip">拍板时 <b>v0.4.2</b></span>
+  <span class="chip">数据源 <b>observe-20261113.jsonl(.1)</b></span>
+  <span class="chip">宿主 <b>ZCode 3.18.2</b></span>
+  <span class="chip">状态 <b>待拍板（v2）</b></span>
+</div>
+
+<div class="v2">
+<b>v1 → v2 改了什么（复审结论）：</b>
+① 发现 O3 翻页降频 <code>0/0</code> 的真因不只是「切换清零计数」——它依赖的<b>同步滚动派发门控</b>在 3.18.2 上永不命中，属失灵缓解，本版要修；
+② 发现 v0.2 已有的 <code>switchGuardOn</code>（切会话后 10s 通知下限 250ms）在 530ms 切换帧发生时<b>一直开着</b>——证明通知下限这根杠杆碰不到挂载成本，v1 里的 P1 切换保护实验<b>推迟到 v0.4.4</b>，等 P0 归因数据再定；
+③ 输入探针经核查<b>没有坏</b>（今早 07:24 仍有有效样本），「样本=0」只是当前窗口没打字。
+</div>
+
+<h2>00 · 一句话</h2>
+<div class="card">
+最重的卡顿在<b>会话切换瞬间</b>（18 分钟 8 次切换，530/358/331ms 全在切换点），但插件手里唯一能直接砍宿主补页成本的开关 <b>O3 翻页降频在 3.18.2 上已失灵</b>，另一项 O8b 两天零生效。v0.4.3 做：<b>P0 切换归因（只读）＋ 修复 O3 触发口径 ＋ O8b 退役 ＋ 计数跨切换累计</b>；切换保护实验推迟到有归因数据之后。
+</div>
+
+<h2>01 · 证据（07:00–08:43 活跃段）</h2>
+
+<div class="grid">
+  <div class="stat"><div class="v">8 次 / 18 分钟</div><div class="k">会话切换（5 个会话桶打满）</div></div>
+  <div class="stat"><div class="v red">530ms</div><div class="k">切换瞬间最长单帧（08:25:00）</div></div>
+  <div class="stat"><div class="v red">10.7s</div><div class="k">229 条长帧的强制布局(styleMs)合计</div></div>
+  <div class="stat"><div class="v">14.3s</div><div class="k">长帧内 TimerHandler 脚本耗时合计</div></div>
+  <div class="stat"><div class="v green">0ms</div><div class="k">lagfix 自身在 LoAF 脚本归因中的命中</div></div>
+  <div class="stat"><div class="v">38,618</div><div class="k">节流包装累计命中的宿主通知</div></div>
+</div>
+
+<h3>1.1 最重长帧 × 会话切换时间线</h3>
+<table>
+<tr><th>时间</th><th>事件</th><th>该时刻长帧</th></tr>
+<tr><td class="ms">08:25:00–03</td><td>sess_871 → <b>sess_d7d</b></td><td class="ms bad">530 / 358 / 331 / 305ms（src=other/flush，styleMs 最高 156）</td></tr>
+<tr><td class="ms">08:26:11–31</td><td>切回 <b>sess_871</b> 再切 <b>sess_d7d</b></td><td class="ms bad">288ms（flush） / 330ms（other）</td></tr>
+<tr><td class="ms">08:40:17–41</td><td>sess_871 → <b>sess_198</b></td><td class="ms">切换窗口内长帧集中段（08:00–08:43 长任务 326 次）</td></tr>
+<tr><td class="ms">08:41:05–06</td><td>切换后滚动补页潮</td><td class="ms">10 次补页 / 1.5s；全天 85 次去重补页 p95=207ms、最长 304ms</td></tr>
+</table>
+<p class="sub">最重 12 条长帧中 8 条落在切换点 ±2 秒内；切换后的补页潮在切换后 ~20 秒才出现——P0 的观测窗口必须覆盖它（见 03）。</p>
+
+<h3>1.2 已被数据排除的方向</h3>
+<table>
+<tr><th>方向</th><th>证据</th><th>结论</th></tr>
+<tr><td>插件自身开销微优化</td><td>229 条长帧脚本归因 <span class="good">lagfix 命中 0 次</span>；observer 异常计数峰值 0</td><td class="dim">不做，候选正式关闭</td></tr>
+<tr><td>T1 定时器归因增强（异步口径）</td><td>LoAF 里 TimerHandler 占 14.3s，T1 全天只抓到 10 条同步慢回调（≈0.7s）——重活在回调触发的异步渲染里</td><td class="dim">不做增强；维持现状并写明「同步口径」限制</td></tr>
+<tr><td>zusage / 外部插件心跳</td><td>1.5.18 已修（#309）</td><td class="dim">已关闭</td></tr>
+<tr><td>输入探针失灵（v1 疑点）</td><td>两天 887 条有效样本，最后一条 07:24——探针正常，「样本=0」只是当前窗口没打字</td><td class="dim">不是缺陷；报告文案可顺带区分「窗口内无样本」≠「探针失灵」（一句话改动，可选）</td></tr>
+</table>
+
+<h3>1.3 【v2 新增】O3 失灵的真因：两套触发口径</h3>
+<div class="card">
+<p><b>现象：</b>今早 08:41:08 样本里 O8b <code>downgraded=4</code>（窗口 &gt;3000 且 600ms 内连续 → 降回 60 行），同一样本 O3 <code>pace 0 放行 / 0 跳过</code>——同样的调用，一个机制看见了，另一个完全没看见。</p>
+<p><b>代码证据：</b>两者用不同口径判定「滚动触发」——</p>
+<ul>
+<li>明细分类 <code>classifyLoadOlderTrigger()</code>：距 <code>lastScrollAt</code> 时间窗口内即记 <code>scroll</code>（<b>时间口径，宽</b>）；</li>
+<li>O3 跳过门控（包装器入口）：要求 <code>paceInScrollDispatch</code>——只在 scroll 监听器同步派发的微任务窗口内为真（<b>同步口径，窄</b>）。</li>
+</ul>
+<p><b>结论：</b>3.18.2 上宿主的 <code>loadOlder</code> 已不在 scroll 事件同步派发里触发（虚拟化/rAF 异步化），O3 的同步门控<b>永不命中</b>。这不是「没触发」，是<b>失灵</b>。v1 只归因到「切换清零计数」，是第二层原因；两层都要修。</p>
+</div>
+
+<h3>1.4 【v2 新增】既有 switchGuardOn 在场，通知下限杠杆被证伪</h3>
+<div class="card">
+<p>v0.2 起 <code>switchGuardOn</code>（默认开）已在做「切会话后 10s 内通知下限 250ms，避让首屏水合」。今早 530ms 切换帧发生时它<b>一直开着</b>——530ms 仍然发生，说明切换成本在挂载/布局/补页，不在通知密度。</p>
+<p><b>推论：</b>v1 提出的 P1「切换期保护（把通知下限提到 400ms + 关 mask + 跳角标）」与既有机制重叠，且主要杠杆已被实测证伪，<b>不应在本版抢跑</b>——先做 P0 归因，确认卡在哪一段（挂载？布局？补页潮？）再设计对应的保护，推到 v0.4.4。</p>
+</div>
+
+<h3>1.5 两个被切换掩盖的观测缺陷</h3>
+<ul>
+<li><b>O8b 补页批量</b>：两天实机 <code>applied=0</code>。连续上翻全部落在 600ms 窗口内被降回 60 行（今早 <code>downgraded=9</code>），唯一能生效的「单次慢速上翻」场景几乎不存在 → 按门槛应退役。</li>
+<li><b>O3 计数清零</b>：<code>page.installed=false</code> 的 6 个时间点与 sid 变化点逐一吻合——每次切换清零计数，A/B 证据在高频切换用户的日志里活不过一个切换周期。</li>
+</ul>
+
+<h2>02 · 路线对比（v2）</h2>
+<table>
+<tr><th>路线</th><th>内容</th><th>依据</th><th>风险</th></tr>
+<tr class="rec"><td><span class="tag">A（推荐，v2 修订）</span><br>归因 + 修失灵缓解 + 退役无效缓解</td><td>P0 切换归因（只读，默认开）＋ <b>O3 触发口径修复与 A/B</b> ＋ O8b 退役 ＋ O3 计数跨切换累计 ＋ 3.18.2 契约复核</td><td>切换是铁证主场景；O3 是插件手里唯一能直接砍补页成本的开关且已失灵；O8b 两天零生效；全部动作符合「先量因、一次一个变量」</td><td>O3 修复后若 A/B 仍不达门槛（调用次数降 ≥30%），如实保持默认关并复核设计——不掩盖</td></tr>
+<tr class="drop"><td>B<br>插件自身开销微优化</td><td>更新状态缓存、环形统计合并、看门狗快速路径等</td><td>LoAF 归因零命中，自身开销可忽略</td><td class="dim">花了工时动不了 530ms 切换帧；已排除</td></tr>
+<tr class="drop"><td>C<br>切换保护实验先行（v1 原案 P1）</td><td>切换后 500ms：通知下限 400ms、跳角标、关 mask</td><td>与既有 <code>switchGuardOn</code>（250ms/10s）重叠；通知下限杠杆已被 530ms 帧证伪</td><td class="dim">预期收益低、占用本版验证带宽；推迟到 v0.4.4，等 P0 数据指路</td></tr>
+<tr class="drop"><td>D<br>T1 异步归因增强</td><td>包 microtask / rAF 穿透 TimerHandler 异步工作</td><td>理论上能命名 14.3s 归属</td><td class="dim">侵入性大、违背「不掩盖同步问题」红线；P0 先行，若仍不够再议</td></tr>
+</table>
+
+<h2>03 · 推荐范围（Route A，v2）</h2>
+
+<h3>P0 会话切换归因（switchDiagOn，默认开，只读）</h3>
+<ul>
+<li>切换信号复用已有的 <code>state.switchedAt</code>/<code>state.sid</code> 变化点；150ms 内抖动去重。</li>
+<li>每次切换记录：<code>{t, from, to, afterMaxMs, afterP95, lafN, styleMs, domBefore/After, turnsBefore/After, blockedLoadAll}</code>，环 10 条，未变化发 <code>[]</code>；<code>from/to</code> 只留 sid 短哈希，被淘汰的会话桶也照记（不因 5 桶上限丢失归因链）。</li>
+<li><b>双窗口（v2 修订）</b>：切换后 2 秒的帧切片（回答「首帧卡不卡」）＋ 切换后 30 秒的补页次数/耗时与长帧累计（回答「补页潮卡不卡」——今早补页潮出现在切换后 ~20 秒，2 秒窗口会漏）。</li>
+<li><code>afterMaxMs</code> 用 v0.4.2 的 30s 帧环按时间切片，不新增宿主包装、不写 store、不碰 DOM。</li>
+<li>报告新增「会话切换」段：最近 10 次切换、最重一次的两个窗口数据、切换期长帧占比、大历史拦截次数。</li>
+</ul>
+
+<h3>O3 翻页降频：触发口径修复 + A/B（v2 升级为必做）</h3>
+<ul>
+<li>把跳过门控从「同步派发」改为与明细分类一致的<b>时间口径</b>（距 <code>lastScrollAt</code> ≤ 现有滚动识别窗口），或双口径并行上报一个开关内可辨的字段；实现前先在 3.18.2 源码确认宿主 <code>loadOlder</code> 的真实触发链。</li>
+<li>非滚动触发（首屏 initial、SessionPane 缺 header 补拉）继续放行，不误伤。</li>
+<li>A/B 门槛沿用 v0.3.4：补页次数下降 ≥30% 且滚动 P95 / 长任务不退化 &gt;10%、顶部空白 ≤300ms；未过线保持默认关并在报告如实标注「已修口径仍未达门槛」。</li>
+</ul>
+
+<h3>O8b 补页批量退役</h3>
+<ul>
+<li>移除 <code>loadOlderPageLimitOn</code> 的行为实现与面板行；读旧设置忽略该键（不报错、不迁移）。</li>
+<li>报告补页段保留历史兼容：旧日志已有计数照常显示，新样本不再产出 <code>page</code>。</li>
+<li>理由如实写入发布说明：两天实机 <code>applied=0</code>，连续上翻全部被 600ms 降级窗口兜回 60 行。</li>
+</ul>
+
+<h3>O3 计数跨切换累计</h3>
+<ul>
+<li><code>pace.allowed/skipped</code> 双口径上报：「当前 store 生命周期」＋「全天累计」；换 store 只清前者，全天口径只在自禁用 / <code>__lagfixOff()</code> 清零。</li>
+<li>报告两个口径并列显示；旧样本无新字段回退显示。</li>
+</ul>
+
+<h3>3.18.2 契约复核（从「前置核对」升为本版交付物）</h3>
+<ul>
+<li>更新本地源码仓（GitHub fetch，不走 Gitee）到 3.18.2，逐一核对 AGENTS 第 5 节契约表：<code>[data-session-id]</code> 切换时序、<code>loadOlder</code> 触发链、<code>rows.window</code>、<code>subscribe</code>、输入框选择器。</li>
+<li>产出写入本版规格的「宿主契约核对记录」小节；契约有变即修观测选择器，不猜。</li>
+</ul>
+
+<h2>04 · 明确不做（v2）</h2>
+<ul>
+<li><b>不做切换保护实验</b>（v1 的 P1）：推迟到 v0.4.4，等 P0 数据指出卡点后再设计对应手段；避免重复 v0.2 已有的 250ms/10s 机制。</li>
+<li>不做插件自身开销微优化（LoAF 零命中）。</li>
+<li>不增强 T1 到异步口径；不包 microtask/rAF。</li>
+<li>不做 O6/O7 隐藏 pane 策略——今早 4 个隐藏桶 DOM=0/提交=0，未证明是主因，本版只观测。</li>
+<li>不折叠/隐藏内容；不改消息、会话、工具结果；不读写 <code>db.sqlite</code>；不开 CDP；不联网上报。</li>
+<li>不动安装器与日志清理（独立 chore）。</li>
+</ul>
+
+<h2>05 · 验收门槛（v2）</h2>
+<table>
+<tr><th>项</th><th>验收</th></tr>
+<tr><td>P0 归因</td><td>合成夹具覆盖：切换识别、150ms 去重、2s+30s 双窗口、环 10 条、<code>[]</code> 路径、淘汰桶 sid 保留、报告段渲染、关闭开关后 <code>switch=null</code>；实机一次来回切换能在报告看到完整记录</td></tr>
+<tr><td>O3 口径修复</td><td>合成夹具：异步触发的滚动补页（rAF/延时后调用）能进 pace 门控；非滚动调用仍放行；实机 A/B 达 v0.3.4 门槛才考虑默认开</td></tr>
+<tr><td>O8b 退役</td><td>面板无该行；旧设置含该键不报错；<code>__lagfixOff()</code> 不再触碰该开关；测试全绿</td></tr>
+<tr><td>O3 计数累计</td><td>换 store 后全天口径不清零；报告两口径并列；旧样本回退显示</td></tr>
+<tr><td>契约复核</td><td>规格含 3.18.2 契约核对记录；失配选择器已修并带测试</td></tr>
+<tr><td>回归</td><td>现有 8 个测试套件全 PASS；版本八处同步</td></tr>
+</table>
+
+<h2>06 · 回滚</h2>
+<ul>
+<li>P0 纯只读，关闭开关即回到 v0.4.2 观测面。</li>
+<li>O3 口径修复若引发误跳（首屏/缺 header 补拉被拦），一键关闭 <code>loadOlderPaceOn</code> 即回到原行为；修复本身默认不改变「开关默认关」的事实。</li>
+<li>O8b 退役保留 git 历史；未来宿主补页协议变化再凭新数据重立实验，不复活旧实现。</li>
+</ul>
+
+<h2>07 · 前置核对（实现前必须完成）</h2>
+<ul>
+<li>本地源码仓 <code>D:\Git\git-github\ZCode</code> 更新到 <b>3.18.2</b>（GitHub fetch），确认会话切换路径仍是「pane 复用 + store 换实例」，并拿到 <code>loadOlder</code> 真实触发链证据后再动 O3 门控。</li>
+<li>确认 <code>[data-session-id]</code> 在切换瞬间的变化时序（先变/后变），P0 归因不挂错相位。</li>
+</ul>
+
+<h2>08 · 待你拍板（v2）</h2>
+<div class="q"><b>Q1 · O8b 是退役还是改设计？</b><br>数据支持退役（applied=0）。改设计（如「首两页 120 行再回 60」）是新实验、新锚点漂移风险，不推荐本版做。</div>
+<div class="q"><b>Q2 · 同意把「切换保护实验」推迟到 v0.4.4 吗？</b><br>v2 的理由：既有 switchGuardOn 已证伪通知下限杠杆；等 P0 归因指出卡点再设计，避免拍脑袋上保护。</div>
+<div class="q"><b>Q3 · 版本号与命名</b><br>按惯例 v0.4.3「会话切换归因与翻页降频修复」；若想把 O8b 退役单独拆 v0.4.2.1 也可以，但多一次发版成本。</div>
+
+<footer>
+数据来源：<code>~/.zcode/zcode-lagfix/observe-20261113.jsonl(.1)</code>（2,618 条采样，06:31–08:43；机器 00:26–06:31 休眠）；<code>main.log</code> 确认 v0.4.2 于昨晚 22:25 起持续运行在 ZCode 3.18.2。v2 修订基于对 <code>lagfix-observe.js</code> 的三处代码核查（<code>classifyLoadOlderTrigger</code> 时间口径 / <code>paceInScrollDispatch</code> 同步门控 / <code>switchGuardOn</code> 既有 250ms 机制）。硬红线零触碰。
+</footer>
+
+</div>
+</body>
+</html>

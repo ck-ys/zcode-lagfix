@@ -193,22 +193,29 @@ def print_scroll_diag(rows: list[dict]) -> None:
 
     dead / paused 的廉价样本里这两个字段是 null，会被跳过。
     独立于 active 判断：纯滚动不产生投影提交（frames=0），不能因此不打印。
+    v0.4.2：最新设置已关闭时必须明示，不能回退旧样本冒充当前；回退时加后缀。
     """
+    newest = rows[-1] if rows else {}
+    newest_settings = _settings_of(newest)
+
     scroll_row = None
-    input_row = None
-    for r in reversed(rows):
-        if scroll_row is None and isinstance(r.get("scroll"), dict):
-            scroll_row = r["scroll"]
-        if input_row is None and isinstance(r.get("input"), dict):
-            input_row = r["input"]
-        if scroll_row is not None and input_row is not None:
-            break
-    if scroll_row is not None:
+    scroll_idx = None
+    if newest_settings.get("scrollDiagOn") is not False:
+        for idx, r in enumerate(reversed(rows)):
+            val = r.get("scroll")
+            if isinstance(val, dict):
+                scroll_row = val
+                scroll_idx = idx
+                break
+    if newest_settings.get("scrollDiagOn") is False:
+        print(f"  {INFO} 滚动诊断已关闭")
+    elif scroll_row is not None:
+        suffix = "（最近一次有效样本）" if scroll_idx else ""
         print(f"  滚动诊断：窗口内帧 P95={fmt(scroll_row.get('p95'), 'ms')}"
               f"  最长={fmt(scroll_row.get('max'), 'ms')}"
               f"  滚动帧={fmt(scroll_row.get('frames'))}"
               f"  时间线事件={fmt(scroll_row.get('events'))}"
-              f"（会话区非时间线事件={fmt(scroll_row.get('anyEvents'))}）")
+              f"（会话区非时间线事件={fmt(scroll_row.get('anyEvents'))}）{suffix}")
         print(f"    loadOlder：累计 {fmt(scroll_row.get('loadOlderCalls'))} 次"
               f"  窗口内 P95={fmt(scroll_row.get('loadOlderP95'), 'ms')}"
               f"  窗口内最长={fmt(scroll_row.get('loadOlderMax'), 'ms')}"
@@ -222,10 +229,25 @@ def print_scroll_diag(rows: list[dict]) -> None:
                   f"先确认宿主 DOM 是否改版")
     else:
         print(f"  {INFO} 无滚动诊断数据（旧样本，或滚动诊断已关闭）")
-    if input_row is not None:
+
+    input_row = None
+    input_idx = None
+    if newest_settings.get("inputLagOn") is not False:
+        for idx, r in enumerate(reversed(rows)):
+            val = r.get("input")
+            if isinstance(val, dict):
+                input_row = val
+                input_idx = idx
+                break
+    if newest_settings.get("inputLagOn") is False:
+        print(f"  {INFO} 输入延迟观测已关闭")
+    elif input_row is not None:
+        suffix = "（最近一次有效样本）" if input_idx else ""
         print(f"  输入延迟：按键→下一帧 P95={fmt(input_row.get('p95'), 'ms')}"
               f"  最长={fmt(input_row.get('max'), 'ms')}"
-              f"  样本={fmt(input_row.get('samples'))}")
+              f"  样本={fmt(input_row.get('samples'))}{suffix}")
+    else:
+        print(f"  {INFO} 无输入延迟数据（旧样本，或输入观测已关闭）")
 
 
 def _fmt_ts(ms) -> str:
@@ -234,6 +256,16 @@ def _fmt_ts(ms) -> str:
         return "-"
     try:
         return time.strftime("%H:%M:%S", time.localtime(ms / 1000))
+    except Exception:
+        return "-"
+
+
+def _fmt_ts_full(ms) -> str:
+    """v0.4.2：带日期的安全时间戳；结构合法但越界的值（如 1e300）返回 -。"""
+    if not num(ms) or not (946684800000 <= ms <= 4102444800000):   # 2000–2100
+        return "-"
+    try:
+        return time.strftime("%m-%d %H:%M:%S", time.localtime(ms / 1000))
     except Exception:
         return "-"
 
@@ -303,11 +335,24 @@ def print_session_diag(rows: list[dict]) -> None:
     else:
         print(f"  {INFO} 无多会话归因数据（旧样本，或多会话归因已关闭）")
 
+    # v0.4.2：补页明细带代际；跨代际停止回退，避免把上一轮/上一个 store 的
+    # 明细贴到当前轮。旧样本没有 loadOlderEpoch 时沿用原有回退逻辑。
+    newest_epoch = None
+    for r in reversed(rows):
+        sc = r.get("scroll")
+        if isinstance(sc, dict) and "loadOlderEpoch" in sc:
+            newest_epoch = sc.get("loadOlderEpoch")
+            break
+
     drow = None
     d_older = False
     d_seen = False
     d_disabled = False
     for idx, r in enumerate(reversed(rows)):
+        sc = r.get("scroll")
+        epoch = sc.get("loadOlderEpoch") if isinstance(sc, dict) else None
+        if newest_epoch is not None and epoch is not None and epoch != newest_epoch:
+            break
         val = r.get("loadOlderDetail")
         if isinstance(val, list):
             d_seen = True
@@ -507,19 +552,32 @@ def print_laf_diag(rows: list[dict]) -> None:
     # 不能拿「最近一次有明细的旧样本」冒充本周期；明细表再单独向前回退。
     newest_laf = None
     newest_laf_idx = None
+    for idx, r in enumerate(reversed(rows)):
+        val = r.get("laf")
+        if isinstance(val, dict):
+            newest_laf = val
+            newest_laf_idx = idx
+            break
+        if val is None and _settings_of(r).get("lafDiagOn") is False:
+            break        # 遇到关闭样本就停止回退，不把关闭前的数据当当前数据
+
+    # v0.4.2：明细代际和最新 laf 不一致时停止回退，避免把上一轮重置前的
+    # 明细贴到当前轮。旧样本没有 epoch 时沿用原有逻辑。
+    newest_epoch = newest_laf.get("epoch") if isinstance(newest_laf, dict) else None
     detail_row = None
     detail_idx = None
     for idx, r in enumerate(reversed(rows)):
         val = r.get("laf")
         if isinstance(val, dict):
-            if newest_laf is None:
-                newest_laf = val
-                newest_laf_idx = idx
-            if detail_row is None and val.get("detail"):
+            if (newest_epoch is not None and val.get("epoch") is not None
+                    and val.get("epoch") != newest_epoch):
+                break
+            if val.get("detail"):
                 detail_row = val
                 detail_idx = idx
+                break
         elif val is None and _settings_of(r).get("lafDiagOn") is False:
-            break        # 遇到关闭样本就停止回退，不把关闭前的数据当当前数据
+            break
 
     if newest_laf is not None:
         supported = newest_laf.get("supported")
@@ -630,41 +688,37 @@ def print_laf_diag(rows: list[dict]) -> None:
             break
 
     if prow is not None:
-        print(f"  翻页降频（实验）：窗口 >{fmt(prow.get('minRows'))} 行时触发间隔"
-              f" {fmt(prow.get('intervalMs'), 'ms')}，累计放行 {fmt(prow.get('allowed'))} 次"
-              f" / 跳过 {fmt(prow.get('skipped'))} 次")
+        # v0.4.3：修复了在 ZCode 3.18.2 上永不生效的同步触发判定（旧样本可能是
+        # 失灵期计数）；pace 新增全天累计口径，换会话不清零，旧样本没有则回退单口径。
+        line = (f"  翻页降频（实验，v0.4.3 起修复触发口径）：窗口 >{fmt(prow.get('minRows'))} 行"
+                f"时触发间隔 {fmt(prow.get('intervalMs'), 'ms')}，本轮放行 {fmt(prow.get('allowed'))} 次"
+                f" / 跳过 {fmt(prow.get('skipped'))} 次")
+        if "totalAllowed" in prow or "totalSkipped" in prow:
+            line += (f"；全天累计放行 {fmt(prow.get('totalAllowed'))} 次"
+                     f" / 跳过 {fmt(prow.get('totalSkipped'))} 次")
+        print(line)
         if prow.get("skipped") == 0 and prow.get("allowed") == 0:
-            print(f"    （自开关开启后还没有被计数的补页触发；非滚动触发的补页不进这项统计）")
+            print(f"    （包装可能尚未装上，或本周期内没有补页调用）")
+        if "totalAllowed" not in prow:
+            print(f"    {INFO} 旧样本没有全天累计口径（v0.4.3 前换会话会清零本轮计数）")
     elif p_disabled:
         print(f"  {INFO} 翻页降频已关闭（实验项，默认关闭）")
     else:
         print(f"  {INFO} 无翻页降频数据（旧样本）")
 
-    # v0.3.6 O8：页大小替换计数。状态只看最新样本的设置，避免拿旧的开/关
-    # 样本冒充当前状态；具体计数再向前找最近一条非空 page。遇到 dead 或显式
-    # page=null 必须停下：那表示当前没有可用计数，不能越过它回显旧计数。
+    # v0.4.3：O8b 补页批量已退役（两天实机 applied=0，连续上翻全被 600ms 降级
+    # 窗口兜回 60 行）。日志里若还留着退役前的 page 计数，照常显示但统一标注
+    # 「已退役」——开关本身已不存在，不区分当时的开关状态，也不把历史计数
+    # 包装成"当前生效的缓解"。
     page_row = None
-    page_no_data = False
-    for r in reversed(rows):
-        if r.get("dead"):
-            page_no_data = True
-            break
+    for r in rows:
         val = r.get("page")
         if isinstance(val, dict):
             page_row = val
-            break
-        if "page" in r:
-            page_no_data = True
-            break
-    page_enabled = newest_settings.get("loadOlderPageLimitOn")
-    if page_enabled is False:
-        print(f"  {INFO} 补页批量已关闭（实验项，默认关闭）")
-    elif page_enabled is None:
-        # 降级/混合版本日志：最新样本没有该设置，不能越过它回显旧计数。
-        print(f"  {INFO} 本版本未记录补页批量（旧样本）")
-    elif page_no_data:
-        print(f"  {INFO} 最新样本没有补页计数（自禁用或序列化失败），不显示更早的计数")
-    elif page_row is not None:
+    retired_note = "（已退役，v0.4.3 起移除；以下是退役前的历史计数）"
+    if page_row is None:
+        print(f"  {INFO} 补页批量已于 v0.4.3 退役（两天实机 0 次生效，详见发布说明）")
+    else:
         limit = page_row.get("limit")
         applied = page_row.get("applied")
         passthrough = page_row.get("passthrough")
@@ -674,9 +728,9 @@ def print_laf_diag(rows: list[dict]) -> None:
         # 旧样本（v0.3.6）没有 downgraded/small，也没有 120 的新常量：
         # 只显示已有字段，不把缺失当 0，也不改写成新语义。
         page_limit = limit if num(limit) and limit > 0 else 120
+        head = "  补页批量（实验）" + retired_note + f"：每页最多 {fmt(page_limit)} 行"
         if installed is False:
-            print(f"  补页批量（实验）：每页最多 {fmt(page_limit)} 行，"
-                  f"但包装尚未装上，计数不可用")
+            print(head + "，但包装尚未装上，计数不可用")
         else:
             parts = [f"已生效 {fmt(applied if num(applied) and applied >= 0 else 0)} 次"]
             if "downgraded" in page_row:
@@ -689,16 +743,12 @@ def print_laf_diag(rows: list[dict]) -> None:
                              f"{fmt(small if num(small) and small >= 0 else 0)} 次")
             parts.append(f"显式参数放行 "
                          f"{fmt(passthrough if num(passthrough) and passthrough >= 0 else 0)} 次")
-            print(f"  补页批量（实验）：每页最多 {fmt(page_limit)} 行；" + "；".join(parts))
+            print(head + "；" + "；".join(parts))
             if not (num(applied) and applied > 0):
-                hint = "开关开着但本文件内还没有大窗口无参补页"
+                hint = "退役前该日志里没有大窗口无参补页生效记录"
                 if installed is None:
-                    hint += "；或包装尚未装上"
+                    hint += "；或包装当时尚未装上"
                 print(f"    （{hint}）")
-    elif page_enabled is True:
-        print(f"  {INFO} 补页批量已开启，但本文件内还没有生效记录（旧样本或尚未触发补页）")
-    else:
-        print(f"  {INFO} 本版本未记录补页批量（旧样本）")
 
 
 def print_timer_diag(rows: list[dict]) -> None:
@@ -745,9 +795,13 @@ def print_timer_diag(rows: list[dict]) -> None:
     if no_data or trow is None:
         print(f"  {INFO} 第三方定时器归因已开启，但本文件内还没有可用采样")
         return
+    if trow.get("lost") == 1:
+        print(f"  {INFO} 第三方定时器归因已开启，但归因包装已失效"
+              f"（全局定时器被替换/包裹），计数不可用")
+        return
     if trow.get("supported") == 0:
         print(f"  {INFO} 第三方定时器归因已开启，但包装未装上"
-              f"（全局定时器不可写或被宿主替换），计数不可用")
+              f"（全局定时器不可写），计数不可用")
         return
 
     count = trow.get("count")
@@ -758,12 +812,17 @@ def print_timer_diag(rows: list[dict]) -> None:
     # 明细只在变化时携带；向前找最近一次非空数组（与补页明细同约定）。
     # 遇到显式 timer=null（关闭/暂停/序列化失败）或 dead 必须停下：
     # 那表示当前这一轮已经结束，不能把上一轮开着的旧明细当成现在的。
+    # v0.4.2：代际不一致也停下，避免关→快速重开后回显上一轮明细。
+    newest_epoch = trow.get("epoch")
     detail = None
     for r in reversed(rows):
         if r.get("dead"):
             break
         tv = r.get("timer")
         if isinstance(tv, dict):
+            if (newest_epoch is not None and tv.get("epoch") is not None
+                    and tv.get("epoch") != newest_epoch):
+                break
             d = tv.get("detail")
             if isinstance(d, list) and d:
                 detail = [x for x in d if isinstance(x, dict)]
@@ -781,10 +840,7 @@ def print_timer_diag(rows: list[dict]) -> None:
     kinds = {"timeout": "一次性", "interval": "间隔"}
     print("  最近记录的耗时定时任务（最多 10 条）：")
     for d in detail[-10:]:
-        ts = d.get("t")
-        when = "-"
-        if num(ts) and ts > 0:
-            when = time.strftime("%m-%d %H:%M:%S", time.localtime(ts / 1000))
+        when = _fmt_ts_full(d.get("t"))
         kind = kinds.get(str(d.get("kind")), str(d.get("kind") or "-"))
         print(f"    {when}  {fmt(d.get('ms') if num(d.get('ms')) else None, 'ms')}"
               f"  原定 {fmt(d.get('delay') if num(d.get('delay')) else None, 'ms')}"
@@ -804,6 +860,112 @@ def print_timer_diag(rows: list[dict]) -> None:
         print("  按回调名聚合（合计耗时前 3）：")
         for src, (total, n) in top:
             print(f"    {src}：合计 {total}ms / {n} 次")
+
+
+def _int0(v) -> int:
+    """数值字段的防御式取整：坏形状/字符串/NaN 一律按 0，报告不能整段崩。"""
+    return int(v) if num(v) else 0
+
+
+def print_switch_diag(rows: list[dict]) -> None:
+    """v0.4.3 P0：会话切换归因（只读）。
+
+    - 关闭态只看最新样本的设置；items 为 [] 表示未变化，向前找最近一次非空
+      （与 loadOlderDetail 同约定）。中途关过又打开时提示「曾关闭」而不是「已关闭」。
+    - 暂停/自禁用要明说，与 laf/timer 段同一口径；历史记录仍展示但标注状态。
+    - 每条记录两个窗口：切换后 2 秒的帧切片（首帧卡不卡）与 30 秒的
+      补页/长帧累计（补页潮可能晚到 ~20 秒，2 秒窗口会漏）。
+    - 旧样本没有 switch 字段时只提示，不报错。
+    """
+    newest = rows[-1] if rows else {}
+    newest_settings = _settings_of(newest)
+
+    sw_row = None
+    sw_disabled = False
+    for r in reversed(rows):
+        val = r.get("switch")
+        if isinstance(val, dict):
+            items = val.get("items")
+            if isinstance(items, list) and items:
+                sw_row = val
+                break
+            continue    # items=[] 未变化，继续向前找最近一次非空
+        if val is None and _settings_of(r).get("switchDiagOn") is False:
+            sw_disabled = True
+            break
+
+    if newest_settings.get("switchDiagOn") is False:
+        print(f"  {INFO} 切换会话归因已关闭")
+        return
+    paused = newest_settings.get("observe") is False
+    dead = bool(newest.get("dead"))
+    if paused:
+        print(f"  {INFO} 切换会话归因已暂停（开关仍开，恢复观测后继续记录）")
+    elif dead:
+        print(f"  {INFO} 观测器已自禁用，切换归因停止")
+
+    if sw_row is None:
+        if "switchDiagOn" not in newest_settings:
+            print(f"  {INFO} 本版本未记录切换归因（v0.4.3 前的旧样本）")
+        elif sw_disabled:
+            print(f"  {INFO} 本文件内切换归因曾关闭；重开后还没有新的切换记录")
+        else:
+            print(f"  {INFO} 本文件内没有切换记录"
+                  f"（可能在上一个日志文件里，或观测期内没有切换会话）")
+        return
+
+    items = [d for d in (sw_row.get("items") or []) if isinstance(d, dict)]
+    print(f"  切换会话归因：最近 {len(items)} 次切换（最多保留 10 条，双窗口：2 秒帧切片 + 30 秒累计）")
+    deps = []
+    if newest_settings.get("lafDiagOn") is False:
+        deps.append("「卡顿来源定位」已关，长帧列为未测量")
+    if newest_settings.get("scrollDiagOn") is False:
+        deps.append("「滚动诊断」已关，补页与 DOM/回合列为未测量")
+    if deps:
+        print(f"    {INFO} " + "；".join(deps))
+    heaviest = None
+    for d in items:
+        when = _fmt_ts_full(d.get("t"))
+        frm = str(d.get("from") or "(首屏)") or "-"
+        to = str(d.get("to") or "(空)") or "-"
+        mx = d.get("afterMax2s")
+        p95 = d.get("afterP95")
+        seg1 = f"2s 最重 {fmt(mx, 'ms')}（P95 {fmt(p95, 'ms')}）" if num(mx) else "2s 无帧切片"
+        laf2 = _int0(d.get("lafN2s"))
+        style2 = _int0(d.get("styleMs2s"))
+        seg2 = f"长帧 {laf2} 次" + (f"/强制布局 {style2}ms" if style2 else "") if laf2 else "长帧 0 次"
+        lo_n = _int0(d.get("loadOlderN30s"))
+        lo_ms = _int0(d.get("loadOlderMs30s"))
+        laf30 = _int0(d.get("lafN30s"))
+        style30 = _int0(d.get("styleMs30s"))
+        seg3 = f"补页 {lo_n} 次" + (f"/{lo_ms}ms" if lo_ms else "")
+        if laf30:
+            seg3 += f"，长帧 {laf30} 次" + (f"/强制布局 {style30}ms" if style30 else "")
+        blocked = d.get("blockedLoadAll")
+        if num(blocked) and blocked > 0:
+            seg3 += f"，拦全量补拉 {int(blocked)} 次"
+        dom_b, dom_a = d.get("domBefore"), d.get("domAfter")
+        turn_b, turn_a = d.get("turnsBefore"), d.get("turnsAfter")
+        seg4 = ""
+        if num(dom_b) and num(dom_a):
+            seg4 = f"｜DOM {dom_b}→{dom_a}"
+            if num(turn_b) and num(turn_a):
+                seg4 += f"（turn {turn_b}→{turn_a}）"
+        if d.get("settledEarly"):
+            note = "（窗口被下一次切换截断）"
+        elif d.get("settled"):
+            note = ""
+        else:
+            note = "（30 秒窗口未满）"
+        print(f"    {when}  {frm} → {to}  {seg1}｜{seg2}｜30s：{seg3}{seg4}{note}")
+        if num(mx) and (heaviest is None or mx > heaviest[0]):
+            heaviest = (mx, when, frm, to)
+    if heaviest:
+        print(f"    最重一次：{heaviest[1]}  {heaviest[2]} → {heaviest[3]}"
+              f"，切换后 2 秒最重帧 {fmt(heaviest[0], 'ms')}")
+    else:
+        print(f"    {INFO} 所有记录的 2 秒帧切片都为空（切换后 2 秒内没有采到帧，"
+              f"可能窗口在后台）")
 
 
 def main() -> int:
@@ -855,7 +1017,14 @@ def main() -> int:
     dts = [r["dt"] for r in active if num(r.get("dt")) and r["dt"] > 0]
     commit_p95 = [r["commitP95"] for r in active if num(r.get("commitP95"))]
     frame_p95 = [r["frameP95"] for r in active if num(r.get("frameP95"))]
-    frame_max = [r["frameMax"] for r in active if num(r.get("frameMax"))]
+    # v0.4.2：窗口值优先；旧样本只有 frameMax（历史值），单独标注，不能混用。
+    frame_max_win = [r["frameMaxWindow"] for r in active if num(r.get("frameMaxWindow"))]
+    frame_max_all = [
+        r.get("frameMaxAll") if num(r.get("frameMaxAll")) else r.get("frameMax")
+        for r in active
+        if num(r.get("frameMaxAll")) or num(r.get("frameMax"))
+    ]
+    frame_max_legacy = [r["frameMax"] for r in active if num(r.get("frameMax"))]
     longtasks = [r["longTasks"] for r in active if num(r.get("longTasks"))]
     max_long = [r["maxLongTask"] for r in active if num(r.get("maxLongTask"))]
     heaps = [r["heapMB"] for r in rows if num(r.get("heapMB"))]
@@ -887,7 +1056,14 @@ def main() -> int:
         if frame_p95:
             print(f"  真实帧间隔（rAF）：P95={fmt(pct(frame_p95, 0.95), 'ms')}"
                   f"  最差样本={fmt(max(frame_p95), 'ms')}")
-            print(f"  单帧最长：{fmt(max(frame_max) if frame_max else None, 'ms')}")
+            if frame_max_win:
+                print(f"  单帧最长（30s 窗口）：{fmt(max(frame_max_win), 'ms')}")
+            elif frame_max_legacy:
+                print(f"  单帧最长（旧样本为历史值）：{fmt(max(frame_max_legacy), 'ms')}")
+            else:
+                print("  单帧最长（30s 窗口）：-")
+            if frame_max_all:
+                print(f"  历史最长（attach/切会话以来）：{fmt(max(frame_max_all), 'ms')}")
         else:
             print(f"  {WARN} 无 rAF 帧数据（旧版本观测脚本写入的样本）")
 
@@ -910,6 +1086,8 @@ def main() -> int:
     print_scroll_diag(rows)
     # v0.3.2：多会话归因与 loadOlder 明细也独立于 active 判断。
     print_session_diag(rows)
+    # v0.4.3 P0：切换归因独立于 active 判断（纯切换不产生投影提交）。
+    print_switch_diag(rows)
     # v0.3.3：侧栏开合与回前台同样独立，面板常开但 0 提交的样本也要纳入。
     print_pane_diag(rows)
     # v0.3.4：卡顿来源定位与翻页降频计数同样独立于 active 判断。
@@ -997,7 +1175,7 @@ def main() -> int:
     print("  · 真实帧间隔 P95 > 50ms 或 单帧最长 > 200ms  → 用户能感知到卡")
     print("  · 长任务次数 > 0 → 主线程被单次阻塞，与卡顿直接相关")
     print("  · 投影提交率高但帧间隔正常 → 宿主在勤快重渲染，暂未卡死")
-    print("[lagfix] v0.4.1：角标「有新版本」红点移到设置齿轮右上角，像未读提醒一样贴在按钮角上，不占文字空间、不挡点击；显示条件与检查逻辑不变。v0.4.0：新增「第三方定时器归因 · 实验」（默认关闭）——只记录单次运行超过 50ms 的定时任务：耗时、原定间隔、回调名和调用点（只留文件名与行号），用来判断卡顿是否来自外部插件的定时刷新；不改定时器时机，不读任务参数或对话内容。补页批量改为自适应：已显示超过 3000 行时每页最多 120 行，连续快速上翻（间隔不到 600ms）自动回到 60 行，不跳过、不删除、不改消息顺序。v0.3.10：修复更新红点实际不可见。v0.3.9：设置面板保持滚动位置、打开时接管键盘焦点并在关闭后归还；修复宿主替换 subscribe 时被误覆盖的风险。v0.3.8：日志清理加固——只删白名单内的旧日志，校验真实日期、目录类型、普通文件非链接与 10 分钟最小年龄；宁可超预算也不误删。v0.3.7 起支持小红点与可选自动检查更新（默认关闭、24 小时内最多一次，只请求公开 GitHub Releases）。仍不读消息正文、不写 store；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
+    print("[lagfix] v0.4.3：新增「切换会话归因」（只读、默认开）——每次切换记一条：切换后 2 秒的帧切片、30 秒内的长帧与补页次数，以及切换前后的 DOM/回合对比，用来回答「切换后卡了多久、之后补了多少历史」；不改切换行为。修复「大会话翻页降频」在 ZCode 3.18.2 上永不生效的触发判定（改为距最近一次时间线滚动 2 秒内才计时，首调与挂载 5 秒内一律放行以保护宿主的冷快照补拉），并增加全天累计计数；补页批量（O8b）退役，旧日志里的历史计数仍显示并标注已退役。默认开关与 v0.4.2 一致，仅新增只读的 switchDiagOn。v0.4.2：修正观测口径与包装器生命周期——帧统计按最近 30 秒窗口计算并区分「窗口最长 / 历史最长」；宿主运行期替换订阅或全量补拉实现时不再误覆盖，定时器归因失配时如实标记「计数不可用」；报告对关闭态、明细代际和异常时间戳做了一致性处理。没有新增缓解项，默认开关与 v0.4.1 一致。v0.4.1：角标「有新版本」红点移到设置齿轮右上角，像未读提醒一样贴在按钮角上，不占文字空间、不挡点击；显示条件与检查逻辑不变。v0.4.0：新增「第三方定时器归因 · 实验」（默认关闭）——只记录单次运行超过 50ms 的定时任务：耗时、原定间隔、回调名和调用点（只留文件名与行号），用来判断卡顿是否来自外部插件的定时刷新；不改定时器时机，不读任务参数或对话内容。补页批量改为自适应（v0.4.3 已退役）：已显示超过 3000 行时每页最多 120 行，连续快速上翻（间隔不到 600ms）自动回到 60 行，不跳过、不删除、不改消息顺序。v0.3.10：修复更新红点实际不可见。v0.3.9：设置面板保持滚动位置、打开时接管键盘焦点并在关闭后归还；修复宿主替换 subscribe 时被误覆盖的风险。v0.3.8：日志清理加固——只删白名单内的旧日志，校验真实日期、目录类型、普通文件非链接与 10 分钟最小年龄；宁可超预算也不误删。v0.3.7 起支持小红点与可选自动检查更新（默认关闭、24 小时内最多一次，只请求公开 GitHub Releases）。仍不读消息正文、不写 store；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
     print()
     print_logs()
     return 0

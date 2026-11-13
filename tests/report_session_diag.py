@@ -48,6 +48,13 @@ def run_pane(rows: list[dict]) -> str:
     return buf.getvalue()
 
 
+def run_scroll(rows: list[dict]) -> str:
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        lr.print_scroll_diag(rows)
+    return buf.getvalue()
+
+
 def main() -> int:
     print("-- _fmt_ts --")
     check("None/0/负数都显示 -",
@@ -248,6 +255,12 @@ def main() -> int:
             lr.print_timer_diag(rows2)
         return buf.getvalue()
 
+    def run_switch(rows2):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            lr.print_switch_diag(rows2)
+        return buf.getvalue()
+
     laf_entry = {
         "t": 1730000099000, "ms": 812, "styleMs": 143,
         "scripts": [
@@ -335,13 +348,115 @@ def main() -> int:
     out = run_laf([{"settings": {"lafDiagOn": True, "loadOlderPaceOn": True},
                     "laf": None,
                     "pace": {"minRows": 3000, "intervalMs": 600, "allowed": 0, "skipped": 0}}])
-    check("pace 0/0 时提示还没触发（并说明非滚动触发不计入）",
-          "还没有被计数的补页触发" in out and "非滚动触发" in out, out)
+    check("pace 0/0 时如实说明包装未装上或本周期无调用",
+          "放行 0 次" in out and "跳过 0 次" in out
+          and "包装可能尚未装上，或本周期内没有补页调用" in out, out)
+
+    # v0.4.3：双口径（本轮 + 全天累计）并列显示；旧样本没有累计字段时回退。
+    out = run_laf([{"settings": {"lafDiagOn": True, "loadOlderPaceOn": True},
+                    "laf": None,
+                    "pace": {"minRows": 3000, "intervalMs": 600, "allowed": 2,
+                             "skipped": 1, "totalAllowed": 9, "totalSkipped": 4}}])
+    check("pace 双口径并列显示",
+          "本轮放行 2 次 / 跳过 1 次" in out
+          and "全天累计放行 9 次 / 跳过 4 次" in out, out)
+    out = run_laf([{"settings": {"lafDiagOn": True, "loadOlderPaceOn": True},
+                    "laf": None,
+                    "pace": {"minRows": 3000, "intervalMs": 600,
+                             "allowed": 2, "skipped": 1}}])
+    check("旧 pace 样本没有累计口径时如实标注",
+          "旧样本没有全天累计口径" in out and "全天累计放行" not in out, out)
 
     # 暂停样本（laf=None 且 lafDiagOn 仍开）：向前回退找有效数据
     out = run_laf([laf_on, dict(laf_on, laf=None, pace=None)])
     check("暂停样本回退到最近一次有效 laf",
           "index-a1b2.js" in out, out)
+
+    print("-- v0.4.3 P0 会话切换归因 --")
+    sw_item = {
+        "t": 1730000100000, "from": "sess_tes", "to": "sess_d7d",
+        "afterMax2s": 530, "afterP95": 320, "lafN2s": 2, "styleMs2s": 156,
+        "lafN30s": 5, "styleMs30s": 300, "loadOlderN30s": 10,
+        "loadOlderMs30s": 1500, "domBefore": 5000, "domAfter": 6000,
+        "turnsBefore": 40, "turnsAfter": 45, "blockedLoadAll": 1, "settled": 1,
+    }
+    sw_on = {"settings": {"switchDiagOn": True},
+             "switch": {"on": 1, "items": [sw_item]}}
+    out = run_switch([sw_on])
+    check("switch 正常形状打印双窗口与最重一次",
+          "切换会话归因：最近 1 次切换" in out and "2s 最重 530ms" in out
+          and "补页 10 次" in out and "sess_tes" in out and "sess_d7d" in out
+          and "最重一次" in out, out)
+    # v0.4.3：滚动诊断关闭时，补页与 DOM/回合都取自它的采集缓存，必须一起标未测量。
+    out = run_switch([{"settings": {"switchDiagOn": True, "scrollDiagOn": False,
+                                 "lafDiagOn": True},
+                    "switch": {"on": 1, "items": [sw_item]}}])
+    check("滚动诊断关闭时提示补页与 DOM/回合未测量",
+          "补页与 DOM/回合列为未测量" in out, out)
+    # items=[] 表示未变化：向前找最近一次非空（与 loadOlderDetail 同约定）。
+    out = run_switch([sw_on, {"settings": {"switchDiagOn": True},
+                           "switch": {"on": 1, "items": []}}])
+    check("switch items=[] 时回退到最近非空样本",
+          "sess_d7d" in out and "切换会话归因：最近 1 次切换" in out, out)
+    # 未满 30 秒：必须标注窗口未满，不能把半截数据当最终结论。
+    sw_partial = dict(sw_item, settled=0, domAfter=None, turnsAfter=None,
+                      blockedLoadAll=None)
+    out = run_switch([{"settings": {"switchDiagOn": True},
+                    "switch": {"on": 1, "items": [sw_partial]}}])
+    check("settled=0 时标注 30 秒窗口未满",
+          "30 秒窗口未满" in out and "2s 最重 530ms" in out, out)
+    # 关闭态优先：不打印旧记录。
+    out = run_switch([sw_on, {"settings": {"switchDiagOn": False}, "switch": None}])
+    check("最新样本关闭时提示已关闭且不打印旧记录",
+          "切换会话归因已关闭" in out and "sess_d7d" not in out, out)
+    # 开着但本文件没有切换。
+    out = run_switch([{"settings": {"switchDiagOn": True},
+                    "switch": {"on": 1, "items": []}}])
+    check("开启但无切换记录时如实提示",
+          "本文件内没有切换记录" in out, out)
+    # 旧样本没有该字段。
+    out = run_switch([{"settings": {}, "ver": "0.3.5"}])
+    check("旧样本无 switch 字段时提示本版本未记录",
+          "本版本未记录切换归因" in out and "Traceback" not in out, out)
+    # 坏形状：switch 是数字、items 混入非 dict → 不抛异常。
+    out = run_switch([{"settings": {"switchDiagOn": True}, "switch": 7}])
+    check("switch 非字典时不炸", "Traceback" not in out, out)
+    out = run_switch([{"settings": {"switchDiagOn": True},
+                    "switch": {"on": 1, "items": [7, "x", {"t": "bad"}]}}])
+    check("switch items 坏形状不炸", "Traceback" not in out, out)
+    # v0.4.3 三审：数值字段被写成字符串/NaN 时按 0 处理，不能吓崩整段。
+    sw_badnum = dict(sw_item, afterMax2s="bad", afterP95=None, lafN2s="x",
+                     styleMs2s=float("nan"), loadOlderN30s="?", loadOlderMs30s=None,
+                     domBefore="no", domAfter=6000)
+    out = run_switch([{"settings": {"switchDiagOn": True},
+                    "switch": {"on": 1, "items": [sw_badnum]}}])
+    check("switch 数值坏形状按 0/未测量处理",
+          "Traceback" not in out and "2s 无帧切片" in out
+          and "长帧 0 次" in out and "补页 0 次" in out
+          and "DOM" not in out, out)
+    # 被下一次切换截断：冻结但窗口不满 30 秒，必须标注，不能当完整结论。
+    sw_early = dict(sw_item, settled=1, settledEarly=1)
+    out = run_switch([{"settings": {"switchDiagOn": True},
+                    "switch": {"on": 1, "items": [sw_early]}}])
+    check("settledEarly=1 时标注窗口被下一次切换截断",
+          "窗口被下一次切换截断" in out and "30 秒窗口未满" not in out, out)
+    # 中途关过又重开、但还没有新切换：既不能说「已关闭」，也不能说「没有记录」。
+    out = run_switch([
+        {"settings": {"switchDiagOn": False}, "switch": None},
+        {"settings": {"switchDiagOn": True}, "switch": {"on": 1, "items": []}},
+    ])
+    check("关闭过又重开时提示「曾关闭；重开后还没有新的切换记录」",
+          "曾关闭" in out and "重开后还没有新的切换记录" in out
+          and "已关闭" not in out and "没有切换记录" not in out, out)
+    # 暂停/自禁用：明说状态，但历史记录仍展示。
+    out = run_switch([sw_on, {"settings": {"switchDiagOn": True, "observe": False},
+                           "switch": None}])
+    check("暂停时提示已暂停并保留历史记录",
+          "切换会话归因已暂停" in out and "sess_d7d" in out, out)
+    out = run_switch([sw_on, {"settings": {"switchDiagOn": True}, "dead": True,
+                           "switch": None}])
+    check("自禁用时提示观测器已自禁用并保留历史记录",
+          "观测器已自禁用" in out and "sess_d7d" in out, out)
 
     print("-- v0.3.4 终审：状态判定看最新样本 / 坏形状不炸 --")
     # P1-3：先关闭过、后来重开但暂停 —— 不能被判成「已关闭」
@@ -454,14 +569,14 @@ def main() -> int:
     out = run_laf([bad_ctx])
     check("ctx/paneOpen 坏形状不炸", "Traceback" not in out, out)
 
-    print("-- v0.4.0 O8b 自适应补页 --")
+    print("-- v0.4.3 O8b 退役：补页批量历史计数 --")
     page_ok = {"settings": {"loadOlderPageLimitOn": True},
                "page": {"limit": 120, "minRows": 3000, "burstMs": 600,
                         "installed": True, "applied": 12, "downgraded": 5,
                         "small": 2, "passthrough": 3}}
     out = run_laf([page_ok])
-    check("page 正常形状打印页大小与四类计数",
-          "补页批量（实验）：每页最多 120 行" in out
+    check("旧 page 计数照常显示并统一标注已退役",
+          "已退役" in out and "每页最多 120 行" in out
           and "已生效 12 次" in out and "连续补页降回 60 行 5 次" in out
           and "窗口未超过 3000 行按 60 行 2 次" in out
           and "显式参数放行 3 次" in out, out)
@@ -470,7 +585,7 @@ def main() -> int:
                     "page": {"limit": 200, "installed": True,
                              "applied": 4, "passthrough": 1}}])
     check("旧 page 样本不把缺失字段当 0",
-          "每页最多 200 行" in out and "已生效 4 次" in out
+          "已退役" in out and "每页最多 200 行" in out and "已生效 4 次" in out
           and "显式参数放行 1 次" in out
           and "降回 60 行" not in out and "按 60 行" not in out, out)
     # 包装没装上：必须明说计数不可用，不能显示成 0 次生效。
@@ -479,40 +594,31 @@ def main() -> int:
                              "applied": 0, "passthrough": 0}}])
     check("installed=false 时提示包装尚未装上",
           "包装尚未装上，计数不可用" in out, out)
-    # 开关开着但还没发生过无参补页：要明确提示，不能让人以为已生效。
+    # 退役前生效 0 次：说明这只是历史记录，不是当前生效的缓解。
     out = run_laf([{"settings": {"loadOlderPageLimitOn": True},
                     "page": {"limit": 120, "installed": True,
                              "applied": 0, "downgraded": 0, "small": 1,
                              "passthrough": 0}}])
-    check("page applied=0 时提示还没有大窗口无参补页",
-          "还没有大窗口无参补页" in out, out)
-    # 关闭态优先于旧 page 数据：不能拿旧计数冒充当前状态。
+    check("applied=0 时提示退役前没有生效记录",
+          "退役前该日志里没有大窗口无参补页生效记录" in out, out)
+    # 新样本不再产出 page：历史计数仍然显示（已退役标注），不当成当前状态。
     out = run_laf([page_ok,
-                   {"settings": {"loadOlderPageLimitOn": False}, "page": None}])
-    check("最新样本关闭时提示已关闭且不打印旧计数",
-          "补页批量已关闭" in out and "已生效 12 次" not in out, out)
-    # dead/显式 page=null：当前没有可用计数，不能越过它回显旧计数。
+                   {"settings": {"switchDiagOn": True}, "page": None}])
+    check("新样本无 page 时仍显示历史计数并标注已退役",
+          "已退役" in out and "已生效 12 次" in out, out)
+    # dead 样本也不抹掉历史：它不是"当前计数"，只是退役前的记录。
     out = run_laf([page_ok,
-                   {"settings": {"loadOlderPageLimitOn": True}, "dead": True,
-                    "page": None}])
-    check("dead 样本不回显旧 page 计数",
-          "已生效 12 次" not in out and "没有补页计数" in out, out)
-    out = run_laf([page_ok,
-                   {"settings": {"loadOlderPageLimitOn": True}, "page": None}])
-    check("最新样本 page=null 时不回显旧计数",
-          "已生效 12 次" not in out and "没有补页计数" in out, out)
-    # 降级/混合版本日志：最新样本没有该设置，也不能回显旧的 page 计数。
-    out = run_laf([page_ok, {"settings": {}, "ver": "0.3.5"}])
-    check("最新样本无该设置时不回显旧计数",
-          "本版本未记录补页批量" in out and "已生效 12 次" not in out, out)
-    # 旧样本没有该字段。
+                   {"settings": {}, "dead": True, "page": None}])
+    check("dead 样本仍显示退役前历史计数",
+          "已生效 12 次" in out and "已退役" in out, out)
+    # 完全没有 page 字段：明说已退役，不报错。
     out = run_laf([{"settings": {}, "ver": "0.3.5"}])
-    check("旧样本无 page 字段时提示本版本未记录",
-          "本版本未记录补页批量" in out and "Traceback" not in out, out)
+    check("旧样本无 page 字段时提示已于 v0.4.3 退役",
+          "补页批量已于 v0.4.3 退役" in out and "Traceback" not in out, out)
     # 坏形状：page 是数字/字符串、字段为负或非数值 → 不抛异常。
-    out = run_laf([{"settings": {"loadOlderPageLimitOn": True}, "page": 7}])
+    out = run_laf([{"settings": {}, "page": 7}])
     check("page 非字典时不炸", "Traceback" not in out, out)
-    out = run_laf([{"settings": {"loadOlderPageLimitOn": True},
+    out = run_laf([{"settings": {},
                     "page": {"limit": "many", "applied": -3, "passthrough": None}}])
     check("page 坏字段回退为默认值且不炸",
           "每页最多 120 行" in out and "已生效 0 次" in out
@@ -585,6 +691,145 @@ def main() -> int:
                                                "invoker": None, "t": None}]}}])
     check("timer 条目坏字段回退且不炸",
           "Traceback" not in out and "anonymous" in out, out)
+
+    # 包装失配必须和「未装上」分开说明。
+    out = run_timer([{"settings": {"timerDiagOn": True},
+                      "timer": {"supported": 0, "lost": 1, "count": 0,
+                                "max": None, "detail": []}}])
+    check("timer lost=1 时说明归因包装已失效",
+          "归因包装已失效" in out and "全局定时器被替换" in out, out)
+
+    print("-- v0.4.2 报告一致性 --")
+    scroll_on = {
+        "settings": {"scrollDiagOn": True, "inputLagOn": True},
+        "scroll": {"p95": 48, "max": 210, "frames": 120, "events": 9,
+                   "anyEvents": 12, "loadOlderCalls": 3, "loadOlderP95": 500,
+                   "loadOlderMax": 7298, "loadOlderErrors": 0,
+                   "mountedTurns": 4, "domPeak": 3200, "lafCount": 2,
+                   "lafMax": 180},
+        "input": {"p95": 32, "max": 90, "samples": 20},
+    }
+    scroll_off = {"settings": {"scrollDiagOn": False, "inputLagOn": False},
+                  "scroll": None, "input": None}
+    out = run_scroll([scroll_on, scroll_off])
+    check("最新样本关闭滚动诊断时明示、不回显旧 P95",
+          "滚动诊断已关闭" in out and "48ms" not in out, out)
+    check("最新样本关闭输入观测时明示、不回显旧 P95",
+          "输入延迟观测已关闭" in out and "32ms" not in out, out)
+
+    paused_scroll = {"settings": {"scrollDiagOn": True, "inputLagOn": True},
+                     "scroll": None, "input": None}
+    out = run_scroll([scroll_on, paused_scroll])
+    check("暂停时滚动数据回退并标注最近一次有效样本",
+          "滚动诊断：窗口内帧 P95=48ms" in out and "（最近一次有效样本）" in out, out)
+    check("暂停时输入数据回退并标注最近一次有效样本",
+          "输入延迟：按键→下一帧 P95=32ms" in out and out.count("（最近一次有效样本）") >= 2, out)
+
+    # 补页明细跨代际：新样本 epoch 不同且明细为空，不能回退到上一轮。
+    old_detail = {
+        "settings": {"scrollDiagOn": True},
+        "scroll": {"p95": 50, "loadOlderEpoch": 1},
+        "loadOlderDetail": [{"t": 1730000001000, "ms": 7298, "ok": True,
+                             "rowsBefore": 60, "rowsAfter": 120, "trigger": "scroll"}],
+    }
+    new_epoch = {
+        "settings": {"scrollDiagOn": True},
+        "scroll": {"p95": 40, "loadOlderEpoch": 2},
+        "loadOlderDetail": [],
+    }
+    out = run_print([old_detail, new_epoch])
+    check("loadOlder 明细跨代际停止回退",
+          "7298ms" not in out and "未记录到补页明细" in out, out)
+
+    # LAF / timer 明细跨代际同理。
+    laf_old = {
+        "settings": {"lafDiagOn": True},
+        "laf": {"supported": 1, "count": 1, "max": 200, "epoch": 1,
+                "detail": [{"t": 1730000099000, "ms": 200, "styleMs": 0,
+                            "scripts": [{"src": "old.js", "invoker": "f", "ms": 200}]}]},
+    }
+    laf_new = {"settings": {"lafDiagOn": True},
+               "laf": {"supported": 1, "count": 0, "max": None, "epoch": 2,
+                       "detail": []}}
+    out = run_laf([laf_old, laf_new])
+    check("LAF 明细跨代际停止回退", "old.js" not in out, out)
+
+    timer_old = {
+        "settings": {"timerDiagOn": True, "observe": True},
+        "timer": {"supported": 1, "count": 1, "max": 96, "epoch": 1,
+                  "detail": [{"t": 1730000099000, "ms": 96, "delay": 100,
+                              "kind": "timeout", "src": "oldTimer", "invoker": "f"}]},
+    }
+    timer_new = {"settings": {"timerDiagOn": True, "observe": True},
+                 "timer": {"supported": 1, "count": 0, "max": None, "epoch": 2,
+                           "detail": []}}
+    out = run_timer([timer_old, timer_new])
+    check("timer 明细跨代际停止回退", "oldTimer" not in out, out)
+
+    # 结构合法但语义越界的时间戳不能让报告崩，也不能显示 1970。
+    check("越界时间戳返回 -",
+          lr._fmt_ts_full(1e300) == "-" and lr._fmt_ts_full(None) == "-"
+          and lr._fmt_ts_full(0) == "-")
+    check("正常时间戳带日期显示",
+          bool(re.fullmatch(r"\d\d-\d\d \d\d:\d\d:\d\d",
+                            lr._fmt_ts_full(1730000099000))))
+    bad_ts = {"settings": {"timerDiagOn": True},
+              "timer": {"supported": 1, "count": 1, "max": 60,
+                        "detail": [{"t": 1e300, "ms": 60, "delay": 0,
+                                    "kind": "timeout", "src": "badTs", "invoker": "f"}]}}
+    out = run_timer([bad_ts])
+    check("t=1e300 不抛异常且显示 -", "Traceback" not in out and "badTs" in out, out)
+
+    # 帧汇总：窗口值与历史值必须分两行，旧样本没有窗口字段时明确标注。
+    with tempfile.TemporaryDirectory(prefix="lagfix-frame-") as td:
+        p = Path(td) / "observe-20261112.jsonl"
+        p.write_text("\n".join(json.dumps({"win": 1, "t": 1, "d": r}) for r in [
+            {"frames": 300, "dt": 5, "frameP95": 40,
+             "frameMax": 816, "frameMaxAll": 816, "frameMaxWindow": 120},
+            {"frames": 300, "dt": 5, "frameP95": 50, "frameMax": 640},
+        ]), "utf-8")
+        old_dir = lr.pi.DATA_DIR
+        old_diag = lr.diagnose
+        old_logs = lr.print_logs
+        buf = io.StringIO()
+        try:
+            lr.pi.DATA_DIR = Path(td)
+            lr.diagnose = lambda: None
+            lr.print_logs = lambda: None
+            with contextlib.redirect_stdout(buf):
+                lr.main()
+        finally:
+            lr.pi.DATA_DIR = old_dir
+            lr.diagnose = old_diag
+            lr.print_logs = old_logs
+        out = buf.getvalue()
+        check("帧汇总优先打印 30s 窗口最长",
+              "单帧最长（30s 窗口）：120ms" in out, out)
+        check("帧汇总另行打印历史最长",
+              "历史最长（attach/切会话以来）：816ms" in out, out)
+
+    with tempfile.TemporaryDirectory(prefix="lagfix-frame-old-") as td:
+        p = Path(td) / "observe-20261112.jsonl"
+        p.write_text(json.dumps(
+            {"win": 1, "t": 1, "d": {"frames": 300, "dt": 5,
+                                     "frameP95": 50, "frameMax": 640}}), "utf-8")
+        old_dir = lr.pi.DATA_DIR
+        old_diag = lr.diagnose
+        old_logs = lr.print_logs
+        buf = io.StringIO()
+        try:
+            lr.pi.DATA_DIR = Path(td)
+            lr.diagnose = lambda: None
+            lr.print_logs = lambda: None
+            with contextlib.redirect_stdout(buf):
+                lr.main()
+        finally:
+            lr.pi.DATA_DIR = old_dir
+            lr.diagnose = old_diag
+            lr.print_logs = old_logs
+        out = buf.getvalue()
+        check("旧样本帧汇总标注历史值",
+              "单帧最长（旧样本为历史值）：640ms" in out, out)
 
     print("== report_session_diag 结果：", "PASS" if ok else "FAIL", "==")
     return 0 if ok else 1

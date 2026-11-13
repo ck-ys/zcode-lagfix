@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>zcode-lagfix v0.4.2 拍板 · 先把尺子修准，再谈优化</title>
+<style>
+  :root {
+    --bg: #0b1017;
+    --bg-2: #101824;
+    --card: #141d2b;
+    --card-2: #182334;
+    --line: #263449;
+    --text: #e6edf7;
+    --muted: #93a4bb;
+    --dim: #6e8098;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --radius: 14px;
+    --shadow: 0 18px 50px rgba(0, 0, 0, .28);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    color: var(--text);
+    background:
+      radial-gradient(900px 500px at 18% -8%, rgba(88, 166, 255, .14), transparent 60%),
+      radial-gradient(800px 420px at 92% 4%, rgba(188, 140, 255, .10), transparent 60%),
+      var(--bg);
+    font: 15px/1.72 "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+  code { overflow-wrap: anywhere; word-break: break-word; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 44px 22px 120px; }
+
+  .hero {
+    display: grid;
+    grid-template-columns: 1.35fr .65fr;
+    gap: 24px;
+    align-items: stretch;
+    margin-bottom: 30px;
+  }
+  .hero-main, .hero-side {
+    background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,0));
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .hero-main { padding: 30px 30px 26px; }
+  .hero-side { padding: 22px; display: flex; flex-direction: column; justify-content: space-between; gap: 16px; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--blue); font-size: 12.5px; font-weight: 700;
+    letter-spacing: .12em; text-transform: uppercase;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); box-shadow: 0 0 0 5px rgba(248,81,73,.12); }
+  h1 { margin: 12px 0 10px; font-size: clamp(28px, 4vw, 42px); line-height: 1.18; letter-spacing: -.02em; }
+  h1 span { color: var(--muted); font-weight: 500; }
+  .lede { margin: 0; color: var(--muted); max-width: 780px; font-size: 16px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border-radius: 999px;
+    border: 1px solid var(--line); background: rgba(255,255,255,.025);
+    color: var(--muted); font-size: 12.5px;
+  }
+  .chip b { color: var(--text); font-weight: 650; }
+  .verdict-box { padding: 16px; border-radius: 12px; background: rgba(63,185,80,.07); border: 1px solid rgba(63,185,80,.28); }
+  .verdict-box .big { font-size: 20px; font-weight: 750; line-height: 1.35; }
+  .verdict-box p { margin: 8px 0 0; color: var(--muted); font-size: 13.5px; }
+  .version-line { color: var(--dim); font-size: 12.5px; }
+
+  section { margin-top: 38px; }
+  .sec-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+  h2 { margin: 0; font-size: 21px; letter-spacing: -.01em; }
+  .sec-head p { margin: 0; color: var(--dim); font-size: 13px; max-width: 620px; text-align: right; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .grid-2 > *, .grid-3 > * { min-width: 0; }
+  .card {
+    min-width: 0;
+    background: linear-gradient(180deg, rgba(255,255,255,.028), rgba(255,255,255,.008));
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 18px;
+  }
+  .card h3 { margin: 0 0 8px; font-size: 15.5px; }
+  .card p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .card ul { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  .card li { margin: 5px 0; }
+  .card li b { color: var(--text); }
+  .muted { color: var(--muted); }
+  .small { font-size: 12.5px; }
+  .dim { color: var(--dim); }
+  .tag {
+    display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 650; border: 1px solid var(--line); color: var(--muted);
+    background: rgba(255,255,255,.03); white-space: nowrap;
+  }
+  .tag.green { color: #7ee787; border-color: rgba(63,185,80,.35); background: rgba(63,185,80,.08); }
+  .tag.yellow { color: #e3b341; border-color: rgba(210,153,34,.35); background: rgba(210,153,34,.08); }
+  .tag.red { color: #ff7b72; border-color: rgba(248,81,73,.35); background: rgba(248,81,73,.08); }
+  .tag.blue { color: #79c0ff; border-color: rgba(88,166,255,.35); background: rgba(88,166,255,.08); }
+  .tag.purple { color: #d2a8ff; border-color: rgba(188,140,255,.35); background: rgba(188,140,255,.08); }
+
+  .callout {
+    display: grid; grid-template-columns: 36px 1fr; gap: 12px;
+    border: 1px solid rgba(88,166,255,.28); background: rgba(88,166,255,.055);
+    border-radius: var(--radius); padding: 16px 18px; margin-top: 14px;
+  }
+  .callout.red { border-color: rgba(248,81,73,.32); background: rgba(248,81,73,.06); }
+  .callout.green { border-color: rgba(63,185,80,.32); background: rgba(63,185,80,.06); }
+  .callout .icon {
+    width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+    background: rgba(88,166,255,.14); color: var(--blue); font-weight: 800;
+  }
+  .callout.red .icon { background: rgba(248,81,73,.14); color: var(--red); }
+  .callout.green .icon { background: rgba(63,185,80,.14); color: var(--green); }
+  .callout p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .callout b { color: var(--text); }
+
+  .option {
+    position: relative; border: 1px solid var(--line); border-radius: var(--radius); padding: 18px;
+    background: linear-gradient(180deg, rgba(255,255,255,.024), rgba(255,255,255,.006));
+  }
+  .option.primary { border-color: rgba(63,185,80,.55); background: linear-gradient(180deg, rgba(63,185,80,.09), rgba(63,185,80,.02)); box-shadow: 0 0 0 1px rgba(63,185,80,.14) inset; }
+  .option .head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .option h3 { margin: 0; font-size: 16px; }
+  .option p { margin: 0 0 9px; color: var(--muted); font-size: 13.5px; }
+  .option ul { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 12.8px; }
+  .option li { margin: 4px 0; }
+  .option .kv { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: 12px; color: var(--dim); }
+  .option .kv b { color: var(--muted); font-weight: 650; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 12px; letter-spacing: .03em; text-transform: uppercase; }
+  td { color: var(--muted); }
+  td b { color: var(--text); font-weight: 650; }
+
+  .footnote { margin-top: 34px; color: var(--dim); font-size: 12px; line-height: 1.8; }
+  .footnote code { color: var(--muted); background: rgba(255,255,255,.04); padding: 1px 5px; border-radius: 4px; }
+
+  @media (max-width: 900px) {
+    .hero { grid-template-columns: 1fr; }
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    .sec-head { display: block; }
+    .sec-head p { text-align: left; margin-top: 6px; }
+  }
+  @media (max-width: 720px) {
+    .accept-table thead { display: none; }
+    .accept-table, .accept-table tbody, .accept-table tr, .accept-table td { display: block; width: 100%; }
+    .accept-table tr { border-bottom: 1px solid var(--line); padding: 10px 0; }
+    .accept-table tr:last-child { border-bottom: 0; }
+    .accept-table td { border: 0; padding: 3px 0 3px 84px; position: relative; }
+    .accept-table td::before {
+      content: attr(data-label); position: absolute; left: 0; top: 3px; width: 76px;
+      color: var(--dim); font-size: 11.5px; font-weight: 600;
+    }
+  }
+  @media print {
+    body { background: #fff; color: #111; }
+    .wrap { padding: 0; max-width: none; }
+    .card, .hero-main, .hero-side, .option { box-shadow: none; background: #fff; border-color: #ddd; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="hero-main">
+      <div class="eyebrow"><span class="dot" style="background:var(--green);box-shadow:0 0 0 5px rgba(63,185,80,.14)"></span>PATCH · v0.4.2 · 先修尺子</div>
+      <h1>先把尺子修准 <span>再谈下一轮优化</span></h1>
+      <p class="lede">2026-11-12 的日志里，最重的一段卡顿发生在<b>右侧面板关闭、没有滚动、没有输入</b>的空闲期；而当时的补页降频和自适应补页都没有实际动作。同一批日志又暴露出观测本身的口径问题：帧窗口写了 30 秒、实际只有 300 帧；样本里的「单帧最长」是 attach 以来的历史最大值；报告上半段说没有滚动，下半段补页明细却显示刚滚过。三份审查（双 DeepSeek + GLM-5.3）没有 P0，但一致认为：<b>在把测量和包装器边界修准之前，继续加优化项只会得到不可信的数据。</b></p>
+      <div class="meta">
+        <span class="chip">当前 <b>v0.4.1</b></span>
+        <span class="chip">日志 <b>1965 条采样</b></span>
+        <span class="chip">长帧明细 <b>279 条去重</b></span>
+        <span class="chip">审查 <b>3 份 · 0 P0</b></span>
+        <span class="chip">推荐 <b>A · 三组修复</b></span>
+      </div>
+    </div>
+    <div class="hero-side">
+      <div class="verdict-box">
+        <div class="big">推荐 A<br>S1 + S2 + S3</div>
+        <p>只修观测口径、包装器生命周期和报告一致性；不新增缓解项、不改默认开关、不碰宿主数据。自身开销与安装器安全拆到后续版本/独立 chore。</p>
+      </div>
+      <div class="version-line">版本号暂定 v0.4.2。若你更想走 v0.4.1.1，内容不变；安装器与日志安全不并入本版。</div>
+    </div>
+  </header>
+
+  <section>
+    <div class="sec-head">
+      <h2>01 · 这轮日志改变了什么</h2>
+      <p>同一台机器、同一个 v0.4.1 进程；不是凭体感，是采样里的三段对照。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>时段</th><th>现场</th><th>帧与长帧</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr>
+          <td data-label="时段"><b>18:25–18:37</b></td>
+          <td data-label="现场">右侧面板关闭（<code>pane.open=false</code>、<code>panelPx=2</code>）；滚动 0、输入 0</td>
+          <td data-label="指标"><code>frameP95</code> 中位 <b>37–61ms</b>；每分钟 <b>105–341</b> 个 ≥50ms 长帧；单条最长 <b>118–172ms</b></td>
+          <td data-label="说明">空闲期持续掉帧，不是滚动/补页造成</td>
+        </tr>
+        <tr>
+          <td data-label="时段"><b>18:44–18:50</b></td>
+          <td data-label="现场">滚动与输入都很密（每分钟数百次事件）</td>
+          <td data-label="指标"><code>frameP95</code> <b>18–24ms</b>；仍有 100–285ms 尖峰</td>
+          <td data-label="说明">交互期整体可接受，但尖峰仍在</td>
+        </tr>
+        <tr>
+          <td data-label="时段"><b>18:51</b></td>
+          <td data-label="现场">打开右侧面板</td>
+          <td data-label="指标">一次 <b>303ms</b> 帧；3 秒内 style 约 <b>500ms</b></td>
+          <td data-label="说明">开面板的已知尖峰；18:51:13 后回到 <code>p95=6ms</code></td>
+        </tr>
+        <tr>
+          <td data-label="时段"><b>18:20–18:53</b></td>
+          <td data-label="现场">279 条去重 LoAF 明细</td>
+          <td data-label="指标">53 条 ≥150ms、15 条 ≥200ms、5 条 ≥300ms；脚本 16.4s（<code>setTimeout</code> 15.3s、<code>setInterval</code> 1.0s）；style 11.6s；26 条 ≥150ms 既无脚本也无 style</td>
+          <td data-label="说明">大头在定时器与样式/渲染；后者目前归因不了</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="callout red">
+      <div class="icon">!</div>
+      <p><b>不能把锅扣给 O3/O8b：</b>空闲卡顿期间 <code>pace.allowed=0</code>、<code>pace.skipped=0</code>，补页只有 <code>small=10</code>，没有实际补页动作。更关键的是 <code>timerDiagOn=false</code>，日志只能看到 <code>TimerHandler:setTimeout</code>，不知道是谁的回调；zusage 1.5.18 的 500/600ms tick 只是候选，不能定案。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>02 · 三份审查要修的点</h2>
+      <p>只列与 v0.4.2 有关的；P2 的安装器/日志安全另列，不混进本版。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>ID</th><th>问题</th><th>证据</th><th>影响</th><th>本版动作</th></tr></thead>
+      <tbody>
+        <tr>
+          <td data-label="ID"><b>S1</b></td>
+          <td data-label="问题">帧窗口与最大值口径不一致</td>
+          <td data-label="证据"><code>RING_MAX=300</code> 却按 <code>WINDOW_MS=30000</code> 宣传；样本 <code>frameMax</code> 取 <code>frameMaxAll</code>；报告又拿它当窗口最大值</td>
+          <td data-label="影响">120Hz 下 P95 实际只覆盖约 2.5 秒；角标/报告可能显示很早以前的尖峰</td>
+          <td data-label="动作"><span class="tag green">修</span> 窗口、最大值、报告字段三者对齐</td>
+        </tr>
+        <tr>
+          <td data-label="ID"><b>S2</b></td>
+          <td data-label="问题"><code>loadAllOlder</code> 复用/还原不校验是不是自己那层</td>
+          <td data-label="证据"><code>applyLoadAllGuard</code> 只看 marker；<code>releaseLoadAllGuard</code> 无条件写回 <code>rec.orig</code></td>
+          <td data-label="影响">宿主或其它插件运行期替换后，关闭保护可能把新实现覆盖回旧实现</td>
+          <td data-label="动作"><span class="tag green">修</span> marker 存 <code>{orig,wrapped}</code>，identity 不匹配不还原</td>
+        </tr>
+        <tr>
+          <td data-label="ID"><b>S3</b></td>
+          <td data-label="问题"><code>subscribe</code> marker 复用不校验身份</td>
+          <td data-label="证据"><code>target.__lagfixThrottle</code> 命中就直接 <code>applied=true</code>，不核对 <code>target.subscribe === wrapped</code></td>
+          <td data-label="影响">宿主替换 <code>subscribe</code> 后，面板仍显示「已生效」，实际通知不再经过包装</td>
+          <td data-label="动作"><span class="tag green">修</span> 复用前校验 identity，不匹配则重装或如实标未生效</td>
+        </tr>
+        <tr>
+          <td data-label="ID"><b>S4</b></td>
+          <td data-label="问题">O3 旧 wrapper 没有代际门控</td>
+          <td data-label="证据">O3 分支在 <code>callOrig</code> 之前，且没有 <code>gen !== loadOlderGen</code> 判断；<code>loadOlderCalls++</code> 也无门控</td>
+          <td data-label="影响">换 store/释放后，宿主缓存了旧 wrapper 仍可能跳过补页、污染计数</td>
+          <td data-label="动作"><span class="tag green">修</span> wrapper 入口先做 gen 门控，旧引用完全直通</td>
+        </tr>
+        <tr>
+          <td data-label="ID"><b>S5</b></td>
+          <td data-label="问题">T1 不检测宿主替换定时器</td>
+          <td data-label="证据"><code>setTimerProbe</code> 只要 <code>timerProbe</code> 存在就返回 true；<code>supported</code> 只证明「曾经装上过」</td>
+          <td data-label="影响">宿主/其它插件替换后，T1 静默失效却继续报 <code>supported=1</code>，归因结论不可信</td>
+          <td data-label="动作"><span class="tag green">修</span> identity 失配时标 <code>lost</code> 或重装；旧 wrapper 直通</td>
+        </tr>
+        <tr>
+          <td data-label="ID"><b>S6</b></td>
+          <td data-label="问题">报告在关闭状态/旧样本/坏时间戳上不自洽</td>
+          <td data-label="证据">滚动段显示「P95=-、滚动帧=0」，补页明细却显示 18:51 还在 scroll；timer/LAF detail 未变化发 <code>[]</code> 会跨代际回退</td>
+          <td data-label="影响">A/B 切换开关后，报告可能把上一轮数据当成当前数据</td>
+          <td data-label="动作"><span class="tag green">修</span> 关闭态明示、旧样本加后缀、detail 加 epoch、时间戳范围保护</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <div class="icon">i</div>
+      <p><b>审查共识：</b>没有 P0；硬红线（<code>db.sqlite</code>、CDP、联网上报、凭据、真实安装目录、自动重启）零触碰。v0.4.1 的版本同步与测试项数（537/92/25/33 等）全部对得上。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>03 · 三条路线</h2>
+      <p>同一批证据，区别只在“这一版动多少”。</p>
+    </div>
+    <div class="grid-3">
+      <div class="option primary">
+        <div class="head"><span class="tag green">推荐</span><h3>A · 三组修复</h3></div>
+        <p>S1 帧口径 + S2/S3/S4/S5 包装器生命周期 + S6 报告一致性，配齐回归测试。</p>
+        <ul>
+          <li><b>改动面：</b>observer、report、tests；不碰宿主行为</li>
+          <li><b>风险：</b>低；所有修复都只影响“插件怎么看/怎么还原”</li>
+          <li><b>代价：</b>一个补丁版的工期；不产生新的缓解收益</li>
+        </ul>
+        <div class="kv"><span><b>适合</b> 先把后续 A/B 的地基修准</span></div>
+      </div>
+      <div class="option">
+        <div class="head"><span class="tag yellow">最小</span><h3>B · 只修 S1</h3></div>
+        <p>只把帧窗口和 <code>frameMax</code> 口径改对，包装器与报告问题留到以后。</p>
+        <ul>
+          <li><b>优点：</b>改动最小，最快能重新量数据</li>
+          <li><b>风险：</b>包装器覆盖宿主、报告误导仍在</li>
+          <li><b>代价：</b>下一版还得再动同一批文件</li>
+        </ul>
+        <div class="kv"><span><b>适合</b> 只想先恢复指标可信度</span></div>
+      </div>
+      <div class="option">
+        <div class="head"><span class="tag red">不建议</span><h3>C · 顺手加优化</h3></div>
+        <p>把自身开销微优化、安装器流式重打包、日志轮转都塞进 v0.4.2。</p>
+        <ul>
+          <li><b>优点：</b>一次做完看起来省事</li>
+          <li><b>风险：</b>观测修复与安装器/IO 改动混在一起，回滚粒度差</li>
+          <li><b>代价：</b>验证矩阵变大，容易把“尺子修复”拖成“大版本”</li>
+        </ul>
+        <div class="kv"><span><b>建议</b> 拆到 v0.4.3 / 独立 chore</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>04 · A 路线具体做什么</h2>
+      <p>每一项都只改插件自己的观测/还原逻辑，不改宿主消息、会话、工具结果。</p>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <h3>S1 · 帧统计口径 <span class="tag green">做</span></h3>
+        <ul>
+          <li><code>frameRing</code> 容量与 30 秒窗口对齐（参考 <code>scrollRing</code> 的 3600），或把文案改成真实窗口；二选一，不模糊。</li>
+          <li>样本拆成 <code>frameMaxWindow</code> 与 <code>frameMaxAll</code>；角标用窗口值，报告分别标注。</li>
+          <li><code>pane.switchMax</code>、<code>refocus.max</code> 同样区分“窗口内”和“累计”，避免把历史尖峰当当前。</li>
+          <li>报告「单帧最长」只取窗口值；历史最大值单独一行。</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>S2–S5 · 包装器生命周期 <span class="tag green">做</span></h3>
+        <ul>
+          <li><code>loadAllOlder</code> marker 存 <code>{orig, wrapped}</code>；复用/释放都要求 <code>target.loadAllOlder === wrapped</code>。</li>
+          <li><code>subscribe</code> marker 复用前校验 <code>target.subscribe === wrapped</code>；不匹配则删 marker、按当前实现重装或标未生效。</li>
+          <li>O3 wrapper 入口先判 <code>gen !== loadOlderGen</code>，旧引用直接 <code>orig.apply</code>，不跳过、不计数。</li>
+          <li>T1 probe 核对 <code>window.setTimeout/setInterval === wrapped</code>；失配标 <code>lost</code> 或按当前实现重装，旧 wrapper 用 <code>active=false</code> 直通。</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>S6 · 报告一致性 <span class="tag green">做</span></h3>
+        <ul>
+          <li>最新设置 <code>scrollDiagOn=false</code> / <code>inputLagOn=false</code> 时明示「已关闭」，不再回退旧样本冒充当前。</li>
+          <li>回退到旧样本时加「最近一次有效样本」后缀；timer/LAF/loadOlder detail 加 epoch，跨代际停止回退。</li>
+          <li>时间戳限定 2000–2100 并 try/except，坏行不炸整份报告。</li>
+          <li>报告段与样本字段同名同义，避免「报告 285ms / 样本 303ms」。</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>测试与验证 <span class="tag green">做</span></h3>
+        <ul>
+          <li><code>observe_smoke.mjs</code>：&gt;300 帧且含 10 秒前尖峰的 P95 窗口；宿主替换 <code>loadAllOlder</code> 后关闭不覆盖；宿主替换 <code>subscribe</code> 后不假报；缓存旧 O3 wrapper 仍调用原方法；T1 失配 <code>supported/lost</code>；四条清理路径。</li>
+          <li><code>report_session_diag.py</code>：滚动/输入关闭态、旧样本后缀、detail epoch、<code>t=1e300</code> 不崩。</li>
+          <li>全量回归：<code>node --check</code>、<code>py_compile</code>、现有 8 个测试套件。</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout green">
+      <div class="icon">✓</div>
+      <p><b>本版明确不做：</b>不新增缓解项/开关；不改默认值；不启用 T1；不折叠/隐藏任何内容；不改 <code>loadOlder</code> 的跳过/合并语义；不动安装器、日志清理、网络请求；不碰 <code>db.sqlite</code>、CDP、真实安装目录。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>05 · 验收场景</h2>
+      <p>每条都要能在合成夹具里断言；不靠“看起来对”。</p>
+    </div>
+    <table class="accept-table">
+      <thead><tr><th>编号</th><th>场景</th><th>期望</th></tr></thead>
+      <tbody>
+        <tr><td data-label="编号"><b>A1</b></td><td data-label="场景">120Hz 下注入 &gt;300 帧，其中一条 10 秒前的 300ms 尖峰</td><td data-label="期望"><code>frameP95</code> 仍覆盖 30 秒窗口；尖峰计入；<code>frameMaxWindow</code> 与 <code>frameMaxAll</code> 分开</td></tr>
+        <tr><td data-label="编号"><b>A2</b></td><td data-label="场景">历史 800ms 尖峰已超出 30 秒，随后帧一直正常</td><td data-label="期望">角标不再显示高值；报告「窗口最长」正常，「历史最长」单独标注</td></tr>
+        <tr><td data-label="编号"><b>A3</b></td><td data-label="场景">装好大会话保护后，宿主替换 <code>loadAllOlder</code>，再关保护/`__lagfixOff()`</td><td data-label="期望">宿主新实现保持不变；marker 被清；面板不再显示旧 guard 生效</td></tr>
+        <tr><td data-label="编号"><b>A4</b></td><td data-label="场景">宿主替换 <code>subscribe</code> 后看门狗重试</td><td data-label="期望">不把旧 wrapper 当已生效；要么围绕新实现重装，要么如实标未生效</td></tr>
+        <tr><td data-label="编号"><b>A5</b></td><td data-label="场景">缓存旧 O3 wrapper，换 store/释放后在滚动派发栈里调用</td><td data-label="期望">原方法被调用；不跳过、不计 <code>loadOlderCalls</code>、不写 detail</td></tr>
+        <tr><td data-label="编号"><b>A6</b></td><td data-label="场景">T1 开启后宿主替换 <code>window.setTimeout</code>，再关闭 T1</td><td data-label="期望">不假报 <code>supported=1</code>；不覆盖宿主；不残留抓栈；重新开启以当前实现为 original</td></tr>
+        <tr><td data-label="编号"><b>A7</b></td><td data-label="场景">关闭滚动诊断/输入观测后打开报告；日志含 <code>t=1e300</code></td><td data-label="期望">明示「已关闭」；旧样本不冒充当前；报告不崩</td></tr>
+        <tr><td data-label="编号"><b>A8</b></td><td data-label="场景">全量回归</td><td data-label="期望">现有测试全 PASS，新增断言覆盖 A1–A7；版本四处同步</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>06 · 边界与回滚</h2>
+      <p>这一版的目标是“让后续判断可信”，不是“把卡顿修好”。</p>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <h3>硬边界</h3>
+        <ul>
+          <li>不修改会话、消息、工具结果；不读写 <code>db.sqlite</code>；不开 CDP；不联网上报。</li>
+          <li>不写真实安装目录；测试只用合成 asar 夹具。</li>
+          <li>包装器只还原本插件自己装的那一层；宿主替换后不覆盖。</li>
+          <li><code>__lagfixOff()</code> / 暂停 / 自禁用三条路径都要清掉新增状态。</li>
+          <li>默认开关值与 v0.4.1 完全一致；不把实验项转默认。</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>回滚与失败处理</h3>
+        <ul>
+          <li>若 <code>frameRing</code> 扩到 3600 后每秒排序成本明显（先量），退回“只改文案 + 保留 300 帧”，不硬上。</li>
+          <li>包装器 identity 修复若导致看门狗反复重装，优先标 <code>lost</code>/未生效，不引入超时兜底。</li>
+          <li>报告 epoch 字段对旧样本保持向后兼容；缺字段按旧逻辑显示，不把缺失当 0。</li>
+          <li>任一修复无法在合成夹具里稳定断言，就不进入本版，不靠实机“感觉”验收。</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>07 · 待拍板</h2>
+      <p>你只需要选路线；选 A 后我再写 spec、动代码。</p>
+    </div>
+    <div class="callout">
+      <div class="icon">?</div>
+      <p><b>推荐 A：</b>S1 + S2 + S3 + S4 + S5 + S6，配 A1–A8。它不产生新的“优化收益”，但会把后续 T1 归因、O3/O4/O8b 的 A/B 和报告结论变成可信数据。<br>
+      <b>若选 B：</b>只做 S1，包装器与报告问题留到 v0.4.3。<br>
+      <b>若选 C：</b>请明确哪些项必须同版；我建议至少把安装器/日志安全拆出去。<br>
+      <b>下一步：</b>你确认路线后，我先补 <code>docs/specs/v0.4.2-*.md</code>，再实现和跑全量测试；确认前不改任何代码。</p>
+    </div>
+  </section>
+
+  <div class="footnote">
+    <p>数据来源：<code>~/.zcode/zcode-lagfix/observe-20261112.jsonl</code> 与轮转文件 <code>.1</code>（1965 条采样，18:20–18:53 段 279 条去重 LoAF 明细）；<code>main.log</code> 显示 v0.4.1 于 10:19 加载；<code>installed_plugins.json</code> 显示 zusage 1.5.18。审查来源：dsflash、dspro、GLM-5.3 三份只读报告；本页只汇总与 v0.4.2 有关的项。</p>
+    <p>本页是拍板页，不是发布说明；确认后才会产生规格、代码与测试改动。</p>
+  </div>
+
+</div>
+</body>
+</html>
