@@ -844,19 +844,16 @@
   // v0.4.3：全天累计口径——切会话会换 store 清掉 paceStats，高频切换用户的
   // A/B 证据活不过一个切换周期；累计口径只在自禁用/__lagfixOff 清零。
   var paceTotal = { allowed: 0, skipped: 0 };
-  // v0.4.3 三审 P2：实验开关「关→开」也要把本轮计数清零（规格 §4.3）。包装器
-  // 可能被复用、paceStats 还是同一个对象，所以要在设置切换点显式重置。
-  // 必须按已加载的设置播种：面板默认值不是启动时的真实值，若上次会话已开启
-  // 降频，播种成 false 会让启动后第一个无关开关被误判成「关→开」而清零计数。
-  var lastPaceOn = !!settings.loadOlderPaceOn;
+  // v0.4.3 三审：实验开关「关→开」也要把本轮计数清零（规格 §4.3）。包装器
+  // 可能被复用、paceStats 还是同一个对象，所以由真正翻转开关的调用方把
+  // paceTurnedOn 传给 applyScrollSettings——不维护「上次状态」镜像，就不可能
+  // 因为启动时镜像播种错误，让无关开关误触发清零。
   // v0.4.3 P0：会话切换归因环。记录用 live 累加（lafDetail/loadOlderDetail 只有
   // 10 条 FIFO，结算时回头扫环会把切换后最早的长帧/补页丢掉），2s 帧切片存
   // 原始毫秒数组到冻结时再算 max/p95。dom/turns 取缓存值：切换瞬间做 O(DOM)
   // 扫描本身就是几十 ms 的长任务，不能为观测在最重的时刻加成本。
   var switchRing = [];        // [{t, at, from, to, _f2[], _lafN2s, _styleMs2s, ...}]
   var switchLastRecAt = 0;    // 150ms 去重（Date.now 域）
-  var switchSuppressTo = "";  // 往返丢弃后，150ms 内吞掉同一 sid 的重复信号
-  var switchSuppressAt = 0;
   var switchVersion = 0;      // 内容指纹：任何变更 +1，未变化样本发 []
   var switchLastKey = "";     // 上次随样本发出的指纹
   var turnsCount = null;      // 挂载 turn 数缓存（scrollSnapshot 每周期刷新）
@@ -1304,7 +1301,6 @@
     clearSwitchRing();
     paceTotal.allowed = 0;
     paceTotal.skipped = 0;
-    lastPaceOn = false;
     try { syncCvAttr(); } catch (e) {}
     inputRing.length = 0;
     scrollEvents = 0;
@@ -2478,16 +2474,21 @@
   // 一条的 after。自然结算发生在采集周期里，允许补一次缺失/过期的缓存。
   // 容差按用户可调采集间隔放大：collectSec 可选 1–120s，写死 10s 会让 30s 后
   // 才送达的样本被误判过期，after 值静默丢失。
-  function settleSwitchRecord(r, now, early) {
+  // atSwitch 与 early 必须分开：已满 30 秒但采集周期没跑到的记录在切换信号里
+  // 结算，settledEarly=0 是对的，但同样不能扫描 DOM、不能取切换瞬间的新会话值。
+  // DOM/turn 缓存由 scrollSnapshot 维护，滚动诊断关闭时不再刷新——此时按未测量
+  // 记 null，不能拿上一次开启时的跨会话旧值冒充。
+  function settleSwitchRecord(r, now, early, atSwitch) {
     r.settled = true;
     r.settledEarly = early ? 1 : 0;
     var collectMs = 5000;
     try { collectMs = clampNum(settings.collectSec, 1, 120, 5) * 1000; } catch (e) {}
     var slack = Math.max(SWITCH_SETTLE_SLACK_MS, collectMs + 5000);
     var fresh = now - r.t <= SWITCH_ACC_WIN_MS + slack;
-    var domNow = domCount;
-    var turnsNow = turnsCount;
-    if (fresh && !early) {
+    var domKnown = !!settings.scrollDiagOn;
+    var domNow = domKnown ? domCount : null;
+    var turnsNow = domKnown ? turnsCount : null;
+    if (fresh && !atSwitch && domKnown) {
       // 只有缓存缺失/过期时才真的扫；domProbeAt 是 performance.now() 域。
       try {
         var perfNow = performance.now();
@@ -2512,7 +2513,7 @@
     for (var i = 0; i < switchRing.length; i++) {
       var r = switchRing[i];
       if (r.settled || now - r.t < SWITCH_ACC_WIN_MS) continue;
-      settleSwitchRecord(r, now, false);
+      settleSwitchRecord(r, now, false, false);
     }
   }
 
@@ -2521,17 +2522,12 @@
     var now = Date.now();
     var last = switchRing[switchRing.length - 1];
     var shortTo = switchSidShort(toSid);
-    // 往返丢弃后，同一次切换的另一个信号（attach/MO）可能紧接着又报同一个 sid；
-    // 150ms 内直接吞掉，避免从更早的记录再派生一条伪切换。
-    if (switchSuppressAt && now - switchSuppressAt < SWITCH_DEDUPE_MS
-      && shortTo === switchSuppressTo) return;
     if (last && !last.settled && now - switchLastRecAt < SWITCH_DEDUPE_MS) {
       // A→B→A 的快速往返：合并成「没切走」比留一条 from===to 的伪切换更诚实。
-      // 只丢这条记录，不碰更早的已完成记录。
+      // 只丢这条记录，不碰更早的已完成记录；push 前必冻结全部未结算记录，
+      // 所以 pop 后栈顶一定是 settled，后续信号不会误改写它。
       if (shortTo === last.from) {
         switchRing.pop();
-        switchSuppressTo = shortTo;
-        switchSuppressAt = now;
         switchVersion++;
         return;
       }
@@ -2550,14 +2546,17 @@
     for (var i = 0; i < switchRing.length; i++) {
       if (switchRing[i].settled) continue;
       var expired = now - switchRing[i].t >= SWITCH_ACC_WIN_MS;
-      settleSwitchRecord(switchRing[i], now, !expired);
+      settleSwitchRecord(switchRing[i], now, !expired, true);
     }
     // domBefore/turnsBefore 取缓存值：切换瞬间做 O(DOM) 扫描本身就是几十毫秒的
-    // 长任务，不能为观测在最重的时刻加成本。after 值在冻结时补（见上）。
+    // 长任务，不能为观测在最重的时刻加成本。缓存由滚动诊断周期刷新，关掉滚动
+    // 诊断时按未测量记 null，不能拿上一次开启时的跨会话旧值冒充。
+    var domBeforeKnown = !!settings.scrollDiagOn;
     switchRing.push({
       t: now, at: performance.now(),
       from: switchSidShort(fromSid), to: switchSidShort(toSid),
-      domBefore: domCount, turnsBefore: turnsCount,
+      domBefore: domBeforeKnown ? domCount : null,
+      turnsBefore: domBeforeKnown ? turnsCount : null,
       _f2: [],
       lafN2s: 0, styleMs2s: 0, lafN30s: 0, styleMs30s: 0,
       loN30s: 0, loMs30s: 0,
@@ -2636,8 +2635,6 @@
   function clearSwitchRing() {
     switchRing.length = 0;
     switchLastRecAt = 0;
-    switchSuppressTo = "";
-    switchSuppressAt = 0;
     switchVersion++;
   }
 
@@ -4101,7 +4098,8 @@
     var c3f = card();
     c3f.appendChild(rowEl("大会话翻页降频 · 实验", "在很长的会话里快速上翻时，放慢自动加载更早消息的频率。",
       switchEl(settings.loadOlderPaceOn, function (v) {
-        settings.loadOlderPaceOn = v; saveSettings(); applyScrollSettings();
+        settings.loadOlderPaceOn = v; saveSettings();
+        applyScrollSettings(v === true);   // 真正关→开才清零本轮计数
         if (v) { try { applyThrottle(); } catch (e) {} }
         rebuildPanel(); renderPanelStatus();
       }),
@@ -5251,12 +5249,12 @@
 
   // v0.3.1：两个观测开关与遮罩开关的唯一应用点。
   // 面板、跨窗口 storage、恢复默认、一键还原都走这里，避免四条路径各写一份清理。
-  function applyScrollSettings() {
+  function applyScrollSettings(paceTurnedOn) {
     // v0.4.3：关→开降频实验时本轮计数归零。包装器若被复用，paceStats 指向同一
     // 个对象；不重置会让 A/B 的「本轮放行/跳过」跨轮累加。全天累计不受影响。
-    var wasPace = lastPaceOn;
-    lastPaceOn = !!settings.loadOlderPaceOn;
-    if (settings.loadOlderPaceOn && !wasPace && paceStats) {
+    // paceTurnedOn 只由真正翻转开关的调用方传入（面板/跨窗口），无关开关和
+    // 启动路径不会误清零。
+    if (paceTurnedOn && settings.loadOlderPaceOn && paceStats) {
       paceStats.allowed = 0;
       paceStats.skipped = 0;
       paceStats.lastAllowedAt = -1e9;
@@ -5364,7 +5362,6 @@
       clearSwitchRing();
       paceTotal.allowed = 0;
       paceTotal.skipped = 0;
-      lastPaceOn = false;
       inputRing.length = 0;
       inputPendingAt = 0;
       scrollEvents = 0;
@@ -5512,11 +5509,13 @@
     mergeStored(o, settings);
     if (settings.badMs <= settings.warnMs) settings.badMs = settings.warnMs + 1;
     if (settings.observe !== wasObserve) setObserving(settings.observe, true);
+    // 只有另一窗口真的把降频从关切到开才清零本轮计数；其余设置变化不碰。
+    var paceTurnedOn = settings.loadOlderPaceOn && !wasPace;
     if (settings.scrollDiagOn !== wasScrollDiag || settings.inputLagOn !== wasInputLag
       || settings.maskOffOnScroll !== wasMask
       || settings.lafDiagOn !== wasLafDiag || settings.loadOlderPaceOn !== wasPace
       || settings.lafCtxOn !== wasLafCtx) {
-      applyScrollSettings();
+      applyScrollSettings(paceTurnedOn);
       // 降频开关打开时立即尝试装包装（scrollDiagOn 可能是关的）。
       if (settings.loadOlderPaceOn) {
         try { applyThrottle(); } catch (e) {}

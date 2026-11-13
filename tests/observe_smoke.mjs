@@ -862,6 +862,21 @@ check("无关开关切换不清零本轮降频计数",
   paceAfterUnrelated && paceAfterUnrelated.allowed === 2
     && paceAfterUnrelated.skipped === 1,
   JSON.stringify(paceAfterUnrelated));
+// 包装复用（滚动诊断保持开、只有 pace 翻转）时，关→开必须清零本轮计数；
+// 这是 applyScrollSettings(paceTurnedOn) 的真实入口，不依赖启动镜像。
+writeSettings({ scrollDiagOn: true });       // 包装继续保留，计数不应变化
+const paceKept = JSON.parse(window.__lagfixCollect()).pace;
+check("只开滚动诊断不清零已累计的降频计数",
+  paceKept && paceKept.allowed === 2 && paceKept.skipped === 1,
+  JSON.stringify(paceKept));
+writeSettings({ loadOlderPaceOn: false });
+check("pace 关但滚动诊断开：包装复用而非卸载", !!store.__lagfixLoadOlder);
+writeSettings({ loadOlderPaceOn: true });
+const paceReuse = JSON.parse(window.__lagfixCollect()).pace;
+check("包装复用下 pace 关→开清零本轮计数、全天累计保留",
+  !!paceReuse && paceReuse.allowed === 0 && paceReuse.skipped === 0
+    && paceReuse.totalAllowed > 0 && paceReuse.totalSkipped > 0,
+  JSON.stringify(paceReuse));
 writeSettings({ scrollDiagOn: true, loadOlderPaceOn: false });
 winRows.length = 1;             // 还原小窗口，不影响后续用例
 
@@ -1031,14 +1046,37 @@ writeSettings({ collectSec: 30 });
 await wait(160);
 anchor.setAttribute("data-session-id", "sess_late_1");
 fireMutation(anchor, "data-session-id");
-window.__lagfixTest.ageSwitchRecords(31000);   // 记录已过 30 秒，但本轮采集还没跑
+// 前移 50 秒：旧实现写死 10 秒容差（30+10s）会判过期、after 全 null；
+// 新实现按 collectSec 放大到 65 秒，仍能补齐。31 秒测不出两者差异。
+window.__lagfixTest.ageSwitchRecords(50000);
 const swLate = switchOf();                      // 采集周期内自然结算
 const lateRec = swLate.items.find((r) => r.to === "sess_lat");
-check("collectSec=30 时 31 秒后的自然结算仍补齐 after 值",
+check("collectSec=30 时 50 秒后的自然结算仍补齐 after 值",
   !!lateRec && lateRec.settled === 1 && lateRec.settledEarly === 0
     && typeof lateRec.domAfter === "number",
   JSON.stringify(lateRec));
-writeSettings({ collectSec: 5 });
+// v0.4.3 三审：已满 30 秒但采集周期没跑到的记录，在下一次切换时结算——结算
+// 发生在切换信号里，同样只许取缓存，不能扫 DOM（滚动诊断关闭时缓存为 null，
+// 旧实现会现场全量扫描并把新会话的 DOM 记成上一条的 after）。
+writeSettings({ scrollDiagOn: false, collectSec: 120 });
+await wait(160);
+anchor.setAttribute("data-session-id", "scanaaa_1");
+fireMutation(anchor, "data-session-id");   // 记录 R
+await wait(160);
+window.__lagfixTest.ageSwitchRecords(40000);   // R 已满 30 秒，采集还没跑
+let scanCalls = 0;
+const origGetAll = documentStub.getElementsByTagName;
+documentStub.getElementsByTagName = function () { scanCalls++; return []; };
+anchor.setAttribute("data-session-id", "scanbbb_2");
+fireMutation(anchor, "data-session-id");   // 切换瞬间结算 R
+documentStub.getElementsByTagName = origGetAll;
+const swScan = switchOf();
+const scanRec = swScan.items.find((r) => r.to === "scanaaa_");
+check("切换瞬间结算已满 30 秒的记录也不扫描 DOM",
+  scanCalls === 0 && !!scanRec && scanRec.settled === 1
+    && scanRec.settledEarly === 0 && scanRec.domAfter === null,
+  `scans=${scanCalls} rec=${JSON.stringify(scanRec)}`);
+writeSettings({ scrollDiagOn: true, collectSec: 5 });
 
 // 还原锚点 sid：后面的多会话用例按 sess_test_123 建桶。必须先还原再重建桶，
 // 否则重建时会把临时的 sess_on_* 也建成桶，多会话用例就多出一个。
