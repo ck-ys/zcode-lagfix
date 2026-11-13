@@ -693,6 +693,9 @@ console.log("-- v0.3.4 O3：翻页降频 --");
 // v0.3.4 终审修复：只对**滚动触发**降频——宿主 SessionPane 对首 turn 缺 header
 // 的自动补拉是 cursor 去重的，跳过就不会重试，绝不能碰。所以每个「预期被降频」
 // 的调用前都要先 dispatchScroll 刷新滚动信号。
+// v0.4.3：首调/挂载窗口（5 秒）内一律放行以保护宿主冷快照修复补拉；测试跑到
+// 这里通常还在挂载窗口内，先等过去，否则整段降频都会被豁免。
+await wait(5200);
 check("O3 前置：loadOlder 已包装", !!store.__lagfixLoadOlder);
 const winRows = store.state.snapshot.rows.window;
 const paceScroll = () => dispatchScroll(timelineEl);
@@ -739,33 +742,44 @@ paceScroll();
 await store.loadOlder();
 check("间隔超过 600ms 后再次放行", (store.loadOlderHits || 0) === bigHitsBefore + 2,
   `hits=${store.loadOlderHits}`);
-// 非滚动触发（宿主首 turn 缺 header 的自动补齐）：即使紧跟在上一次大窗口
-// 补页之后，也绝不跳过——被跳过它不会重试，首 turn header 会一直缺失。
+// v0.4.3：触发口径改为时间窗（距最近时间线滚动 ≤2s，与明细分类同源）。
+// 非滚动触发 = 距上次滚动超过 2s：不受 600ms 间隔约束，永不跳过——
+// 宿主非滚动补拉（首 turn 缺 header 的自动补齐）被跳过后不会重试。
 await wait(650);
 paceScroll();
 await store.loadOlder();        // 放行并刷新 lastAllowedAt
 const nonScrollBefore = store.loadOlderHits || 0;
-await store.loadOlder();        // 没有新的滚动派发 → 不在降频范围 → 放行
-check("非滚动触发的补页永不跳过（首 turn header 不会被吞）",
+await wait(2100);               // 超过 2s 滚动识别窗口 → 非滚动触发
+await store.loadOlder();
+check("距滚动超过 2s 的补页永不跳过（首 turn header 不会被吞）",
   (store.loadOlderHits || 0) === nonScrollBefore + 1,
   `hits=${store.loadOlderHits}`);
-// P1-1（终审）：宿主前插锚定后会在微任务里 dispatchEvent(new Event("scroll"))，
-// 那不是用户滚动。SessionPane 的自动补拉发生在后续 effect 里——即便距那次合成
-// scroll 只有几毫秒、且距上次放行不足 600ms，也不能被判成滚动触发。
-const syntheticBefore = store.loadOlderHits || 0;
+// v0.4.3 首调豁免：新 store（重装包装）的第一次调用即使带着新鲜滚动信号、
+// 距上次放行不足 600ms 也放行。旧的 P1-1「合成 scroll 后 effect 补拉不跳过」
+// 口径已废除：3.18.2 上宿主全部滚动补页都经 rAF 异步触发，旧同步门控永不
+// 命中（见 docs/specs/v0.4.3-session-switch-and-pace.md §1.2），由首调豁免兜底。
+const firstCallHits = store.loadOlderHits || 0;
+writeSettings({ scrollDiagOn: false, loadOlderPaceOn: false });   // 卸载包装
+writeSettings({ scrollDiagOn: true, loadOlderPaceOn: true });     // 重装：callsInWrap 归零
+paceScroll();                     // 新鲜滚动信号
+await store.loadOlder();          // 新包装首调：豁免，必须放行（不刷新 lastAllowedAt）
+check("新包装首调豁免：带滚动信号也放行（SessionPane 修复补拉）",
+  (store.loadOlderHits || 0) === firstCallHits + 1, `hits=${store.loadOlderHits}`);
 paceScroll();
-await wait(0);                  // 合成 scroll 已派发完、微任务标记已清
-await Promise.resolve();
-await store.loadOlder();        // 出栈后的调用：旧实现会跳过，新实现放行
-check("合成 scroll 之后的 effect 补拉不跳过（P1-1）",
-  (store.loadOlderHits || 0) === syntheticBefore + 1,
-  `hits=${store.loadOlderHits}`);
+await store.loadOlder();          // 首调后的滚动触发：距上次放行 >600ms → 放行并计时
+check("首调之后恢复降频计时（本次放行）",
+  (store.loadOlderHits || 0) === firstCallHits + 2, `hits=${store.loadOlderHits}`);
+paceScroll();
+const pFirst2 = store.loadOlder();  // 600ms 内的第二次滚动触发 → 跳过
+await pFirst2;
+check("600ms 内的第二次滚动触发被跳过",
+  (store.loadOlderHits || 0) === firstCallHits + 2, `hits=${store.loadOlderHits}`);
 writeSettings({ loadOlderPaceOn: false });
 paceScroll();
 await store.loadOlder();
 paceScroll();
 await store.loadOlder();
-check("开关关闭后连发全部放行", (store.loadOlderHits || 0) === nonScrollBefore + 4,
+check("开关关闭后连发全部放行", (store.loadOlderHits || 0) === nonScrollBefore + 5,
   `hits=${store.loadOlderHits}`);
 check("关闭后样本 pace 为 null", JSON.parse(window.__lagfixCollect()).pace === null);
 // 观测（scrollDiagOn）与降频独立：只关诊断时包装保留、降频继续
@@ -776,14 +790,17 @@ paceScroll();                   // pace 开时滚动监听仍在（scrollWatchNe
 await store.loadOlder();        // 放行
 paceScroll();
 await store.loadOlder();        // <600ms → 跳过
-check("scrollDiagOn 关但 pace 开：大窗口仍降频", (store.loadOlderHits || 0) === nonScrollBefore + 5,
+check("scrollDiagOn 关但 pace 开：大窗口仍降频", (store.loadOlderHits || 0) === nonScrollBefore + 6,
   `hits=${store.loadOlderHits}`);
 writeSettings({ scrollDiagOn: true, loadOlderPaceOn: false });
 check("恢复后 wrapper 仍可用（观测语义）", !!store.__lagfixLoadOlder);
 // P1-2（终审）：诊断关闭会清环，但降频开着时包装不卸载。关闭前发出的调用
 // 在关闭后 resolve，不能把数据写回已清空的环（否则「关→开」后会被当成新明细）。
+// v0.4.3：先等过 2s 滚动窗口，让这次调用走非滚动路径真正执行（否则会被新
+// 口径判成滚动触发而跳过，P1-2 就没有在途调用了）。
 writeSettings({ loadOlderPaceOn: true });
 check("P1-2 前置：pace 开时包装在", !!store.__lagfixLoadOlder);
+await wait(2100);
 store.loadOlderGrow = 1;
 const inFlight = store.loadOlder();          // 在途
 writeSettings({ scrollDiagOn: false });      // 关闭诊断：清环但不卸载包装
@@ -803,169 +820,147 @@ const paceFresh = JSON.parse(window.__lagfixCollect()).pace;
 check("包装重装后 pace 计数归零",
   paceFresh && paceFresh.allowed === 0 && paceFresh.skipped === 0,
   JSON.stringify(paceFresh));
+check("pace 全天累计跨包装重装保留（v0.4.3 双口径）",
+  paceFresh && paceFresh.totalAllowed > 0 && paceFresh.totalSkipped > 0,
+  JSON.stringify(paceFresh));
 writeSettings({ scrollDiagOn: true, loadOlderPaceOn: false });
 winRows.length = 1;             // 还原小窗口，不影响后续用例
 
-console.log("-- v0.4.0 O8b：自适应补页（默认关） --");
-// 先确认默认关闭，再把观测/O3 都关掉，验证「只开 O8b 也能装包装」。
-check("O8b 前置：默认关闭", collect().settings.loadOlderPageLimitOn === false);
-writeSettings({ scrollDiagOn: false, loadOlderPaceOn: false, loadOlderPageLimitOn: false });
-check("三开关全关后 loadOlder 包装卸载", !store.__lagfixLoadOlder);
-writeSettings({ loadOlderPageLimitOn: true });
-check("只开 O8b 也会安装 loadOlder 包装", !!store.__lagfixLoadOlder);
-check("只开 O8b 时 pace 为 null", collect().pace === null, JSON.stringify(collect().pace));
-
-// 小窗口：不替换页大小，计 small。
-check("O8b 前置：窗口未超过 3000 行", winRows.length <= 3000, `rows=${winRows.length}`);
-const o8bHitsBefore = store.loadOlderHits || 0;
-const o8bPromise = store.loadOlder();
-check("O8b 小窗口不传 limit",
+console.log("-- v0.4.3 O8b：补页批量退役 --");
+// v0.4.3 退役：loadOlderPageLimitOn 不再有行为实现；旧设置键读取时忽略。
+check("新样本 settings 不含已退役键", collect().settings.loadOlderPageLimitOn === undefined);
+check("新样本无 page 字段", collect().page === undefined, JSON.stringify(collect().page));
+// 旧 localStorage 残留 loadOlderPageLimitOn=true：读入忽略、不报错、不装包装。
+writeSettings({ scrollDiagOn: false, loadOlderPaceOn: false, loadOlderPageLimitOn: true });
+check("旧键残留时两有效开关同关仍卸载包装", !store.__lagfixLoadOlder);
+await store.loadOlder();
+check("退役后无参调用回到宿主默认（不传 limit）",
   JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
-check("O8b 返回原 promise（不是新包装的）", o8bPromise === store.lastLoadOlderPromise);
-await o8bPromise;
-check("O8b 只调用原方法一次", (store.loadOlderHits || 0) === o8bHitsBefore + 1,
-  `hits=${store.loadOlderHits}`);
-const o8bPage1 = collect().page;
-check("O8b page 快照：120/3000/600、installed、small=1",
-  o8bPage1 && o8bPage1.limit === 120 && o8bPage1.minRows === 3000
-    && o8bPage1.burstMs === 600 && o8bPage1.installed === true
-    && o8bPage1.small === 1 && o8bPage1.applied === 0
-    && o8bPage1.downgraded === 0 && o8bPage1.passthrough === 0,
-  JSON.stringify(o8bPage1));
-// 显式参数必须原样放行，不能被插件覆盖。
-await store.loadOlder(60);
-check("O8b 显式 limit 原样放行", JSON.stringify(store.loadOlderArgs) === "[60]",
-  JSON.stringify(store.loadOlderArgs));
-const o8bPage2 = collect().page;
-check("O8b 显式参数只计 passthrough，不计 applied",
-  o8bPage2 && o8bPage2.small === 1 && o8bPage2.passthrough === 1,
-  JSON.stringify(o8bPage2));
-
-// 大窗口：从关到开算一轮新实验，首次无参调用取 120 行。
-for (let i = 0; i < 3200; i++) winRows.push({ rowId: "o8b" + i });
-writeSettings({ loadOlderPageLimitOn: false });
-writeSettings({ loadOlderPageLimitOn: true });
-const o8bFreshBig = collect().page;
-check("O8b 从关到开计数与时间戳归零",
-  o8bFreshBig && o8bFreshBig.applied === 0 && o8bFreshBig.downgraded === 0
-    && o8bFreshBig.small === 0 && o8bFreshBig.passthrough === 0,
-  JSON.stringify(o8bFreshBig));
+check("退役后样本仍无 page 字段", collect().page === undefined);
+// 有效开关恢复后包装回来，残留旧键不产生任何行为。
+writeSettings({ scrollDiagOn: true, loadOlderPaceOn: false });
+check("滚动诊断恢复后包装回来", !!store.__lagfixLoadOlder);
 await store.loadOlder();
-check("O8b 大窗口首次取 120 行",
-  JSON.stringify(store.loadOlderArgs) === "[120]", JSON.stringify(store.loadOlderArgs));
-check("O8b applied=1", collect().page && collect().page.applied === 1,
-  JSON.stringify(collect().page));
-// 600ms 内第二次：降回宿主默认 60，不能跳过原方法。
-const o8bBurstHits = store.loadOlderHits || 0;
-await store.loadOlder();
-check("O8b 连续补页降回默认 60 行",
+check("残留旧键不改变页大小语义",
   JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
-check("O8b 连续补页仍调用原方法（不跳过）",
-  (store.loadOlderHits || 0) === o8bBurstHits + 1, `hits=${store.loadOlderHits}`);
-const o8bBurstPage = collect().page;
-check("O8b downgraded=1 且 applied 仍为 1",
-  o8bBurstPage && o8bBurstPage.applied === 1 && o8bBurstPage.downgraded === 1,
-  JSON.stringify(o8bBurstPage));
-
-// this 语义：换接收者时，原方法仍需收到同一个接收者；大窗口照常取 120。
-writeSettings({ loadOlderPageLimitOn: false });
-writeSettings({ loadOlderPageLimitOn: true });
-const otherReceiver = { state: { snapshot: { rows: { window: winRows } } } };
-await store.loadOlder.call(otherReceiver);
-check("O8b 保持 this 语义并大窗口取 120",
-  otherReceiver.loadOlderHits === 1 && JSON.stringify(otherReceiver.loadOlderArgs) === "[120]",
-  `hits=${otherReceiver.loadOlderHits} args=${JSON.stringify(otherReceiver.loadOlderArgs)}`);
-// 同步异常必须原样抛给调用方；页大小已决定替换，计数照实增加。
-writeSettings({ loadOlderPageLimitOn: false });
-writeSettings({ loadOlderPageLimitOn: true });
-store.loadOlderThrow = true;
-let o8bThrew = false;
-try { store.loadOlder(); } catch (e) { o8bThrew = true; }
-store.loadOlderThrow = false;
-check("O8b 同步异常原样抛出", o8bThrew);
-check("O8b 同步抛错仍照实计入 applied",
-  collect().page.applied === 1, `applied=${collect().page.applied}`);
-
-// 关闭 O8b（且观测/O3 都关）→ 包装卸载、下一次无参调用回到宿主默认。
-const cachedO8bWrapper = store.loadOlder;
-writeSettings({ loadOlderPageLimitOn: false, scrollDiagOn: false });
-check("关闭 O8b 后包装卸载", !store.__lagfixLoadOlder);
-await store.loadOlder();
-check("关闭 O8b 后无参调用不再传 limit",
-  JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
-check("关闭 O8b 后 page 为 null", collect().page === null,
-  JSON.stringify(collect().page));
-// 包装因滚动诊断保留时：关闭 O8b 只停止替换，不卸载；重新开启从 0 计数。
-writeSettings({ scrollDiagOn: true, loadOlderPageLimitOn: true });
-// 包装释放后宿主若缓存了旧函数引用，也不能继续替换参数（gen 门控）。
-await cachedO8bWrapper.call(store);
-check("释放后旧 wrapper 引用不再替换参数",
-  JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
-await store.loadOlder();
-check("O8b 重开前置：已生效 1 次",
-  collect().page && collect().page.applied === 1, JSON.stringify(collect().page));
-// 冻结 store 可能让 release 删不掉 marker；代际不一致时必须重装，不能复用旧 wrapper。
-store.__lagfixLoadOlder.gen = -1;
-writeSettings({ loadOlderPageLimitOn: false });
-writeSettings({ loadOlderPageLimitOn: true });
-const o8bStalePage = collect().page;
-check("过期 marker 不复用：installed=true 且计数归零",
-  o8bStalePage && o8bStalePage.installed === true && o8bStalePage.applied === 0,
-  JSON.stringify(o8bStalePage));
-await store.loadOlder();
-check("过期 marker 重装后仍替换为 120",
-  JSON.stringify(store.loadOlderArgs) === "[120]", JSON.stringify(store.loadOlderArgs));
-writeSettings({ loadOlderPageLimitOn: false });
-check("关闭 O8b 但包装保留时 page 为 null", collect().page === null,
-  JSON.stringify(collect().page));
-await store.loadOlder();
-check("关闭 O8b 但包装保留时不再传 limit",
-  JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
-writeSettings({ loadOlderPageLimitOn: true });
-const o8bReopen = collect().page;
-check("O8b 从关到开重新计数",
-  o8bReopen && o8bReopen.applied === 0 && o8bReopen.downgraded === 0
-    && o8bReopen.small === 0 && o8bReopen.passthrough === 0,
-  JSON.stringify(o8bReopen));
-await store.loadOlder();
-check("O8b 重新开启后立刻恢复 120",
-  JSON.stringify(store.loadOlderArgs) === "[120]", JSON.stringify(store.loadOlderArgs));
-// 暂停观测与 O8b 独立：observe=false 时缓解仍生效，计数继续累计。
-writeSettings({ observe: false });
-check("暂停观测时 O8b 包装仍在", !!store.__lagfixLoadOlder);
-writeSettings({ loadOlderPageLimitOn: false });
-writeSettings({ loadOlderPageLimitOn: true });
-await store.loadOlder();
-check("暂停观测时 O8b 仍替换为 120", JSON.stringify(store.loadOlderArgs) === "[120]",
-  JSON.stringify(store.loadOlderArgs));
-check("暂停期间 O8b 计数继续累计",
-  collect().page && collect().page.applied === 1, JSON.stringify(collect().page));
-writeSettings({ observe: true });
-// 包装重装后计数归零（换主 store 同口径）。
-writeSettings({ scrollDiagOn: false, loadOlderPaceOn: false, loadOlderPageLimitOn: false });
-check("重装前置：包装已卸载", !store.__lagfixLoadOlder);
-writeSettings({ scrollDiagOn: true, loadOlderPaceOn: false, loadOlderPageLimitOn: true });
-const o8bFresh = collect().page;
-check("重装后 O8b 计数归零",
-  o8bFresh && o8bFresh.applied === 0 && o8bFresh.downgraded === 0
-    && o8bFresh.small === 0 && o8bFresh.passthrough === 0,
-  JSON.stringify(o8bFresh));
-// 与 O3 叠加：O3 跳过的那次不调用原方法，也不计 O8b 的 applied。
-writeSettings({ loadOlderPaceOn: true });
-const bothHitsBefore = store.loadOlderHits || 0;
-paceScroll();
-await store.loadOlder();
-const bothApplied = collect().page.applied;
-paceScroll();
-await store.loadOlder();
-check("O3 跳过时原方法只执行一次，O8b 只记一次 applied",
-  (store.loadOlderHits || 0) === bothHitsBefore + 1
-    && collect().page.applied === bothApplied
-    && bothApplied >= 1,
-  `hits=${store.loadOlderHits} applied=${collect().page.applied}`);
-writeSettings({ loadOlderPaceOn: false, loadOlderPageLimitOn: false });
 winRows.length = 1;
-writeSettings({ scrollDiagOn: true });
+writeSettings({ loadOlderPageLimitOn: false });   // 写回 false 不报错（清理残留键）
+
+console.log("-- v0.4.3 P0：会话切换归因（只读） --");
+// 这一段必须在多会话用例之前：后面会把 paneB 挂进 DOM 并断言 A 桶 sid 仍是
+// sess_test_123，所以结尾必须把锚点 sid 还原。
+const switchOf = () => collect().switch;
+const switchRingLen = () => window.__lagfixDiag().switchDiag.records;
+check("默认 switchDiagOn=true（读加载时快照）", initialSettings.switchDiagOn === true,
+  `snapshot=${initialSettings.switchDiagOn}`);
+const swInit = switchOf();
+check("样本 switch 结构为 {on:1, items:[...]}",
+  !!swInit && swInit.on === 1 && Array.isArray(swInit.items), JSON.stringify(swInit));
+
+// A1：原地切会话（宿主只改 data-session-id，seq 不变）→ MO 必须记一条。
+// 先把帧基线对齐：否则跨用例的长间隔会当成一帧落进 2s 切片。
+const swBase = switchRingLen();
+driveFrame(performance.now());
+anchor.setAttribute("data-session-id", "sess_alpha_1");
+fireMutation(anchor, "data-session-id");
+const sw1 = switchOf();
+check("切会话后立刻采样带 items（不是 []）",
+  Array.isArray(sw1.items) && sw1.items.length === swBase + 1,
+  `base=${swBase} now=${sw1.items && sw1.items.length}`);
+const rec1 = sw1.items[sw1.items.length - 1];
+check("from/to 只留 sid 前 8 字符，空串原样",
+  rec1.from === "sess_tes" && rec1.to === "sess_alp", JSON.stringify([rec1.from, rec1.to]));
+check("首挂载记录仍在环里（from=\"\"，供首屏归因）",
+  sw1.items.some((r) => r.from === ""), JSON.stringify(sw1.items.map((r) => r.from)));
+check("未满 30 秒不冻结：settled=0，after 值占位 null",
+  rec1.settled === 0 && rec1.afterMax2s === null && rec1.domAfter === null
+    && rec1.turnsAfter === null && rec1.blockedLoadAll === null,
+  JSON.stringify({ settled: rec1.settled, max: rec1.afterMax2s, dom: rec1.domAfter }));
+
+// A2：150ms 内第二次 sid 抖动只算同一次切换，to 取最后值、from 保持首次。
+anchor.setAttribute("data-session-id", "sess_beta_2");
+fireMutation(anchor, "data-session-id");
+const sw2 = switchOf();
+check("150ms 内二次 sid 抖动不新增记录",
+  sw2.items.length === swBase + 1, `n=${sw2.items.length}`);
+const rec2 = sw2.items[sw2.items.length - 1];
+check("去重后 to 取最后值、from 保持首次",
+  rec2.from === "sess_tes" && rec2.to === "sess_bet", JSON.stringify([rec2.from, rec2.to]));
+
+// 2s 帧切片：再驱动两帧（120ms / 180ms）+ 一条 220ms 长帧（forced layout 90ms）。
+const swT = performance.now();
+driveFrame(swT + 120);
+driveFrame(swT + 300);
+fireLoAF([{ duration: 220, scripts: [{ sourceURL: "https://x/a.js", invoker: "f",
+  duration: 200, forcedStyleAndLayoutDuration: 90 }] }]);
+await store.loadOlder();          // 成功补页 → 30s 窗口计一次
+const sw3 = switchOf();
+const rec3 = sw3.items[sw3.items.length - 1];
+check("2s 帧切片产出 afterMax2s/afterP95",
+  rec3.afterMax2s >= 120 && typeof rec3.afterP95 === "number",
+  `max=${rec3.afterMax2s} p95=${rec3.afterP95}`);
+check("2s 内长帧进 lafN2s/styleMs2s",
+  rec3.lafN2s === 1 && rec3.styleMs2s === 90, `n=${rec3.lafN2s} style=${rec3.styleMs2s}`);
+check("30s 窗口同步累加长帧",
+  rec3.lafN30s >= 1 && rec3.styleMs30s >= 90, `n=${rec3.lafN30s} style=${rec3.styleMs30s}`);
+check("30s 窗口记到成功补页次数与耗时",
+  rec3.loadOlderN30s >= 1 && rec3.loadOlderMs30s >= 0,
+  `n=${rec3.loadOlderN30s} ms=${rec3.loadOlderMs30s}`);
+
+// A5 + 环上限：连续切换跨过 5 个会话桶上限与 10 条环上限，from/to 仍是短串。
+for (let i = 0; i < 11; i++) {
+  await wait(160);               // 越过 150ms 去重窗口
+  anchor.setAttribute("data-session-id", "sess_c" + i + "_x");
+  fireMutation(anchor, "data-session-id");
+}
+const swRing = switchOf();
+check("切换环最多 10 条", swRing.items.length === 10, `n=${swRing.items.length}`);
+check("淘汰会话桶后 from/to 仍是短串（不依赖桶存活）",
+  swRing.items.every((r) => typeof r.from === "string" && r.from.length <= 8
+    && typeof r.to === "string" && r.to.length <= 8),
+  JSON.stringify(swRing.items.map((r) => r.from + ">" + r.to)));
+
+// A3：30 秒冻结（用测试钩子前移时间戳，不真等 30 秒）。
+window.__lagfixTest.ageSwitchRecords(31000);
+const swFrozen = switchOf();
+check("过 30 秒后条目冻结并补齐 after 值",
+  swFrozen.items.length === 10 && swFrozen.items.every((r) => r.settled === 1)
+    && swFrozen.items.every((r) => typeof r.domAfter === "number"
+      && typeof r.turnsAfter === "number" && typeof r.blockedLoadAll === "number"),
+  JSON.stringify(swFrozen.items.map((r) => [r.settled, r.domAfter, r.turnsAfter, r.blockedLoadAll])));
+
+// A4：关闭开关 → switch=null、不记录；重开后环仍在、不补录空白期。
+const swBeforeOff = switchRingLen();
+writeSettings({ switchDiagOn: false });
+check("switchDiagOn=false 时样本 switch 为 null", collect().switch === null);
+await wait(160);
+anchor.setAttribute("data-session-id", "sess_off_1");
+fireMutation(anchor, "data-session-id");
+check("关闭期间不记录新切换", switchRingLen() === swBeforeOff,
+  `before=${swBeforeOff} after=${switchRingLen()}`);
+writeSettings({ switchDiagOn: true });
+await wait(160);
+anchor.setAttribute("data-session-id", "sess_on_1");
+fireMutation(anchor, "data-session-id");
+const swRe = switchOf();
+check("重开后继续记录，环里没有空白期的 sid",
+  swRe.items.length === Math.min(swBeforeOff + 1, 10)
+    && !swRe.items.some((r) => r.to === "sess_off"),
+  JSON.stringify(swRe.items.map((r) => r.from + ">" + r.to)));
+
+// 还原锚点 sid：后面的多会话用例按 sess_test_123 建桶。必须先还原再重建桶，
+// 否则重建时会把临时的 sess_on_* 也建成桶，多会话用例就多出一个。
+await wait(160);
+anchor.setAttribute("data-session-id", "sess_test_123");
+fireMutation(anchor, "data-session-id");
+
+// 本段的连续切换会把 5 个会话桶占满；关→开按当前锚点重建，清掉临时桶。
+writeSettings({ sessionDiagOn: false });
+writeSettings({ sessionDiagOn: true });
+
+// 清掉本段投入的长帧明细：后面的 LoAF 用例按空环断言（关→开会清环）。
+writeSettings({ lafDiagOn: false });
+writeSettings({ lafDiagOn: true });
 
 console.log("-- O1b 输入延迟 --");
 const keySurface = makeEl("div");
@@ -1636,7 +1631,7 @@ check("A8：面板不再提供「显示角标」开关", !panelText.includes("�
 check("性能页含「侧栏与回前台」四项",
   ["侧栏与回前台统计", "侧栏开合保护", "面板常开保护", "回前台保护"]
     .every((t) => panelText.includes(t)));
-check("面板版本行是 v0.4.2", panelText.includes("v0.4.2"));
+check("面板版本行是 v0.4.3", panelText.includes("v0.4.3"));
 check("面板不再出现版本号式标题", !panelText.includes("v0.3 性能增强"));
 check("维护页写明日志路径与上限",
   panelText.includes("日志存储路径") && panelText.includes("日志上限"));
@@ -1702,7 +1697,7 @@ check("自动检查把 checkedAt 写入独立 key",
   JSON.stringify(autoKey));
 
 // 模拟主进程注入结果：写入缓存、跨窗口可读，并画出红点。
-window.__lagfixUpdate = { status: "ok", current: "0.4.2", latest: "9.9.9", newer: true,
+window.__lagfixUpdate = { status: "ok", current: "0.4.3", latest: "9.9.9", newer: true,
   url: "https://example.invalid/releases", at: Date.now() };
 window.__lagfixSettings();   // 重建面板 → renderPanelStatus 同步缓存
 panel = documentStub.getElementById("lagfix-settings-panel");
@@ -1718,19 +1713,19 @@ check("维护页显示发现新版本", allText(panel).includes("发现新版本
 check("更新缓存写入独立 key 且含 latest/newer",
   (() => {
     const st = JSON.parse(localStorage.getItem(UPDATE_KEY) || "{}");
-    return st.current === "0.4.2" && st.latest === "9.9.9" && st.newer === true
+    return st.current === "0.4.3" && st.latest === "9.9.9" && st.newer === true
       && typeof st.resultAt === "number";
   })(), localStorage.getItem(UPDATE_KEY));
 
 // 另一个窗口写入缓存：storage 事件应即时更新红点，不需要重建面板。
 const onUpdateStorage = (window._listeners.storage || [])[0];
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.4.2", latest: "10.0.0", newer: true, resultAt: Date.now(),
+  current: "0.4.3", latest: "10.0.0", newer: true, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("跨窗口缓存显示红点", badgeDot.style.display === "inline-block" && panelDot.style.display === "inline-block");
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.4.2", latest: "10.0.0", newer: false, resultAt: Date.now(),
+  current: "0.4.3", latest: "10.0.0", newer: false, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("明确无新版本时红点隐藏", badgeDot.style.display === "none" && panelDot.style.display === "none");
@@ -1739,8 +1734,8 @@ check("无新版本时齿轮提示恢复为打开设置", badgeGear.title === "�
 // 版本不匹配 / 同版本 / newer=false 三种脏数据都不能亮红点。
 const dotCases = [
   ["缓存版本与当前版本不一致", { current: "0.3.6", latest: "9.9.9", newer: true }],
-  ["latest 与当前版本相同", { current: "0.4.2", latest: "0.4.2", newer: true }],
-  ["newer 为 false", { current: "0.4.2", latest: "9.9.9", newer: false }],
+  ["latest 与当前版本相同", { current: "0.4.3", latest: "0.4.3", newer: true }],
+  ["newer 为 false", { current: "0.4.3", latest: "9.9.9", newer: false }],
 ];
 for (const [name, st] of dotCases) {
   localStorage.setItem(UPDATE_KEY, JSON.stringify({ ...st, resultAt: Date.now() }));
@@ -1761,7 +1756,7 @@ localStorage.setItem(UPDATE_KEY, JSON.stringify(manualOnlyKey));
 check("关闭自动检查后不再自动请求", collect().updateCheck === 0);
 // 留一份“有新版本”的缓存给 __lagfixOff 清理用例。
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.4.2", latest: "9.9.9", newer: true, resultAt: Date.now(),
+  current: "0.4.3", latest: "9.9.9", newer: true, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("恢复新版本缓存后红点重新显示",
@@ -1890,7 +1885,7 @@ if (upBtn) {
 }
 
 console.log("-- v0.3.9 更新状态：当前版本高于最新发布 --");
-window.__lagfixUpdate = { status: "ok", current: "0.4.2", latest: "0.3.4", newer: false,
+window.__lagfixUpdate = { status: "ok", current: "0.4.3", latest: "0.3.4", newer: false,
   url: "https://example.invalid/releases", at: Date.now() + 5 };
 window.__lagfixSettings();
 panel = documentStub.getElementById("lagfix-settings-panel");
@@ -2499,7 +2494,8 @@ check("默认 lafCtxOn=true（读脚本加载时的快照）", initialSettings.l
   `snapshot=${initialSettings.lafCtxOn}`);
 check("默认 panelQuietOn=false（实验默认关）", initialSettings.panelQuietOn === false,
   `snapshot=${initialSettings.panelQuietOn}`);
-check("默认 loadOlderPageLimitOn=false（实验默认关）", initialSettings.loadOlderPageLimitOn === false,
+check("v0.4.3 已退役 loadOlderPageLimitOn：加载快照里没有这个键",
+  initialSettings.loadOlderPageLimitOn === undefined,
   `snapshot=${initialSettings.loadOlderPageLimitOn}`);
 check("默认 autoUpdateCheckOn=false（自动检查默认关）", initialSettings.autoUpdateCheckOn === false,
   `snapshot=${initialSettings.autoUpdateCheckOn}`);
@@ -2941,8 +2937,10 @@ check("一键还原同时关掉 v0.3.4 三项",
 check("一键还原同时关掉 v0.3.5 两项",
   saved.lafCtxOn === false && saved.panelQuietOn === false,
   `ctx=${saved.lafCtxOn} quiet=${saved.panelQuietOn}`);
-check("一键还原同时关掉 v0.3.6 O8",
-  saved.loadOlderPageLimitOn === false,
+check("一键还原同时关掉会话切换归因（v0.4.3 P0）",
+  saved.switchDiagOn === false, `switchDiagOn=${saved.switchDiagOn}`);
+check("一键还原不再写已退役的补页批量键",
+  saved.loadOlderPageLimitOn === undefined,
   `pageLimit=${saved.loadOlderPageLimitOn}`);
 check("一键还原同时关掉自动检查更新", saved.autoUpdateCheckOn === false,
   `auto=${saved.autoUpdateCheckOn}`);
@@ -2961,7 +2959,7 @@ check("__lagfixOff 后齿轮提示不再提有新版本",
   documentStub.getElementById("lagfix-gear").title === "打开设置",
   documentStub.getElementById("lagfix-gear").title);
 // 还原前已发出的检查可能在还原后才回来：没有新的用户动作，不得写回缓存/红点/状态文案。
-window.__lagfixUpdate = { status: "ok", current: "0.4.2", latest: "9.9.9", newer: true,
+window.__lagfixUpdate = { status: "ok", current: "0.4.3", latest: "9.9.9", newer: true,
   url: "https://example.invalid/releases", at: Date.now() + 1 };
 window.__lagfixSettings();
 check("__lagfixOff 后到达的在途结果不写缓存/红点",
@@ -2972,9 +2970,10 @@ check("__lagfixOff 后到达的在途结果不写缓存/红点",
 check("__lagfixOff 后到达的在途结果不显示新版本文案",
   !String(documentStub.getElementById("lagfix-settings-panel-updatestatus").textContent)
     .includes("发现新版本"));
-check("__lagfixOff 后 page 为 null",
-  collect().page === null && window.__lagfixDiag().page === null,
-  `page=${JSON.stringify(collect().page)}`);
+check("__lagfixOff 后 switch 为 null、page 字段已不存在",
+  collect().switch === null && collect().page === undefined
+    && window.__lagfixDiag().page === undefined,
+  `switch=${JSON.stringify(collect().switch)} page=${JSON.stringify(collect().page)}`);
 check("__lagfixOff 后 paneOpen=null、panelQuiet=0",
   collect().paneOpen === null && collect().panelQuiet === 0,
   `paneOpen=${collect().paneOpen} panelQuiet=${collect().panelQuiet}`);
@@ -3109,7 +3108,9 @@ console.log("-- v0.3.4 面板与暂停路径 --");
 const panelRootV34 = documentStub.getElementById("lagfix-settings-panel");
 check("面板有「卡顿来源定位」行", !!findRow(panelRootV34, "卡顿来源定位"));
 check("面板有「大会话翻页降频 · 实验」行", !!findRow(panelRootV34, "大会话翻页降频 · 实验"));
-check("面板有「补页批量 · 实验」行", !!findRow(panelRootV34, "补页批量 · 实验"));
+check("v0.4.3 面板已无「补页批量 · 实验」行（退役）",
+  !findRow(panelRootV34, "补页批量 · 实验"));
+check("面板有「切换会话归因」行", !!findRow(panelRootV34, "切换会话归因"));
 check("面板有「长回合渲染减负 · 实验」行", !!findRow(panelRootV34, "长回合渲染减负 · 实验"));
 check("面板有「卡顿来源细分」行", !!findRow(panelRootV34, "卡顿来源细分"));
 check("面板有「第三方定时器归因 · 实验」行",
@@ -3134,6 +3135,18 @@ check("恢复观测且开关已关：属性不回来", docEl.getAttribute("data-
 window.__lagfixOff();
 check("P2-4 前置：__lagfixOff 后卸载监听已移除",
   (window._listeners.pagehide || []).length === 0);
+// A6：__lagfixOff() 必须清空切换环与全天 pace 累计。
+check("__lagfixOff 清空切换环", window.__lagfixDiag().switchDiag.records === 0,
+  `records=${window.__lagfixDiag().switchDiag.records}`);
+check("__lagfixOff 后样本 switch 为 null", collect().switch === null);
+check("__lagfixOff 后样本 pace 为 null（实验开关一并关）", collect().pace === null);
+// 重开实验开关验证全天累计确实清零（否则只是字段被隐藏）
+writeSettings({ loadOlderPaceOn: true });
+const paceOff = collect().pace;
+check("__lagfixOff 清零 pace 全天累计",
+  !!paceOff && paceOff.totalAllowed === 0 && paceOff.totalSkipped === 0,
+  JSON.stringify(paceOff));
+writeSettings({ loadOlderPaceOn: false });
 writeSettings({ observe: false });
 writeSettings({ observe: true });          // 只走 setObserving 路径
 check("只重开观测时 pagehide 监听挂回来（P2-4）",
