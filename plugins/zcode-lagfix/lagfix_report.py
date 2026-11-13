@@ -920,7 +920,7 @@ def print_switch_diag(rows: list[dict]) -> None:
     if newest_settings.get("lafDiagOn") is False:
         deps.append("「卡顿来源定位」已关，长帧列为未测量")
     if newest_settings.get("scrollDiagOn") is False:
-        deps.append("「滚动诊断」已关，补页列为未测量")
+        deps.append("「滚动诊断」已关，补页与 DOM/回合列为未测量")
     if deps:
         print(f"    {INFO} " + "；".join(deps))
     heaviest = None

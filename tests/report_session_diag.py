@@ -387,6 +387,12 @@ def main() -> int:
           "切换会话归因：最近 1 次切换" in out and "2s 最重 530ms" in out
           and "补页 10 次" in out and "sess_tes" in out and "sess_d7d" in out
           and "最重一次" in out, out)
+    # v0.4.3：滚动诊断关闭时，补页与 DOM/回合都取自它的采集缓存，必须一起标未测量。
+    out = run_switch([{"settings": {"switchDiagOn": True, "scrollDiagOn": False,
+                                 "lafDiagOn": True},
+                    "switch": {"on": 1, "items": [sw_item]}}])
+    check("滚动诊断关闭时提示补页与 DOM/回合未测量",
+          "补页与 DOM/回合列为未测量" in out, out)
     # items=[] 表示未变化：向前找最近一次非空（与 loadOlderDetail 同约定）。
     out = run_switch([sw_on, {"settings": {"switchDiagOn": True},
                            "switch": {"on": 1, "items": []}}])

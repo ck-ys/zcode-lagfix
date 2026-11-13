@@ -853,8 +853,8 @@ check("scrollDiagOn=false 冷装后首调不吞、随后仍能降频（P1-1）",
 check("冷装后的降频计数：2 放行 / 1 跳过",
   paceCold && paceCold.allowed === 2 && paceCold.skipped === 1,
   JSON.stringify(paceCold));
-// v0.4.3 三审 P2：无关开关触发 applyScrollSettings 时，不能把正在累计的
-// 「关→开」误判出来清零（lastPaceOn 已按当前设置播种）。
+// v0.4.3 三审 P2：无关开关触发 applyScrollSettings 时不带 paceTurnedOn，
+// 不得把正在累计的本轮计数清零（清零只由真正翻转开关的入口驱动）。
 writeSettings({ inputLagOn: false });
 writeSettings({ inputLagOn: true });
 const paceAfterUnrelated = JSON.parse(window.__lagfixCollect()).pace;
@@ -1076,6 +1076,31 @@ check("切换瞬间结算已满 30 秒的记录也不扫描 DOM",
   scanCalls === 0 && !!scanRec && scanRec.settled === 1
     && scanRec.settledEarly === 0 && scanRec.domAfter === null,
   `scans=${scanCalls} rec=${JSON.stringify(scanRec)}`);
+// 对照组：默认配置（滚动诊断开、DOM 缓存有值）下同样零扫描。上一条用例在
+// scrollDiagOn=false 时被 domKnown 短路，测不到 atSwitch 本身；这里把 DOM 缓存
+// 探针做成过期（performance.now 临时 +6s），旧实现会走补扫、新实现仍只取缓存。
+writeSettings({ scrollDiagOn: true, collectSec: 30 });
+switchOf();                            // 让 scrollSnapshot 刷新 domProbeAt/domCount
+await wait(160);
+anchor.setAttribute("data-session-id", "scanddd_1");
+fireMutation(anchor, "data-session-id");
+await wait(160);
+window.__lagfixTest.ageSwitchRecords(40000);   // 已满 30 秒，采集还没跑
+let scanCalls2 = 0;
+const origGetAll2 = documentStub.getElementsByTagName;
+documentStub.getElementsByTagName = function () { scanCalls2++; return []; };
+const realPerf2 = performance.now;
+performance.now = () => realPerf2() + 6000;     // DOM 探针“过期”
+anchor.setAttribute("data-session-id", "scanddd_2");
+fireMutation(anchor, "data-session-id");        // 切换瞬间结算上一条
+performance.now = realPerf2;
+documentStub.getElementsByTagName = origGetAll2;
+const swScan2 = switchOf();
+const scanRec2 = swScan2.items.find((r) => r.to === "scanddd_");
+check("默认配置下切换瞬间结算已满 30 秒的记录同样零扫描",
+  scanCalls2 === 0 && !!scanRec2 && scanRec2.settled === 1
+    && scanRec2.settledEarly === 0 && typeof scanRec2.domAfter === "number",
+  `scans=${scanCalls2} rec=${JSON.stringify(scanRec2)}`);
 writeSettings({ scrollDiagOn: true, collectSec: 5 });
 
 // 还原锚点 sid：后面的多会话用例按 sess_test_123 建桶。必须先还原再重建桶，
