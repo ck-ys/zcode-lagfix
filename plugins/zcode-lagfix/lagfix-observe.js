@@ -196,6 +196,7 @@
   var SWITCH_DEDUPE_MS = 150;      // 同一次切换多信号（attach/MO）去重
   var SWITCH_FRAME_WIN_MS = 2000;  // 首帧切片窗口
   var SWITCH_ACC_WIN_MS = 30000;   // 补页/长帧累计窗口
+  var SWITCH_SETTLE_SLACK_MS = 10000; // 冻结时 after 值的新鲜度容差（一个采集周期 + 余量）
   var REFOCUS_DELAY_MS = 120;      // 回前台合并补发延迟
   var REFOCUS_GUARD_MS = 700;      // 回前台节流下限窗口
   var REFOCUS_BADGE_SKIP_MS = 300; // 回前台前 300ms 不定位角标
@@ -843,6 +844,9 @@
   // v0.4.3：全天累计口径——切会话会换 store 清掉 paceStats，高频切换用户的
   // A/B 证据活不过一个切换周期；累计口径只在自禁用/__lagfixOff 清零。
   var paceTotal = { allowed: 0, skipped: 0 };
+  // v0.4.3 三审 P2：实验开关「关→开」也要把本轮计数清零（规格 §4.3）。包装器
+  // 可能被复用、paceStats 还是同一个对象，所以要在设置切换点显式重置。
+  var lastPaceOn = false;
   // v0.4.3 P0：会话切换归因环。记录用 live 累加（lafDetail/loadOlderDetail 只有
   // 10 条 FIFO，结算时回头扫环会把切换后最早的长帧/补页丢掉），2s 帧切片存
   // 原始毫秒数组到冻结时再算 max/p95。dom/turns 取缓存值：切换瞬间做 O(DOM)
@@ -1296,6 +1300,7 @@
     clearSwitchRing();
     paceTotal.allowed = 0;
     paceTotal.skipped = 0;
+    lastPaceOn = false;
     try { syncCvAttr(); } catch (e) {}
     inputRing.length = 0;
     scrollEvents = 0;
@@ -1800,8 +1805,13 @@
     // 本次包装后的调用数：换 store 会重建 wrapper，trigger 的 initial 随之重置。
     // 不能用全局 loadOlderCalls——它跨 store 累计，会让新 store 的首次补页误判 unknown。
     var callsInWrap = 0;
+    // v0.4.3 三审 P1-1：包装生命周期内的**所有**调用数（含关诊断/暂停时直通的调用）。
+    // callsInWrap 只在观测路径自增，只开降频、关滚动诊断时永远是 0，会把首调豁免
+    // 永久化、让降频静默失效；首调判定必须用这个独立计数器。
+    var callsSeen = 0;
     // v0.3.4 O3 降频状态随包装实例存亡：换主 store 归零；paceStats 让样本能读到。
-    // lastAllowedAt 只在 >PACE_MIN_ROWS 的放行时刷新：小窗口补页本就不贵，不计时。
+    // lastAllowedAt 只在「滚动触发 + 大窗口」的放行时刷新：非滚动触发可能是宿主
+    // 冷快照修复补拉，不能拿它去压后一次真实滚动补页。
     // 初值给一个极小值：performance.now() 在页面启动后可能小于 600，
     // 用 0 会让开机后第一次大窗口补页被误判成"距上次不足 600ms"。
     var pace = { allowed: 0, skipped: 0, lastAllowedAt: -1e9 };
@@ -1820,6 +1830,9 @@
       // v0.4.2：宿主可能缓存了旧 wrapper。释放/换 store/宿主替换实现后，旧引用
       // 必须彻底直通——不能再执行 O3 跳过、不能再计数或写明细。
       if (gen !== loadOlderGen) return orig.apply(this, arguments);
+      // 首调判定与观测口径解耦：不管诊断开不开，包装的第一次调用都要被认出来。
+      var firstSeen = callsSeen === 0;
+      callsSeen++;
       // v0.3.4 O3 触发降频：与观测开关独立（节流/大会话保护同样不依赖 observe）。
       // 只对**滚动触发**的调用降频：宿主还有非滚动补拉——SessionPane 检测到首 turn
       // 缺 header 时 `void lease.store.loadOlder()`，并用 cursor 去重（跳过就不会
@@ -1832,7 +1845,7 @@
       if (settings.loadOlderPaceOn && !state.dead) {
         var pn = performance.now();
         var attachedAt = state.attachedPerfAt || 0;
-        var initialHit = callsInWrap === 0
+        var initialHit = firstSeen
           || (attachedAt && pn - attachedAt <= LOAD_OLDER_INITIAL_WINDOW_MS);
         var scrollHit = !initialHit && lastScrollAt > 0
           && pn - lastScrollAt <= LOAD_OLDER_SCROLL_WINDOW_MS;
@@ -2454,6 +2467,41 @@
     return sid ? String(sid).slice(0, 8) : "";
   }
 
+  // 冻结一条记录：两种入口——30 秒窗口自然到期，或窗口内又发生了下一次切换
+  // （后者必须截断，否则第二次切换的补页潮/长帧/DOM 会被算到第一条头上）。
+  // 只有距离记录时刻仍在窗口 + 一个采集周期的容差内才填 after 值，避免关闭
+  // 开关很久后重开、拿当前 DOM 冒充 30 秒时的 DOM。
+  function settleSwitchRecord(r, now, early) {
+    r.settled = true;
+    r.settledEarly = early ? 1 : 0;
+    var fresh = now - r.t <= SWITCH_ACC_WIN_MS + SWITCH_SETTLE_SLACK_MS;
+    var domNow = domCount;
+    var turnsNow = turnsCount;
+    if (fresh) {
+      // 结算发生在常规采集周期（不是切换瞬间），补一次计数成本可接受；
+      // 只有缓存缺失/过期时才真的扫，避免每个周期重复 O(DOM)。
+      try {
+        if (typeof domNow !== "number" || !domProbeAt || now - domProbeAt > 5000) {
+          domNow = document.getElementsByTagName("*").length;
+        }
+      } catch (e) {}
+      try { turnsNow = document.querySelectorAll('[data-v4-turn-unit="true"]').length; } catch (e) {}
+    }
+    r.domAfter = fresh ? domNow : null;
+    r.turnsAfter = fresh ? turnsNow : null;
+    r.blockedLoadAll = fresh ? Math.max(0, bigBlocked - r.bigBase) : null;
+    switchVersion++;
+  }
+
+  function settleSwitchRecords() {
+    var now = Date.now();
+    for (var i = 0; i < switchRing.length; i++) {
+      var r = switchRing[i];
+      if (r.settled || now - r.t < SWITCH_ACC_WIN_MS) continue;
+      settleSwitchRecord(r, now, false);
+    }
+  }
+
   function recordSwitch(fromSid, toSid) {
     if (!switchWatchActive()) return;
     var now = Date.now();
@@ -2468,9 +2516,13 @@
       switchVersion++;
       return;
     }
+    // 上一次切换的 30 秒窗口还没走完就又切了：先把它冻结并标记「被截断」，
+    // 否则后续长帧/补页/DOM 会跨会话混进上一条记录。
+    for (var i = 0; i < switchRing.length; i++) {
+      if (!switchRing[i].settled) settleSwitchRecord(switchRing[i], now, true);
+    }
     // domBefore/turnsBefore 取缓存值：切换瞬间做 O(DOM) 扫描本身就是几十毫秒的
-    // 长任务，不能为观测在最重的时刻加成本。domAfter/turnsAfter 冻结时同样取
-    // 缓存（期间由常规采集周期刷新），两侧新鲜度同量级，差值才有意义。
+    // 长任务，不能为观测在最重的时刻加成本。after 值在冻结时补（见上）。
     switchRing.push({
       t: now, at: performance.now(),
       from: switchSidShort(fromSid), to: switchSidShort(toSid),
@@ -2479,7 +2531,7 @@
       lafN2s: 0, styleMs2s: 0, lafN30s: 0, styleMs30s: 0,
       loN30s: 0, loMs30s: 0,
       bigBase: bigBlocked,
-      settled: false,
+      settled: false, settledEarly: 0,
     });
     if (switchRing.length > SWITCH_RING_MAX) switchRing.shift();
     switchLastRecAt = now;
@@ -2489,11 +2541,15 @@
   // 三个 live 累加点：rafTick（帧切片）、recordLafDetail（长帧）、
   // recordLoadOlderDetail（补页）。只碰未冻结且仍在窗口内的记录。
   function accumSwitchFrames(t, ms) {
+    var changed = false;
     for (var i = 0; i < switchRing.length; i++) {
       var r = switchRing[i];
       if (r.settled) continue;
-      if (t >= r.at && t - r.at <= SWITCH_FRAME_WIN_MS) r._f2.push(ms);
+      if (t >= r.at && t - r.at <= SWITCH_FRAME_WIN_MS) { r._f2.push(ms); changed = true; }
     }
+    // v0.4.3 三审 P2：帧切片也要进指纹，否则 2s 窗口内的新帧不会让样本重发，
+    // 报告在冻结前只能看到第一次采样时的半截数据。
+    if (changed) switchVersion++;
   }
 
   function accumSwitchLaf(t, ms, styleMs) {
@@ -2520,20 +2576,6 @@
     }
   }
 
-  // 冻结：过 30 秒的记录补 after 值并停止累加。仍在采集周期内，不加 DOM 扫描。
-  function settleSwitchRecords() {
-    var now = Date.now();
-    for (var i = 0; i < switchRing.length; i++) {
-      var r = switchRing[i];
-      if (r.settled || now - r.t < SWITCH_ACC_WIN_MS) continue;
-      r.settled = true;
-      r.domAfter = domCount;
-      r.turnsAfter = turnsCount;
-      r.blockedLoadAll = Math.max(0, bigBlocked - r.bigBase);
-      switchVersion++;
-    }
-  }
-
   function switchPublic(r) {
     var f2max = null, f2p95 = null;
     if (r._f2.length) { f2max = Math.max.apply(null, r._f2); f2p95 = pctOf(r._f2, 0.95); }
@@ -2547,6 +2589,7 @@
       turnsBefore: r.turnsBefore, turnsAfter: r.settled ? r.turnsAfter : null,
       blockedLoadAll: r.settled ? r.blockedLoadAll : null,
       settled: r.settled ? 1 : 0,
+      settledEarly: r.settledEarly ? 1 : 0,
     };
   }
 
@@ -2606,11 +2649,12 @@
     // 恢复默认 / 重新挂载会再次走 attach：先断开旧 observer，
     // 否则两个 observer 同时计数，提交率直接翻倍。
     try { if (mo) { mo.disconnect(); mo = null; } } catch (e) {}
-    // v0.4.3 P0：真正的切换（pane 或 sid 变了）才记一条；暂停后恢复、重挂同一
-    // 个 pane 不算切换，不污染归因环。首次挂载记 from=null 的一条，供首屏归因。
-    var prevEl = state.el, prevSid = state.sid;
-    if (prevEl !== anchor.el || anchor.sid !== prevSid) {
-      try { recordSwitch(prevEl ? prevSid : null, anchor.sid); } catch (e) {}
+    // v0.4.3 P0：真正的切换（sid 变了）才记一条；首次挂载记 from="" 的一条，供首屏
+    // 归因。同一会话换挂载元素（宿主重挂 pane）不算切换，否则会记出 from===to 的
+    // 伪切换；丢锚点后重挂也不丢 from——state.sid 在丢锚点时保留（三审 P2）。
+    var prevSid = state.sid;
+    if (anchor.sid !== prevSid) {
+      try { recordSwitch(prevSid, anchor.sid); } catch (e) {}
     }
     state.el = anchor.el;
     state.sid = anchor.sid;
@@ -3829,7 +3873,7 @@
         settings.switchDiagOn = v; saveSettings(); rebuildPanel();
       }),
       "会做什么：每次切换会话时记一条——切换后 2 秒内最重的一帧卡了多久，之后 30 秒内补加载了"
-      + "几次更早的历史、每次多久，以及超长会话的一次性全量加载被拦了几次。最多保留最近 10 次切换，"
+      + "几次更早的历史、合计耗时多久，以及超长会话的一次性全量加载被拦了几次。最多保留最近 10 次切换，"
       + "用来回答「切换卡的那一下到底在忙什么」。\n"
       + "不会做什么：不改切换行为，不让切换变快，也不读会话内容；记录里只有耗时、次数和会话编号前几位。\n"
       + "代价：极低，复用已有的统计，不在切换那一瞬间额外扫描页面。"));
@@ -5175,6 +5219,15 @@
   // v0.3.1：两个观测开关与遮罩开关的唯一应用点。
   // 面板、跨窗口 storage、恢复默认、一键还原都走这里，避免四条路径各写一份清理。
   function applyScrollSettings() {
+    // v0.4.3：关→开降频实验时本轮计数归零。包装器若被复用，paceStats 指向同一
+    // 个对象；不重置会让 A/B 的「本轮放行/跳过」跨轮累加。全天累计不受影响。
+    var wasPace = lastPaceOn;
+    lastPaceOn = !!settings.loadOlderPaceOn;
+    if (settings.loadOlderPaceOn && !wasPace && paceStats) {
+      paceStats.allowed = 0;
+      paceStats.skipped = 0;
+      paceStats.lastAllowedAt = -1e9;
+    }
     // v0.3.4：滚动诊断关闭只清观测数据；loadOlder 包装是否卸载还要看降频开关
     // （O3 与观测独立生效）。两者同时关才释放包装，行为回到 v0.3.3。
     if ((!settings.scrollDiagOn && !settings.loadOlderPaceOn)
@@ -5278,6 +5331,7 @@
       clearSwitchRing();
       paceTotal.allowed = 0;
       paceTotal.skipped = 0;
+      lastPaceOn = false;
       inputRing.length = 0;
       inputPendingAt = 0;
       scrollEvents = 0;
@@ -5893,6 +5947,8 @@
     // v0.4.3 冒烟专用：把切换记录整体前移，验证 30 秒冻结路径而不真等 30 秒。
     // 只动观测内存里的时间戳，不触发任何宿主行为。
     ageSwitchRecords: function (ms) {
+      // 只在归因开着且 observer 活着时可用：关掉/自禁用后不允许再改观测内存。
+      if (!switchWatchActive()) return 0;
       var d = Number(ms) || 0;
       if (!(d > 0)) return 0;
       for (var i = 0; i < switchRing.length; i++) {

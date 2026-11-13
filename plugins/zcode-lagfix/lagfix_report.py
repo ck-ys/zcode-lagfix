@@ -698,7 +698,7 @@ def print_laf_diag(rows: list[dict]) -> None:
                      f" / 跳过 {fmt(prow.get('totalSkipped'))} 次")
         print(line)
         if prow.get("skipped") == 0 and prow.get("allowed") == 0:
-            print(f"    （自开关开启后还没有被计数的补页触发；非滚动触发的补页不进这项统计）")
+            print(f"    （包装可能尚未装上，或本周期内没有补页调用）")
         if "totalAllowed" not in prow:
             print(f"    {INFO} 旧样本没有全天累计口径（v0.4.3 前换会话会清零本轮计数）")
     elif p_disabled:
@@ -862,11 +862,17 @@ def print_timer_diag(rows: list[dict]) -> None:
             print(f"    {src}：合计 {total}ms / {n} 次")
 
 
+def _int0(v) -> int:
+    """数值字段的防御式取整：坏形状/字符串/NaN 一律按 0，报告不能整段崩。"""
+    return int(v) if num(v) else 0
+
+
 def print_switch_diag(rows: list[dict]) -> None:
     """v0.4.3 P0：会话切换归因（只读）。
 
-    - 状态只看最新样本的设置；items 为 [] 表示未变化，向前找最近一次非空
-      （与 loadOlderDetail 同约定），遇到「已关闭」样本停止回退。
+    - 关闭态只看最新样本的设置；items 为 [] 表示未变化，向前找最近一次非空
+      （与 loadOlderDetail 同约定）。中途关过又打开时提示「曾关闭」而不是「已关闭」。
+    - 暂停/自禁用要明说，与 laf/timer 段同一口径；历史记录仍展示但标注状态。
     - 每条记录两个窗口：切换后 2 秒的帧切片（首帧卡不卡）与 30 秒的
       补页/长帧累计（补页潮可能晚到 ~20 秒，2 秒窗口会漏）。
     - 旧样本没有 switch 字段时只提示，不报错。
@@ -891,17 +897,32 @@ def print_switch_diag(rows: list[dict]) -> None:
     if newest_settings.get("switchDiagOn") is False:
         print(f"  {INFO} 切换会话归因已关闭")
         return
+    paused = newest_settings.get("observe") is False
+    dead = bool(newest.get("dead"))
+    if paused:
+        print(f"  {INFO} 切换会话归因已暂停（开关仍开，恢复观测后继续记录）")
+    elif dead:
+        print(f"  {INFO} 观测器已自禁用，切换归因停止")
+
     if sw_row is None:
-        if sw_disabled:
-            print(f"  {INFO} 切换会话归因已关闭")
-        elif "switchDiagOn" not in newest_settings:
+        if "switchDiagOn" not in newest_settings:
             print(f"  {INFO} 本版本未记录切换归因（v0.4.3 前的旧样本）")
+        elif sw_disabled:
+            print(f"  {INFO} 本文件内切换归因曾关闭；重开后还没有新的切换记录")
         else:
-            print(f"  {INFO} 本文件内没有切换记录（观测期内没有切换会话）")
+            print(f"  {INFO} 本文件内没有切换记录"
+                  f"（可能在上一个日志文件里，或观测期内没有切换会话）")
         return
 
     items = [d for d in (sw_row.get("items") or []) if isinstance(d, dict)]
     print(f"  切换会话归因：最近 {len(items)} 次切换（最多保留 10 条，双窗口：2 秒帧切片 + 30 秒累计）")
+    deps = []
+    if newest_settings.get("lafDiagOn") is False:
+        deps.append("「卡顿来源定位」已关，长帧列为未测量")
+    if newest_settings.get("scrollDiagOn") is False:
+        deps.append("「滚动诊断」已关，补页列为未测量")
+    if deps:
+        print(f"    {INFO} " + "；".join(deps))
     heaviest = None
     for d in items:
         when = _fmt_ts_full(d.get("t"))
@@ -910,13 +931,13 @@ def print_switch_diag(rows: list[dict]) -> None:
         mx = d.get("afterMax2s")
         p95 = d.get("afterP95")
         seg1 = f"2s 最重 {fmt(mx, 'ms')}（P95 {fmt(p95, 'ms')}）" if num(mx) else "2s 无帧切片"
-        laf2 = int(d.get("lafN2s") or 0)
-        style2 = int(d.get("styleMs2s") or 0)
+        laf2 = _int0(d.get("lafN2s"))
+        style2 = _int0(d.get("styleMs2s"))
         seg2 = f"长帧 {laf2} 次" + (f"/强制布局 {style2}ms" if style2 else "") if laf2 else "长帧 0 次"
-        lo_n = int(d.get("loadOlderN30s") or 0)
-        lo_ms = int(d.get("loadOlderMs30s") or 0)
-        laf30 = int(d.get("lafN30s") or 0)
-        style30 = int(d.get("styleMs30s") or 0)
+        lo_n = _int0(d.get("loadOlderN30s"))
+        lo_ms = _int0(d.get("loadOlderMs30s"))
+        laf30 = _int0(d.get("lafN30s"))
+        style30 = _int0(d.get("styleMs30s"))
         seg3 = f"补页 {lo_n} 次" + (f"/{lo_ms}ms" if lo_ms else "")
         if laf30:
             seg3 += f"，长帧 {laf30} 次" + (f"/强制布局 {style30}ms" if style30 else "")
@@ -930,7 +951,12 @@ def print_switch_diag(rows: list[dict]) -> None:
             seg4 = f"｜DOM {dom_b}→{dom_a}"
             if num(turn_b) and num(turn_a):
                 seg4 += f"（turn {turn_b}→{turn_a}）"
-        note = "" if d.get("settled") else "（30 秒窗口未满）"
+        if d.get("settledEarly"):
+            note = "（窗口被下一次切换截断）"
+        elif d.get("settled"):
+            note = ""
+        else:
+            note = "（30 秒窗口未满）"
         print(f"    {when}  {frm} → {to}  {seg1}｜{seg2}｜30s：{seg3}{seg4}{note}")
         if num(mx) and (heaviest is None or mx > heaviest[0]):
             heaviest = (mx, when, frm, to)
@@ -1149,7 +1175,7 @@ def main() -> int:
     print("  · 真实帧间隔 P95 > 50ms 或 单帧最长 > 200ms  → 用户能感知到卡")
     print("  · 长任务次数 > 0 → 主线程被单次阻塞，与卡顿直接相关")
     print("  · 投影提交率高但帧间隔正常 → 宿主在勤快重渲染，暂未卡死")
-    print("[lagfix] v0.4.2：修正观测口径与包装器生命周期——帧统计按最近 30 秒窗口计算并区分「窗口最长 / 历史最长」；宿主运行期替换订阅或全量补拉实现时不再误覆盖，定时器归因失配时如实标记「计数不可用」；报告对关闭态、明细代际和异常时间戳做了一致性处理。没有新增缓解项，默认开关与 v0.4.1 一致。v0.4.1：角标「有新版本」红点移到设置齿轮右上角，像未读提醒一样贴在按钮角上，不占文字空间、不挡点击；显示条件与检查逻辑不变。v0.4.0：新增「第三方定时器归因 · 实验」（默认关闭）——只记录单次运行超过 50ms 的定时任务：耗时、原定间隔、回调名和调用点（只留文件名与行号），用来判断卡顿是否来自外部插件的定时刷新；不改定时器时机，不读任务参数或对话内容。补页批量改为自适应：已显示超过 3000 行时每页最多 120 行，连续快速上翻（间隔不到 600ms）自动回到 60 行，不跳过、不删除、不改消息顺序。v0.3.10：修复更新红点实际不可见。v0.3.9：设置面板保持滚动位置、打开时接管键盘焦点并在关闭后归还；修复宿主替换 subscribe 时被误覆盖的风险。v0.3.8：日志清理加固——只删白名单内的旧日志，校验真实日期、目录类型、普通文件非链接与 10 分钟最小年龄；宁可超预算也不误删。v0.3.7 起支持小红点与可选自动检查更新（默认关闭、24 小时内最多一次，只请求公开 GitHub Releases）。仍不读消息正文、不写 store；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
+    print("[lagfix] v0.4.3：新增「切换会话归因」（只读、默认开）——每次切换记一条：切换后 2 秒的帧切片、30 秒内的长帧与补页次数，以及切换前后的 DOM/回合对比，用来回答「切换后卡了多久、之后补了多少历史」；不改切换行为。修复「大会话翻页降频」在 ZCode 3.18.2 上永不生效的触发判定（改为距最近一次时间线滚动 2 秒内才计时，首调与挂载 5 秒内一律放行以保护宿主的冷快照补拉），并增加全天累计计数；补页批量（O8b）退役，旧日志里的历史计数仍显示并标注已退役。默认开关与 v0.4.2 一致，仅新增只读的 switchDiagOn。v0.4.2：修正观测口径与包装器生命周期——帧统计按最近 30 秒窗口计算并区分「窗口最长 / 历史最长」；宿主运行期替换订阅或全量补拉实现时不再误覆盖，定时器归因失配时如实标记「计数不可用」；报告对关闭态、明细代际和异常时间戳做了一致性处理。没有新增缓解项，默认开关与 v0.4.1 一致。v0.4.1：角标「有新版本」红点移到设置齿轮右上角，像未读提醒一样贴在按钮角上，不占文字空间、不挡点击；显示条件与检查逻辑不变。v0.4.0：新增「第三方定时器归因 · 实验」（默认关闭）——只记录单次运行超过 50ms 的定时任务：耗时、原定间隔、回调名和调用点（只留文件名与行号），用来判断卡顿是否来自外部插件的定时刷新；不改定时器时机，不读任务参数或对话内容。补页批量改为自适应（v0.4.3 已退役）：已显示超过 3000 行时每页最多 120 行，连续快速上翻（间隔不到 600ms）自动回到 60 行，不跳过、不删除、不改消息顺序。v0.3.10：修复更新红点实际不可见。v0.3.9：设置面板保持滚动位置、打开时接管键盘焦点并在关闭后归还；修复宿主替换 subscribe 时被误覆盖的风险。v0.3.8：日志清理加固——只删白名单内的旧日志，校验真实日期、目录类型、普通文件非链接与 10 分钟最小年龄；宁可超预算也不误删。v0.3.7 起支持小红点与可选自动检查更新（默认关闭、24 小时内最多一次，只请求公开 GitHub Releases）。仍不读消息正文、不写 store；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
     print()
     print_logs()
     return 0

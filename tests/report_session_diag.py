@@ -348,8 +348,9 @@ def main() -> int:
     out = run_laf([{"settings": {"lafDiagOn": True, "loadOlderPaceOn": True},
                     "laf": None,
                     "pace": {"minRows": 3000, "intervalMs": 600, "allowed": 0, "skipped": 0}}])
-    check("pace 0/0 时提示还没触发（并说明非滚动触发不计入）",
-          "还没有被计数的补页触发" in out and "非滚动触发" in out, out)
+    check("pace 0/0 时如实说明包装未装上或本周期无调用",
+          "放行 0 次" in out and "跳过 0 次" in out
+          and "包装可能尚未装上，或本周期内没有补页调用" in out, out)
 
     # v0.4.3：双口径（本轮 + 全天累计）并列显示；旧样本没有累计字段时回退。
     out = run_laf([{"settings": {"lafDiagOn": True, "loadOlderPaceOn": True},
@@ -417,6 +418,39 @@ def main() -> int:
     out = run_switch([{"settings": {"switchDiagOn": True},
                     "switch": {"on": 1, "items": [7, "x", {"t": "bad"}]}}])
     check("switch items 坏形状不炸", "Traceback" not in out, out)
+    # v0.4.3 三审：数值字段被写成字符串/NaN 时按 0 处理，不能吓崩整段。
+    sw_badnum = dict(sw_item, afterMax2s="bad", afterP95=None, lafN2s="x",
+                     styleMs2s=float("nan"), loadOlderN30s="?", loadOlderMs30s=None,
+                     domBefore="no", domAfter=6000)
+    out = run_switch([{"settings": {"switchDiagOn": True},
+                    "switch": {"on": 1, "items": [sw_badnum]}}])
+    check("switch 数值坏形状按 0/未测量处理",
+          "Traceback" not in out and "2s 无帧切片" in out
+          and "长帧 0 次" in out and "补页 0 次" in out
+          and "DOM" not in out, out)
+    # 被下一次切换截断：冻结但窗口不满 30 秒，必须标注，不能当完整结论。
+    sw_early = dict(sw_item, settled=1, settledEarly=1)
+    out = run_switch([{"settings": {"switchDiagOn": True},
+                    "switch": {"on": 1, "items": [sw_early]}}])
+    check("settledEarly=1 时标注窗口被下一次切换截断",
+          "窗口被下一次切换截断" in out and "30 秒窗口未满" not in out, out)
+    # 中途关过又重开、但还没有新切换：既不能说「已关闭」，也不能说「没有记录」。
+    out = run_switch([
+        {"settings": {"switchDiagOn": False}, "switch": None},
+        {"settings": {"switchDiagOn": True}, "switch": {"on": 1, "items": []}},
+    ])
+    check("关闭过又重开时提示「曾关闭；重开后还没有新的切换记录」",
+          "曾关闭" in out and "重开后还没有新的切换记录" in out
+          and "已关闭" not in out and "没有切换记录" not in out, out)
+    # 暂停/自禁用：明说状态，但历史记录仍展示。
+    out = run_switch([sw_on, {"settings": {"switchDiagOn": True, "observe": False},
+                           "switch": None}])
+    check("暂停时提示已暂停并保留历史记录",
+          "切换会话归因已暂停" in out and "sess_d7d" in out, out)
+    out = run_switch([sw_on, {"settings": {"switchDiagOn": True}, "dead": True,
+                           "switch": None}])
+    check("自禁用时提示观测器已自禁用并保留历史记录",
+          "观测器已自禁用" in out and "sess_d7d" in out, out)
 
     print("-- v0.3.4 终审：状态判定看最新样本 / 坏形状不炸 --")
     # P1-3：先关闭过、后来重开但暂停 —— 不能被判成「已关闭」

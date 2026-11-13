@@ -158,6 +158,17 @@ function makeStore() {
       this.loadOlderArgs = Array.from(arguments);
       this.loadOlderHits = (this.loadOlderHits || 0) + 1;
       if (this.loadOlderThrow) throw new Error("sync-boom");
+      // v0.4.3：真实的 loadOlder 有网络/后端耗时（不是同步 resolve），
+      // 需要在断言里验证「耗时确实被记到切换归因」时显式开一个短延迟。
+      if (this.loadOlderDelayMs) {
+        const delay = this.loadOlderDelayMs;
+        this.loadOlderDelayMs = 0;
+        const p = new Promise((resolve) => setTimeout(
+          () => resolve({ status: "hydrated", who: this.marker || "", n: this.loadOlderHits }),
+          delay));
+        this.lastLoadOlderPromise = p;
+        return p;
+      }
       // v0.3.2：模拟宿主 loadOlder 往 rows.window 追加一页，用于验证
       // rowsBefore/rowsAfter 只读长度、不读内容。
       if (this.loadOlderGrow) {
@@ -823,6 +834,25 @@ check("包装重装后 pace 计数归零",
 check("pace 全天累计跨包装重装保留（v0.4.3 双口径）",
   paceFresh && paceFresh.totalAllowed > 0 && paceFresh.totalSkipped > 0,
   JSON.stringify(paceFresh));
+// v0.4.3 三审 P1-1 回归：包装在 scrollDiagOn=false 下冷装时，调用计数也必须
+// 递增（旧实现把 callsInWrap++ 放在滚动诊断分支里，关诊断就永久首调豁免，
+// 降频静默失效）——并且要模拟宿主 rAF 异步派发：滚动与调用之间隔一个宏任务。
+const coldBase = store.loadOlderHits || 0;
+paceScroll();
+await store.loadOlder();        // 冷装首调：豁免（保护 SessionPane 修复补拉）
+paceScroll();
+await store.loadOlder();        // 首调后的滚动触发：放行并开始计时
+paceScroll();
+await wait(0);                  // 宿主异步派生 scroll → 下一任务才调 loadOlder
+const pColdSkip = store.loadOlder();   // 600ms 内的第二次滚动触发 → 跳过
+await pColdSkip;
+const paceCold = JSON.parse(window.__lagfixCollect()).pace;
+check("scrollDiagOn=false 冷装后首调不吞、随后仍能降频（P1-1）",
+  (store.loadOlderHits || 0) === coldBase + 2,
+  `hits=${store.loadOlderHits}`);
+check("冷装后的降频计数：2 放行 / 1 跳过",
+  paceCold && paceCold.allowed === 2 && paceCold.skipped === 1,
+  JSON.stringify(paceCold));
 writeSettings({ scrollDiagOn: true, loadOlderPaceOn: false });
 winRows.length = 1;             // 还原小窗口，不影响后续用例
 
@@ -893,7 +923,9 @@ driveFrame(swT + 120);
 driveFrame(swT + 300);
 fireLoAF([{ duration: 220, scripts: [{ sourceURL: "https://x/a.js", invoker: "f",
   duration: 200, forcedStyleAndLayoutDuration: 90 }] }]);
-await store.loadOlder();          // 成功补页 → 30s 窗口计一次
+// v0.4.3 三审：真实补页有耗时，不能只用「>= 0」这种永真断言。
+store.loadOlderDelayMs = 40;
+await store.loadOlder();          // 成功补页（≈40ms）→ 30s 窗口计一次
 const sw3 = switchOf();
 const rec3 = sw3.items[sw3.items.length - 1];
 check("2s 帧切片产出 afterMax2s/afterP95",
@@ -903,9 +935,18 @@ check("2s 内长帧进 lafN2s/styleMs2s",
   rec3.lafN2s === 1 && rec3.styleMs2s === 90, `n=${rec3.lafN2s} style=${rec3.styleMs2s}`);
 check("30s 窗口同步累加长帧",
   rec3.lafN30s >= 1 && rec3.styleMs30s >= 90, `n=${rec3.lafN30s} style=${rec3.styleMs30s}`);
-check("30s 窗口记到成功补页次数与耗时",
-  rec3.loadOlderN30s >= 1 && rec3.loadOlderMs30s >= 0,
+check("30s 窗口记到成功补页次数与真实耗时",
+  rec3.loadOlderN30s >= 1 && rec3.loadOlderMs30s >= 20,
   `n=${rec3.loadOlderN30s} ms=${rec3.loadOlderMs30s}`);
+
+// 指纹只靠帧切片也要重发：切到 rec3 后没有新长帧/补页，只驱动一帧。
+switchOf();                        // 消费当前指纹（上一断言已取过一次）
+driveFrame(swT + 480);             // 距上一帧 180ms，仍在 rec3 的 2s 切片窗口内
+const swFrameOnly = switchOf();
+check("只有帧切片变化时样本也会重发（帧已进指纹）",
+  Array.isArray(swFrameOnly.items) && swFrameOnly.items.length > 0
+    && swFrameOnly.items[swFrameOnly.items.length - 1].afterMax2s >= 180,
+  JSON.stringify(swFrameOnly.items && swFrameOnly.items.slice(-1)));
 
 // A5 + 环上限：连续切换跨过 5 个会话桶上限与 10 条环上限，from/to 仍是短串。
 for (let i = 0; i < 11; i++) {
@@ -919,15 +960,27 @@ check("淘汰会话桶后 from/to 仍是短串（不依赖桶存活）",
   swRing.items.every((r) => typeof r.from === "string" && r.from.length <= 8
     && typeof r.to === "string" && r.to.length <= 8),
   JSON.stringify(swRing.items.map((r) => r.from + ">" + r.to)));
+// v0.4.3 三审：新切换到来时必须截断上一条的 30 秒窗口，否则第二次切换的
+// 补页潮/长帧会被算到第一条头上；被截断的要标 settledEarly。
+check("下一次切换会冻结并截断上一条（settledEarly=1）",
+  swRing.items.slice(0, -1).every((r) => r.settled === 1 && r.settledEarly === 1),
+  JSON.stringify(swRing.items.map((r) => [r.settled, r.settledEarly])));
+check("最新一条仍在自己的 30 秒窗口内（settled=0）",
+  swRing.items[swRing.items.length - 1].settled === 0
+    && swRing.items[swRing.items.length - 1].settledEarly === 0,
+  JSON.stringify(swRing.items[swRing.items.length - 1]));
 
 // A3：30 秒冻结（用测试钩子前移时间戳，不真等 30 秒）。
 window.__lagfixTest.ageSwitchRecords(31000);
 const swFrozen = switchOf();
+// 前 9 条在循环里已被下一次切换截断（early=1），最后一条在这里自然到期（early=0）。
 check("过 30 秒后条目冻结并补齐 after 值",
   swFrozen.items.length === 10 && swFrozen.items.every((r) => r.settled === 1)
+    && swFrozen.items.slice(0, -1).every((r) => r.settledEarly === 1)
+    && swFrozen.items[swFrozen.items.length - 1].settledEarly === 0
     && swFrozen.items.every((r) => typeof r.domAfter === "number"
       && typeof r.turnsAfter === "number" && typeof r.blockedLoadAll === "number"),
-  JSON.stringify(swFrozen.items.map((r) => [r.settled, r.domAfter, r.turnsAfter, r.blockedLoadAll])));
+  JSON.stringify(swFrozen.items.map((r) => [r.settled, r.settledEarly, r.domAfter, r.turnsAfter, r.blockedLoadAll])));
 
 // A4：关闭开关 → switch=null、不记录；重开后环仍在、不补录空白期。
 const swBeforeOff = switchRingLen();
