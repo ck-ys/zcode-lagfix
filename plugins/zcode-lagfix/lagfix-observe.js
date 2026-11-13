@@ -1,5 +1,17 @@
 /**
- * zcode-lagfix renderer 观测脚本 v0.4.2
+ * zcode-lagfix renderer 观测脚本 v0.4.3
+ *
+ * v0.4.3（会话切换归因 + 修复失灵的翻页降频）：
+ *   - P0 switchDiagOn（默认开，只读）：复用 sid 变化信号记录最近 10 次切换，
+ *     双窗口（切换后 2s 帧切片 + 30s 补页/长帧累计）；live 累加不回头扫环；
+ *     dom/turns 用缓存值，不在切换瞬间做 O(DOM) 扫描；未变化样本发 []。
+ *   - O3 触发口径修复：跳过门控从同步派发（paceInScrollDispatch，在 3.18.2
+ *     上永不命中）改为与 classifyLoadOlderTrigger 一致的时间窗（距最近时间线
+ *     滚动 ≤2s）；首调/挂载窗口内豁免，保护 SessionPane 冷快照修复补拉。
+ *     pace 计数新增全天累计口径（totalAllowed/totalSkipped，只在自禁用/
+ *     __lagfixOff 清零）。
+ *   - O8b 补页批量退役：移除 loadOlderPageLimitOn 行为实现与面板行，旧设置
+ *     键忽略；包装器安装条件收敛为 scrollDiagOn || loadOlderPaceOn。
  *
  * v0.4.2（观测口径与包装器生命周期加固，不新增缓解项）：
  *   - 帧环扩到 30 秒（3600 帧）；窗口最大值与 attach/切会话以来的历史最大值
@@ -46,12 +58,8 @@
  *     版本不一致、latest 与当前相同或 newer=false 时都不显示。
  *   - 手动检查保持原样；__lagfixOff 关闭自动检查并清缓存/红点。
  *
- * v0.3.6（补页批量，默认关的实验；v0.4.0 起改为自适应 120/60）：
- *   - O8 loadOlderPageLimitOn：无参 loadOlder() 的默认页大小在窗口 >3000 行时
- *     提到 120，连续补页（<600ms）回到 60；只改 limit 参数，不跳过调用、
- *     不改返回值/this/异常/在途状态。
- *     与观测、O3 降频独立；关闭/自禁用/__lagfixOff 立即恢复，暂停观测不关闭替换。
- *   - 报告新增 page 计数（生效/降回/小窗口/显式参数）；O3 保持原样。
+ * v0.3.6（补页批量，默认关的实验；v0.4.0 起改为自适应 120/60；
+ *         v0.4.3 退役——两天实机 applied=0，连续上翻全被 600ms 降级窗口兜回 60 行）：
  *
  * v0.3.5（长帧上下文归因 + 面板期进一步合并）：
  *   - P0 lafCtxOn（默认开，只读）：每条 ≥100ms 长帧记录距上次通知/补发/滚动/
@@ -180,19 +188,21 @@
   var PANEL_QUIET_BADGE_MS = 3000; // 面板期角标定位上限频率
   // v0.3.5 P0：长帧能被归因到某个信号的最大滞后。
   var LAF_CTX_WINDOW_MS = 1000;
-  // v0.3.6 O8 / v0.4.0 O8b：协议允许的单页上限；宿主 loadAllOlder 也按这个值分页。
-  // O8b 不再固定 200：孤立补页 120，连续补页（<600ms）降回宿主默认 60，
-  // 且只在窗口 >3000 行时生效；不跳过任何调用。
-  var LOAD_OLDER_PAGE_LIMIT = 120;
-  var LOAD_OLDER_PAGE_MIN_ROWS = 3000;
-  var LOAD_OLDER_PAGE_BURST_MS = 600;
+  // v0.3.6 O8 / v0.4.0 O8b 已在 v0.4.3 退役：LOAD_OLDER_PAGE_* 常量随行为实现
+  // 一并移除，旧设置键 loadOlderPageLimitOn 读取时忽略。
+  // v0.4.3 P0：会话切换归因（只读）。切换后 2 秒看首帧卡不卡，30 秒覆盖
+  // 切换后 ~20s 才出现的补页潮（实机数据：08:41 切换，08:41:05 补页潮）。
+  var SWITCH_RING_MAX = 10;        // 最近 10 次切换
+  var SWITCH_DEDUPE_MS = 150;      // 同一次切换多信号（attach/MO）去重
+  var SWITCH_FRAME_WIN_MS = 2000;  // 首帧切片窗口
+  var SWITCH_ACC_WIN_MS = 30000;   // 补页/长帧累计窗口
   var REFOCUS_DELAY_MS = 120;      // 回前台合并补发延迟
   var REFOCUS_GUARD_MS = 700;      // 回前台节流下限窗口
   var REFOCUS_BADGE_SKIP_MS = 300; // 回前台前 300ms 不定位角标
   var REFOCUS_WINDOW_MS = 800;     // 回前台帧窗口
   var PANE_SWITCH_DEDUPE_MS = 150; // aria-hidden 与 class 双信号去重
   var REFOCUS_DEDUPE_MS = 500;     // visibilitychange 与 focus 双信号去重
-  var VERSION = "0.4.2";
+  var VERSION = "0.4.3";
   var ERR_LIMIT = 50;
   var OVERLAY_ID = "lagfix-overlay-badge";
   // v0.3.7：更新检查结果的跨窗口缓存 + 自动检查间隔。
@@ -238,10 +248,11 @@
     // v0.3.5 P0 归因补强 + O5 面板期进一步合并（默认关，A/B 达标前不进默认路径）
     lafCtxOn: true,            // 长帧上下文归因（只读）
     panelQuietOn: false,       // O5 面板期进一步合并（实验）
-    // v0.3.6 O8 补页批量（默认关，A/B 达标前不进默认路径）
-    loadOlderPageLimitOn: false,
+    // v0.3.6 O8 补页批量已在 v0.4.3 退役：loadOlderPageLimitOn 键不再读取。
     // v0.4.0 T1 第三方定时器归因（默认关，只读；开启后记录 ≥50ms 的定时器回调）
     timerDiagOn: false,
+    // v0.4.3 P0 会话切换归因（只读）
+    switchDiagOn: true,
     // v0.3.7 自动检查更新（默认关；开启后 24h 内最多一次，只查 GitHub Releases）
     autoUpdateCheckOn: false,
     logMaxMB: 50,       // 观测日志总预算（MB），超过自动删最旧
@@ -286,9 +297,10 @@
     // v0.3.5：两项独立开关，只接受布尔值。
     if (typeof o.lafCtxOn === "boolean") s.lafCtxOn = o.lafCtxOn;
     if (typeof o.panelQuietOn === "boolean") s.panelQuietOn = o.panelQuietOn;
-    if (typeof o.loadOlderPageLimitOn === "boolean") s.loadOlderPageLimitOn = o.loadOlderPageLimitOn;
-    // v0.4.0 T1：第三方定时器归因（只读，默认关）。
+    // v0.4.3：loadOlderPageLimitOn 已退役，旧值直接忽略（不报错、不迁移）。
     if (typeof o.timerDiagOn === "boolean") s.timerDiagOn = o.timerDiagOn;
+    // v0.4.3 P0：会话切换归因（只读）。
+    if (typeof o.switchDiagOn === "boolean") s.switchDiagOn = o.switchDiagOn;
     if (typeof o.autoUpdateCheckOn === "boolean") s.autoUpdateCheckOn = o.autoUpdateCheckOn;
     if (o.logMaxMB != null) s.logMaxMB = clampNum(o.logMaxMB, 5, 1000, DEFAULTS.logMaxMB);
     if (o.warnMs != null) s.warnMs = clampNum(o.warnMs, 1, 5000, DEFAULTS.warnMs);
@@ -819,16 +831,27 @@
   // 降频参数是拍板值（docs/specs/v0.3.4-loadolder-dom.md §1.2）：改值必须重新 A/B。
   var PACE_MIN_ROWS = 3000;   // 窗口行数不超过它时完全不计时
   var PACE_INTERVAL_MS = 600; // 大窗口下两次放行的最小间隔
-  // 只有「正在派发时间线 scroll 事件」的同步调用才允许降频。不能用「最近 N ms
-  // 有滚动」的时间窗：宿主前插锚定后会 scheduleMicrotask 里 dispatchEvent(new
-  // Event("scroll")) 补发通知（ConversationTimeline notifyScrollObserversAfterCommit），
-  // 那个合成 scroll 会把时间窗刷新，导致随后的 SessionPane 首 turn header 自动补拉
-  // 被误判成滚动触发——它用 cursor 去重，跳过就永不重试。
-  // 标志在 document capture 阶段置位、微任务里清掉：React 的 onScroll 处理与其
-  // 同步调用的 loadOlder 都在这段窗口内，而 effect 里的自动补拉已经出栈。
-  var paceInScrollDispatch = false;
+  // v0.4.3：触发口径与 classifyLoadOlderTrigger 统一为时间窗（距最近一次时间线
+  // 滚动 ≤2s）。旧的同步门控 paceInScrollDispatch 在 ZCode 3.18.2 上永不命中：
+  // 宿主把阈值检查放进 React onScroll 回调（Xt→PDn→onLoadOlder），我们的 capture
+  // 滚动监听器与它之间隔着 microtask checkpoint（监听器间栈清空即跑微任务），
+  // 标志已被清掉；宿主还会在测量/补页后经 rAF 异步重派生合成 scroll（Wt）再走
+  // 同一回调。实机佐证：同一样本 O8b downgraded>0（时间口径）而 pace 0/0。
+  // SessionPane 冷快照首 turn 缺 header 的修复补拉用 cursor 去重，跳过就永不
+  // 重试——它总是新 store 的第一次调用（或挂载窗口内），用首调豁免保护。
   var paceStats = null;       // 当前 loadOlder 包装闭包里的计数（换 store 归零）
-  var pageStats = null;       // v0.3.6 O8：页大小替换计数（随包装器存亡）
+  // v0.4.3：全天累计口径——切会话会换 store 清掉 paceStats，高频切换用户的
+  // A/B 证据活不过一个切换周期；累计口径只在自禁用/__lagfixOff 清零。
+  var paceTotal = { allowed: 0, skipped: 0 };
+  // v0.4.3 P0：会话切换归因环。记录用 live 累加（lafDetail/loadOlderDetail 只有
+  // 10 条 FIFO，结算时回头扫环会把切换后最早的长帧/补页丢掉），2s 帧切片存
+  // 原始毫秒数组到冻结时再算 max/p95。dom/turns 取缓存值：切换瞬间做 O(DOM)
+  // 扫描本身就是几十 ms 的长任务，不能为观测在最重的时刻加成本。
+  var switchRing = [];        // [{t, at, from, to, _f2[], _lafN2s, _styleMs2s, ...}]
+  var switchLastRecAt = 0;    // 150ms 去重（Date.now 域）
+  var switchVersion = 0;      // 内容指纹：任何变更 +1，未变化样本发 []
+  var switchLastKey = "";     // 上次随样本发出的指纹
+  var turnsCount = null;      // 挂载 turn 数缓存（scrollSnapshot 每周期刷新）
   var CV_ATTR = "data-lagfix-cv";
 
   // v0.3.4 O4：data-lagfix-cv 是 documentElement 上的唯一新增痕迹；所有效果
@@ -1269,7 +1292,10 @@
     clearLoadOlderDetail();
     // v0.3.4：归因环与 CV 属性同样不留痕（state.dead 已置位，syncCvAttr 会移除属性）。
     clearLafDetail();
-    paceInScrollDispatch = false;
+    // v0.4.3：切换归因环与降频全天累计同样清零（自禁用是终态之一）。
+    clearSwitchRing();
+    paceTotal.allowed = 0;
+    paceTotal.skipped = 0;
     try { syncCvAttr(); } catch (e) {}
     inputRing.length = 0;
     scrollEvents = 0;
@@ -1385,6 +1411,9 @@
             frameRing.push({ t: t, ms: Math.round(d) });
             if (frameRing.length > RING_MAX) frameRing.shift();
             if (d > frameMaxAll) frameMaxAll = Math.round(d);
+            // v0.4.3 P0：切换后 2 秒内的帧切片 live 累加（≤10 条记录，120Hz 下
+            // 每帧最多 10 次数组 push，可忽略）。
+            if (settings.switchDiagOn) accumSwitchFrames(t, Math.round(d));
             // v0.3.1：只把「滚动后 200ms 内」的帧计入 scrollRing。
             // 全部帧都算会被空闲帧稀释，看不出滚动到底有多卡。
             if (settings.scrollDiagOn && lastScrollAt && t - lastScrollAt <= SCROLL_HOLD_MS) {
@@ -1525,6 +1554,8 @@
     }
     lafDetail.push(rec);
     if (lafDetail.length > LAF_DETAIL_MAX) lafDetail.shift();
+    // v0.4.3 P0：切换窗口的长帧/强制布局 live 累加（依赖 lafDiagOn，默认开）。
+    if (settings.switchDiagOn && settings.observe) accumSwitchLaf(rec.t, rec.ms, rec.styleMs);
   }
   try {
     if (typeof PerformanceObserver === "function") {
@@ -1622,15 +1653,10 @@
         if (countDiag && !isOwnUiScroll(el) && isSessionScrollTarget(el)) anyScrollEvents++;
         return;
       }
-      // v0.3.4：降频判定用的「在 scroll 派发栈内」标记——只开降频、关诊断时也要记。
-      if (settings.loadOlderPaceOn) {
-        paceInScrollDispatch = true;
-        // 微任务在整次 dispatch（含宿主同步的 handleScroll → loadOlder）之后执行，
-        // 到宿主 effect 里的自动补拉时已出栈，不会被判成滚动触发。
-        Promise.resolve().then(function () { paceInScrollDispatch = false; });
-      }
+      // v0.4.3：滚动时间戳在诊断开着或 O3 降频开着时都要刷新——降频门控已改为
+      // 时间口径（距最近时间线滚动 ≤2s），只开降频、关诊断时也要有信号。
+      if (countDiag || settings.loadOlderPaceOn) lastScrollAt = performance.now();
       if (countDiag) {
-        lastScrollAt = performance.now();
         scrollEvents++;
         anyScrollEvents++;
       }
@@ -1768,21 +1794,6 @@
     try { return wrapped.__lagfixPace || null; } catch (e) { return null; }
   }
 
-  // v0.3.6 O8：包装函数 → 页大小替换计数对象。
-  function pageOf(wrapped) {
-    try { return wrapped.__lagfixPage || null; } catch (e) { return null; }
-  }
-
-  // v0.4.0 O8b：从关到开 / 换包装时清零，连 lastAt 一起重置；暂停观测不调用。
-  function resetPageStats(p) {
-    if (!p) return;
-    p.applied = 0;
-    p.downgraded = 0;
-    p.small = 0;
-    p.passthrough = 0;
-    p.lastAt = -1e9;
-  }
-
   function makeProbedLoadOlder(orig) {
     var gen = loadOlderGen;
     var diagGen = loadOlderDiagGen;   // v0.3.4：关闭滚动诊断后，在途回调不得写回
@@ -1794,35 +1805,9 @@
     // 初值给一个极小值：performance.now() 在页面启动后可能小于 600，
     // 用 0 会让开机后第一次大窗口补页被误判成"距上次不足 600ms"。
     var pace = { allowed: 0, skipped: 0, lastAllowedAt: -1e9 };
-    // v0.3.6 O8 / v0.4.0 O8b：只统计真正替换过页大小的调用；显式传参的调用单独计数。
-    // lastAt 记录上一次无参调用的时间：连续补页（<600ms）降回宿主默认 60，
-    // 避免 200/120 行大页在一次快速上翻里连续前插；每次无参调用都刷新时间戳。
-    var page = { applied: 0, downgraded: 0, small: 0, passthrough: 0, lastAt: -1e9 };
-    // 所有原方法调用统一走这里：只有「开关开 + 未自禁用 + 无参」才替换 limit。
-    // 观测关闭时也必须生效（缓解项与 observe 独立），所以放在最早的放行分支之前。
-    // gen 校验：包装被释放后，宿主若缓存了旧函数引用，也不能继续替换参数。
+    // v0.4.3：O8b 补页批量已退役，所有调用原样直通；callOrig 保留是为了让
+    // 后面的调用点统一走一个出口（gen 语义与异常路径保持一致）。
     function callOrig(self, args) {
-      if (gen === loadOlderGen && settings.loadOlderPageLimitOn && !state.dead) {
-        if (!args || args.length === 0) {
-          var now = performance.now();
-          var prevAt = page.lastAt;
-          page.lastAt = now;
-          var rowsNow = readLoadedRows(self);
-          if (rowsNow !== null && rowsNow > LOAD_OLDER_PAGE_MIN_ROWS) {
-            if (now - prevAt < LOAD_OLDER_PAGE_BURST_MS) {
-              // 连续补页：不跳过，只把页大小降回宿主默认 60，避免大页连续前插。
-              page.downgraded++;
-              return orig.call(self);
-            }
-            page.applied++;
-            return orig.call(self, LOAD_OLDER_PAGE_LIMIT);
-          }
-          // 小窗口或行数不可读：不承担大页风险，按宿主默认 60 放行。
-          page.small++;
-          return orig.call(self);
-        }
-        page.passthrough++;
-      }
       return orig.apply(self, args);
     }
     // 不在这里写 paceStats：安装可能失败（冻结/不可扩展 store），那时样本会
@@ -1838,14 +1823,29 @@
       // v0.3.4 O3 触发降频：与观测开关独立（节流/大会话保护同样不依赖 observe）。
       // 只对**滚动触发**的调用降频：宿主还有非滚动补拉——SessionPane 检测到首 turn
       // 缺 header 时 `void lease.store.loadOlder()`，并用 cursor 去重（跳过就不会
-      // 重试），跳掉它会让首 turn header 一直缺失。滚动的触发来自 handleScroll，
-      // 同步发生在 scroll 事件里，用 200ms 窗口足以识别。
-      if (settings.loadOlderPaceOn && !state.dead && paceInScrollDispatch) {
-        var rowsNow = readLoadedRows(this);
-        if (rowsNow !== null && rowsNow > PACE_MIN_ROWS) {
-          var tNow = performance.now();
+      // 重试），跳掉它会让首 turn header 一直缺失。
+      // v0.4.3：触发判定改为与 classifyLoadOlderTrigger 一致的时间口径——
+      // 距最近一次时间线滚动 ≤2s（performance.now 域）。旧的同步门控
+      // paceInScrollDispatch 在 3.18.2 上永不命中（见 paceTotal 声明处的注释）。
+      // 首调/挂载窗口内的调用一律放行：SessionPane 修复补拉总是新 store 的
+      // 第一次调用，靠这一条豁免保护（见 docs/specs/v0.4.3-session-switch-and-pace.md §4.2）。
+      if (settings.loadOlderPaceOn && !state.dead) {
+        var pn = performance.now();
+        var attachedAt = state.attachedPerfAt || 0;
+        var initialHit = callsInWrap === 0
+          || (attachedAt && pn - attachedAt <= LOAD_OLDER_INITIAL_WINDOW_MS);
+        var scrollHit = !initialHit && lastScrollAt > 0
+          && pn - lastScrollAt <= LOAD_OLDER_SCROLL_WINDOW_MS;
+        var bigEnough = false;
+        if (scrollHit) {
+          var rowsNow = readLoadedRows(this);
+          bigEnough = rowsNow !== null && rowsNow > PACE_MIN_ROWS;
+        }
+        if (scrollHit && bigEnough) {
+          var tNow = pn;
           if (tNow - pace.lastAllowedAt < PACE_INTERVAL_MS) {
             pace.skipped++;
+            paceTotal.skipped++;
             // 跳过的调用不碰原方法、不进任何观测环/明细、不计数——没发生的调用
             // 不能被记成成功或失败；返回已结算 promise，宿主 fire-and-forget
             // 触发链无感，下一次滚动事件会带更新的锚点自然重试。
@@ -1853,7 +1853,10 @@
           }
           pace.lastAllowedAt = tNow;
         }
+        // 所有真正放行的调用都计入 allowed（含首调豁免、非滚动触发、小窗口），
+        // 否则 A/B 里「放行次数」会系统性偏低，看不出降频比例。
         pace.allowed++;
+        paceTotal.allowed++;
       }
       // 暂停观测或关闭滚动诊断时原样放行：不计数、不写明细、不消耗 initial 判定。
       if (!settings.observe || !settings.scrollDiagOn || state.dead) return callOrig(this, arguments);
@@ -1911,14 +1914,13 @@
       return ret;
     };
     try { wrapped.__lagfixPace = pace; } catch (e) {}
-    try { wrapped.__lagfixPage = page; } catch (e) {}
     return wrapped;
   }
 
   function applyLoadOlderProbe(store) {
     // v0.3.4：观测（scrollDiagOn）或降频（loadOlderPaceOn）任一需要都要装；
-    // v0.3.6：O8 补页批量也需要包装器。三者同时关时才不装/卸载，行为回到 v0.3.5。
-    if ((!settings.scrollDiagOn && !settings.loadOlderPaceOn && !settings.loadOlderPageLimitOn)
+    // v0.4.3：O8b 补页批量已退役，两者同时关才不装/卸载，行为回到 v0.3.5。
+    if ((!settings.scrollDiagOn && !settings.loadOlderPaceOn)
       || state.dead || !store) return false;
     // 宿主的 loadOlder 定义在 ConversationProjectionStore 原型上，但调用点是
     // lease.store.loadOlder()（实例查找）。只包当前主 store 实例：既不把隐藏会话
@@ -1935,7 +1937,6 @@
       && store.loadOlder === marker.wrapped) {
       loadOlderTarget = store;
       paceStats = marker.pace || null;   // v0.3.4：复用已包装时恢复计数归属
-      pageStats = marker.page || null;   // v0.3.6：O8 计数同样恢复
       return true;   // 已包装：复用，不套两层
     }
     if (marker) {
@@ -1954,7 +1955,6 @@
     }
     // 进入重装分支：旧计数不再代表新包装，先清空；成功后再绑定。
     paceStats = null;
-    pageStats = null;
     var orig = store.loadOlder;
     if (typeof orig !== "function") return false;
     var hadOwn = Object.prototype.hasOwnProperty.call(store, "loadOlder");
@@ -1969,7 +1969,7 @@
     if (store.loadOlder !== wrapped) return false;
     try {
       // v0.3.4：pace 随 marker 存亡——marker 命中分支据此恢复 paceStats。
-      store.__lagfixLoadOlder = { orig: orig, hadOwn: hadOwn, wrapped: wrapped, pace: paceOf(wrapped), page: pageOf(wrapped), gen: loadOlderGen };
+      store.__lagfixLoadOlder = { orig: orig, hadOwn: hadOwn, wrapped: wrapped, pace: paceOf(wrapped), gen: loadOlderGen };
     } catch (e2) {
       // 方法已替换但 marker 写不进去（不可扩展 store）：回滚方法，避免下次
       // 再包一层后既无法识别也无法还原。
@@ -1980,7 +1980,6 @@
         }
       } catch (e3) {}
       paceStats = null;
-      pageStats = null;
       return false;
     }
     // sealed store 上 marker 赋值也可能静默不生效：同样回滚，避免每 5s 重包。
@@ -1992,12 +1991,10 @@
         }
       } catch (e4) {}
       paceStats = null;
-      pageStats = null;
       return false;
     }
     loadOlderTarget = store;
     paceStats = paceOf(wrapped);   // 安装成功才绑定计数
-    pageStats = pageOf(wrapped);
     return true;
   }
 
@@ -2006,7 +2003,6 @@
     loadOlderTarget = null;
     loadOlderGen++;   // 在途回调作废：不向已清空的环形窗口写回
     paceStats = null; // v0.3.4：降频计数随包装一起消失，样本回落到 pace=null
-    pageStats = null; // v0.3.6：O8 计数同样清零
     if (!target) return;
     try {
       var rec = target.__lagfixLoadOlder;
@@ -2434,6 +2430,8 @@
     detailVersion++;
     loadOlderDetail.push(entry);
     if (loadOlderDetail.length > LOAD_OLDER_DETAIL_MAX) loadOlderDetail.shift();
+    // v0.4.3 P0：切换后 30 秒内的成功补页 live 累加（依赖 scrollDiagOn，默认开）。
+    if (settings.switchDiagOn && settings.observe) accumSwitchLoadOlder(entry.t, entry.ms, entry.ok);
   }
 
   function loadOlderDetailKey() {
@@ -2443,6 +2441,128 @@
       s += d.t + ":" + d.ms + ":" + (d.ok ? 1 : 0) + ";";
     }
     return s;
+  }
+
+  // ---- v0.4.3 P0：会话切换归因（只读） ----
+  // 记录用 live 累加：lafDetail/loadOlderDetail 都是 10 条 FIFO，结算时回头扫环
+  // 会把切换后最早（往往最重）的条目丢掉；帧切片存原始毫秒数组，冻结时算 max/p95。
+  function switchWatchActive() {
+    return settings.switchDiagOn && settings.observe && !state.dead;
+  }
+
+  function switchSidShort(sid) {
+    return sid ? String(sid).slice(0, 8) : "";
+  }
+
+  function recordSwitch(fromSid, toSid) {
+    if (!switchWatchActive()) return;
+    var now = Date.now();
+    var last = switchRing[switchRing.length - 1];
+    if (last && !last.settled && now - switchLastRecAt < SWITCH_DEDUPE_MS) {
+      // 同一次切换的第二个信号（attach 与 MutationObserver 双路径）：刷新 to 与
+      // 时间戳，2s 帧切片从头算；from 保持首次看到的值。
+      last.to = switchSidShort(toSid);
+      last.t = now;
+      last.at = performance.now();
+      last._f2.length = 0;
+      switchVersion++;
+      return;
+    }
+    // domBefore/turnsBefore 取缓存值：切换瞬间做 O(DOM) 扫描本身就是几十毫秒的
+    // 长任务，不能为观测在最重的时刻加成本。domAfter/turnsAfter 冻结时同样取
+    // 缓存（期间由常规采集周期刷新），两侧新鲜度同量级，差值才有意义。
+    switchRing.push({
+      t: now, at: performance.now(),
+      from: switchSidShort(fromSid), to: switchSidShort(toSid),
+      domBefore: domCount, turnsBefore: turnsCount,
+      _f2: [],
+      lafN2s: 0, styleMs2s: 0, lafN30s: 0, styleMs30s: 0,
+      loN30s: 0, loMs30s: 0,
+      bigBase: bigBlocked,
+      settled: false,
+    });
+    if (switchRing.length > SWITCH_RING_MAX) switchRing.shift();
+    switchLastRecAt = now;
+    switchVersion++;
+  }
+
+  // 三个 live 累加点：rafTick（帧切片）、recordLafDetail（长帧）、
+  // recordLoadOlderDetail（补页）。只碰未冻结且仍在窗口内的记录。
+  function accumSwitchFrames(t, ms) {
+    for (var i = 0; i < switchRing.length; i++) {
+      var r = switchRing[i];
+      if (r.settled) continue;
+      if (t >= r.at && t - r.at <= SWITCH_FRAME_WIN_MS) r._f2.push(ms);
+    }
+  }
+
+  function accumSwitchLaf(t, ms, styleMs) {
+    for (var i = 0; i < switchRing.length; i++) {
+      var r = switchRing[i];
+      if (r.settled) continue;
+      var d = t - r.t;
+      if (d < 0 || d > SWITCH_ACC_WIN_MS) continue;
+      if (d <= SWITCH_FRAME_WIN_MS) { r.lafN2s++; r.styleMs2s += styleMs; }
+      r.lafN30s++; r.styleMs30s += styleMs;
+      switchVersion++;
+    }
+  }
+
+  function accumSwitchLoadOlder(t, ms, ok) {
+    if (!ok) return;
+    for (var i = 0; i < switchRing.length; i++) {
+      var r = switchRing[i];
+      if (r.settled) continue;
+      var d = t - r.t;
+      if (d < 0 || d > SWITCH_ACC_WIN_MS) continue;
+      r.loN30s++; r.loMs30s += ms;
+      switchVersion++;
+    }
+  }
+
+  // 冻结：过 30 秒的记录补 after 值并停止累加。仍在采集周期内，不加 DOM 扫描。
+  function settleSwitchRecords() {
+    var now = Date.now();
+    for (var i = 0; i < switchRing.length; i++) {
+      var r = switchRing[i];
+      if (r.settled || now - r.t < SWITCH_ACC_WIN_MS) continue;
+      r.settled = true;
+      r.domAfter = domCount;
+      r.turnsAfter = turnsCount;
+      r.blockedLoadAll = Math.max(0, bigBlocked - r.bigBase);
+      switchVersion++;
+    }
+  }
+
+  function switchPublic(r) {
+    var f2max = null, f2p95 = null;
+    if (r._f2.length) { f2max = Math.max.apply(null, r._f2); f2p95 = pctOf(r._f2, 0.95); }
+    return {
+      t: r.t, from: r.from, to: r.to,
+      afterMax2s: f2max, afterP95: f2p95,
+      lafN2s: r.lafN2s, styleMs2s: r.styleMs2s,
+      lafN30s: r.lafN30s, styleMs30s: r.styleMs30s,
+      loadOlderN30s: r.loN30s, loadOlderMs30s: r.loMs30s,
+      domBefore: r.domBefore, domAfter: r.settled ? r.domAfter : null,
+      turnsBefore: r.turnsBefore, turnsAfter: r.settled ? r.turnsAfter : null,
+      blockedLoadAll: r.settled ? r.blockedLoadAll : null,
+      settled: r.settled ? 1 : 0,
+    };
+  }
+
+  function switchSnapshot() {
+    if (!switchWatchActive()) return null;
+    settleSwitchRecords();
+    var key = switchVersion + ":" + switchRing.length;
+    var snap = key === switchLastKey ? [] : switchRing.map(switchPublic);
+    switchLastKey = key;
+    return { on: 1, items: snap };
+  }
+
+  function clearSwitchRing() {
+    switchRing.length = 0;
+    switchLastRecAt = 0;
+    switchVersion++;
   }
 
   // ---- 锚点选择：primary pane 优先，其次可见面积最大 ----
@@ -2486,6 +2606,12 @@
     // 恢复默认 / 重新挂载会再次走 attach：先断开旧 observer，
     // 否则两个 observer 同时计数，提交率直接翻倍。
     try { if (mo) { mo.disconnect(); mo = null; } } catch (e) {}
+    // v0.4.3 P0：真正的切换（pane 或 sid 变了）才记一条；暂停后恢复、重挂同一
+    // 个 pane 不算切换，不污染归因环。首次挂载记 from=null 的一条，供首屏归因。
+    var prevEl = state.el, prevSid = state.sid;
+    if (prevEl !== anchor.el || anchor.sid !== prevSid) {
+      try { recordSwitch(prevEl ? prevSid : null, anchor.sid); } catch (e) {}
+    }
     state.el = anchor.el;
     state.sid = anchor.sid;
     state.switchedAt = Date.now();
@@ -2500,6 +2626,9 @@
           // seq 可能恰好相同，被 seq 门控就永远发现不了（终审 P1-3）。
           var sidNow = state.el.getAttribute(SID_ATTR) || "";
           if (sidNow !== state.sid) {
+            // v0.4.3 P0：原地切会话（宿主只改 data-session-id）也要进归因环；
+            // 与 attach 路径的 150ms 去重在 recordSwitch 里统一处理。
+            try { recordSwitch(state.sid, sidNow); } catch (e4) {}
             state.sid = sidNow;
             state.switchedAt = Date.now();
             state.attachedPerfAt = performance.now();
@@ -2510,7 +2639,7 @@
             // 切会话可能重建 projection store；立即尝试重装一次，别等 5s 看门狗
             // （冷静期只有 10s，前 5s 的首屏水合最需要保护）。
             if (settings.throttleOn || settings.bigSessionOn || settings.scrollDiagOn
-              || settings.loadOlderPaceOn || settings.loadOlderPageLimitOn) {
+              || settings.loadOlderPaceOn) {
               try { applyThrottle(); } catch (e2) {}
             }
             return;
@@ -2555,7 +2684,7 @@
     try { syncPaneProbe(); } catch (e) {}
     armWatchdog();    // 锚点一挂上就尝试装节流（store 只能从真实 fiber 上取，必须等挂载完成）
     if ((settings.throttleOn && !fixState.applied) || settings.bigSessionOn
-      || settings.scrollDiagOn || settings.loadOlderPaceOn || settings.loadOlderPageLimitOn) applyThrottle();
+      || settings.scrollDiagOn || settings.loadOlderPaceOn) applyThrottle();
   }
 
   function armWatchdog() {
@@ -2579,8 +2708,7 @@
         // 大会话保护也走同一条复核：只判 !loadTarget 的话，宿主中途换原型会让
         // 保护静默失效，而面板仍按旧目标显示"已装"。
         if ((settings.throttleOn && (fixState.applied || fixState.tries < 20))
-          || settings.bigSessionOn || settings.scrollDiagOn || settings.loadOlderPaceOn
-          || settings.loadOlderPageLimitOn) {
+          || settings.bigSessionOn || settings.scrollDiagOn || settings.loadOlderPaceOn) {
           applyThrottle();
         }
         // v0.3.2：新开的会话 pane 不一定伴随锚点变化，看门狗顺带补发现。
@@ -3696,6 +3824,15 @@
       + "后台会话也会记录，并标注为不可见。最多同时保留 5 个会话，更多会话要有新动静才会替换最久没动静的那个。\n"
       + "不会做什么：不读消息内容，不改会话数据，也不改变加载和显示方式。关掉后不再分别统计，"
       + "也不再逐个检查会话窗口。"));
+    c2b.appendChild(rowEl("切换会话归因", "记录每次切换会话之后那一下卡顿有多重、之后补加载了多少历史。",
+      switchEl(settings.switchDiagOn, function (v) {
+        settings.switchDiagOn = v; saveSettings(); rebuildPanel();
+      }),
+      "会做什么：每次切换会话时记一条——切换后 2 秒内最重的一帧卡了多久，之后 30 秒内补加载了"
+      + "几次更早的历史、每次多久，以及超长会话的一次性全量加载被拦了几次。最多保留最近 10 次切换，"
+      + "用来回答「切换卡的那一下到底在忙什么」。\n"
+      + "不会做什么：不改切换行为，不让切换变快，也不读会话内容；记录里只有耗时、次数和会话编号前几位。\n"
+      + "代价：极低，复用已有的统计，不在切换那一瞬间额外扫描页面。"));
     c2b.appendChild(rowEl("卡顿来源定位", "画面卡住超过 100 毫秒时，记下当时最耗时的几段界面工作来自哪里。",
       switchEl(settings.lafDiagOn, function (v) {
         settings.lafDiagOn = v; saveSettings(); applyScrollSettings(); rebuildPanel();
@@ -3895,23 +4032,8 @@
       + "避免一次卡 1–2 秒的长加载扎堆。\n"
       + "不会做什么：只影响滚动引起的加载，ZCode 自己为保证消息完整而发起的补齐不受影响；不丢消息、不改消息内容，也不改变每页条数；被放过的加载会在你继续滚动时自动补上。\n"
       + "代价：快速上翻时更早的历史可能晚一点出现；如果停在半路不再滚动，需要再滚一下才会继续加载。\n"
-      + "说明：ZCode 每次加载本身的耗时（随会话总长度增长）这项降不了，它只减少加载的次数。"));
-    c3f.appendChild(rowEl("补页批量 · 实验", "每次自动加载更多历史，减少重复加载的次数。",
-      switchEl(settings.loadOlderPageLimitOn, function (v) {
-        var wasPageLimit = settings.loadOlderPageLimitOn;
-        settings.loadOlderPageLimitOn = v;
-        // 从关到开算一轮新的实验：包装器可能因滚动诊断仍在，计数不能沿用上一轮。
-        if (v && !wasPageLimit) resetPageStats(pageStats);
-        saveSettings(); applyScrollSettings();
-        if (v) { try { applyThrottle(); } catch (e) {} }
-        rebuildPanel(); renderPanelStatus();
-      }),
-      "会做什么：会话已显示超过约 3000 行时，上翻加载更早消息一次最多取 120 行；"
-      + "如果连续快速上翻（两次间隔不到 600ms），这一次自动回到 ZCode 原本的 60 行，"
-      + "避免大段历史连续插到前面造成位置跳动。\n"
-      + "不会做什么：不跳过、不删除任何消息，也不改变顺序；不改变正在生成的内容或工具执行。\n"
-      + "代价：单次最多多取 60 行；连续快速上翻时基本维持原样，减少加载次数的收益会变小。\n"
-      + "说明：这是一项实验，需要实际对比开/关的卡顿数据；没有明显改善就保持关闭。"));
+      + "说明：ZCode 每次加载本身的耗时（随会话总长度增长）这项降不了，它只减少加载的次数。"
+      + "（v0.4.3 起，这项在旧版本上可能一直不生效的问题已处理。）"));
     c3f.appendChild(rowEl("长回合渲染减负 · 实验", "让画面外的长消息块暂时不参与绘制，滚回附近再恢复绘制。",
       switchEl(settings.turnContentVisOn, function (v) {
         settings.turnContentVisOn = v; saveSettings(); syncCvAttr(); rebuildPanel();
@@ -5055,7 +5177,7 @@
   function applyScrollSettings() {
     // v0.3.4：滚动诊断关闭只清观测数据；loadOlder 包装是否卸载还要看降频开关
     // （O3 与观测独立生效）。两者同时关才释放包装，行为回到 v0.3.3。
-    if ((!settings.scrollDiagOn && !settings.loadOlderPaceOn && !settings.loadOlderPageLimitOn)
+    if ((!settings.scrollDiagOn && !settings.loadOlderPaceOn)
       || state.dead) {
       releaseLoadOlderProbe();
     }
@@ -5070,7 +5192,9 @@
       loadOlderErrors = 0;
       lafCount = 0;
       lafMax = 0;
-      lastScrollAt = 0;
+      // v0.4.3：O3 降频开着时滚动时间戳仍要保留（时间口径门控需要信号）；
+      // 诊断与降频同时关才丢掉，避免下次开启时拿陈旧信号误判触发来源。
+      if (state.dead || !settings.loadOlderPaceOn) lastScrollAt = 0;
       domPeak = 0;
       domPeakAt = 0;
       domProbeAt = 0;
@@ -5084,12 +5208,9 @@
       inputPendingAt = 0;
     }
     if (!settings.maskOffOnScroll || state.dead) setScrollMaskActive(false);
-    // v0.3.4：降频关闭时丢掉滚动时间戳，避免下次开启时拿陈旧信号误判触发来源。
-    if (!settings.loadOlderPaceOn || state.dead) paceInScrollDispatch = false;
-    // v0.3.4：LoAF 计数随滚动诊断，归因环随 lafDiagOn；两者任一需要才保留观察器。
+    // v0.4.3：LoAF 计数随滚动诊断，归因环随 lafDiagOn；两者任一需要才保留观察器。
     if (!settings.lafDiagOn || state.dead) {
       clearLafDetail();
-      paceInScrollDispatch = false;
     }
     // v0.3.5：P0 关闭（或父开关关）时清掉上下文时间戳与周期计数；重新开启从 0 起算。
     if (!settings.lafCtxOn || !settings.lafDiagOn || state.dead) {
@@ -5127,13 +5248,14 @@
       // 降频包装随 releaseLoadOlderProbe 消失，归因环清空。
       settings.lafDiagOn = false;
       settings.loadOlderPaceOn = false;
-      settings.loadOlderPageLimitOn = false;
       settings.turnContentVisOn = false;
       // v0.3.5：上下文归因与面板期合并一并关；时间戳/计数清空。
       settings.lafCtxOn = false;
       settings.panelQuietOn = false;
       // v0.4.0 T1：定时器归因一并关，原始定时器立即还原，明细/计数清空。
       settings.timerDiagOn = false;
+      // v0.4.3 P0：切换归因一并关，归因环与全天累计清零。
+      settings.switchDiagOn = false;
       // v0.3.7：自动检查更新一并关；缓存/在途标记/红点全部清掉，避免还原后还留着“有新版本”。
       settings.autoUpdateCheckOn = false;
       saveSettings();
@@ -5153,7 +5275,9 @@
       loadOlderRing.length = 0;
       clearLoadOlderDetail();
       clearLafDetail();
-      paceInScrollDispatch = false;
+      clearSwitchRing();
+      paceTotal.allowed = 0;
+      paceTotal.skipped = 0;
       inputRing.length = 0;
       inputPendingAt = 0;
       scrollEvents = 0;
@@ -5296,22 +5420,18 @@
     // v0.3.5：P0 上下文与 O5 面板期合并。
     var wasLafCtx = settings.lafCtxOn;
     var wasPanelQuiet = settings.panelQuietOn;
-    // v0.3.6：O8 补页批量。
-    var wasPageLimit = settings.loadOlderPageLimitOn;
     // v0.4.0 T1：第三方定时器归因。
     var wasTimerDiag = settings.timerDiagOn;
     mergeStored(o, settings);
     if (settings.badMs <= settings.warnMs) settings.badMs = settings.warnMs + 1;
-    // v0.3.6 O8 / v0.4.0 O8b：从关到开算一轮新的实验；包装器可能因滚动诊断仍在，计数清零。
-    if (!wasPageLimit && settings.loadOlderPageLimitOn) resetPageStats(pageStats);
     if (settings.observe !== wasObserve) setObserving(settings.observe, true);
     if (settings.scrollDiagOn !== wasScrollDiag || settings.inputLagOn !== wasInputLag
       || settings.maskOffOnScroll !== wasMask
       || settings.lafDiagOn !== wasLafDiag || settings.loadOlderPaceOn !== wasPace
-      || settings.lafCtxOn !== wasLafCtx || settings.loadOlderPageLimitOn !== wasPageLimit) {
+      || settings.lafCtxOn !== wasLafCtx) {
       applyScrollSettings();
-      // 降频/补页批量开关打开时立即尝试装包装（scrollDiagOn 可能是关的）。
-      if (settings.loadOlderPaceOn || settings.loadOlderPageLimitOn) {
+      // 降频开关打开时立即尝试装包装（scrollDiagOn 可能是关的）。
+      if (settings.loadOlderPaceOn) {
         try { applyThrottle(); } catch (e) {}
       }
     }
@@ -5333,9 +5453,9 @@
       if (!fixState.applied) applyThrottle();
     } else {
       releaseThrottle();
-      // v0.3.6：只开 O8（或 O3）时也要确保 loadOlder 包装存在；applyThrottle
-      // 在 throttleOn=false 时仍会先走 applyLoadOlderProbe，再返回 false。
-      if (settings.loadOlderPaceOn || settings.loadOlderPageLimitOn) {
+      // 只开 O3 时也要确保 loadOlder 包装存在；applyThrottle 在 throttleOn=false
+      // 时仍会先走 applyLoadOlderProbe，再返回 false。
+      if (settings.loadOlderPaceOn) {
         try { applyThrottle(); } catch (e) {}
       }
     }
@@ -5395,7 +5515,7 @@
       turnContentVisOn: settings.turnContentVisOn,
       lafCtxOn: settings.lafCtxOn,
       panelQuietOn: settings.panelQuietOn,
-      loadOlderPageLimitOn: settings.loadOlderPageLimitOn,
+      switchDiagOn: settings.switchDiagOn,
       timerDiagOn: settings.timerDiagOn,
       autoUpdateCheckOn: settings.autoUpdateCheckOn,
       logMaxMB: settings.logMaxMB,
@@ -5439,6 +5559,7 @@
     }
     var turns = 0;
     try { turns = document.querySelectorAll('[data-v4-turn-unit="true"]').length; } catch (e) {}
+    turnsCount = turns;   // v0.4.3 P0：切换归因的 turnsBefore/After 缓存
     return {
       p95: pctOf(vals, 0.95),
       max: ringMax(scrollRing, now),
@@ -5517,22 +5638,10 @@
       intervalMs: PACE_INTERVAL_MS,
       allowed: paceStats ? paceStats.allowed : 0,
       skipped: paceStats ? paceStats.skipped : 0,
-    };
-  }
-
-  // v0.3.6 O8 / v0.4.0 O8b：开关关/自禁用时不输出，避免把「没开」或「已停」误报成「0 次生效」。
-  // installed 用来区分「包装没装上」与「装上了但还没触发」。
-  function pageSnapshot() {
-    if (!settings.loadOlderPageLimitOn || state.dead) return null;
-    return {
-      limit: LOAD_OLDER_PAGE_LIMIT,
-      minRows: LOAD_OLDER_PAGE_MIN_ROWS,
-      burstMs: LOAD_OLDER_PAGE_BURST_MS,
-      installed: !!pageStats,
-      applied: pageStats ? pageStats.applied : 0,
-      downgraded: pageStats ? pageStats.downgraded : 0,
-      small: pageStats ? pageStats.small : 0,
-      passthrough: pageStats ? pageStats.passthrough : 0,
+      // v0.4.3：全天累计口径。切会话会换 store 清掉上面单包装口径，高频切换
+      // 用户的 A/B 证据活不过一个切换周期；累计只在自禁用/__lagfixOff 清零。
+      totalAllowed: paceTotal.allowed,
+      totalSkipped: paceTotal.skipped,
     };
   }
 
@@ -5563,7 +5672,8 @@
         // schema 稳定：dead 样本也带这些字段，消费端不必判 undefined
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
         pane: null, refocus: null,
-        laf: null, pace: null, page: null, timer: null,
+        laf: null, pace: null, timer: null,
+        switch: null,
         paneOpen: null, panelQuiet: 0,
         ver: VERSION, updateCheck: 0, updateAuto: 0,
         restart: state.restartRequested ? 1 : 0,
@@ -5597,8 +5707,9 @@
         settings: cfg, fix: fixSnapshot(),
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
         pane: null, refocus: null,
-        // 暂停期归因环不累计（laf=null）；降频/补页批量是缓解项，与 observe 独立，照实上报。
-        laf: null, pace: paceSnapshot(), page: pageSnapshot(), timer: null,
+        // 暂停期归因环不累计（laf=null）；降频是缓解项，与 observe 独立，照实上报。
+        laf: null, pace: paceSnapshot(), timer: null,
+        switch: null,
         paneOpen: null, panelQuiet: 0,
         ver: VERSION, updateCheck: pausedAsk.ask, updateAuto: pausedAsk.auto,
         restart: state.restartRequested ? 1 : 0,
@@ -5680,7 +5791,8 @@
         refocus: refocusSnapshot(now),
         laf: lafSnapshot(),
         pace: paceSnapshot(),
-        page: pageSnapshot(),
+        // v0.4.3 P0：会话切换归因（只读；开关关/暂停/自禁用为 null）。
+        switch: switchSnapshot(),
         // v0.4.0 T1：第三方定时器归因（开关关/未装上时 null 或 supported=0）。
         timer: timerSnapshot(),
         // v0.3.5：P0 的窗口上下文 + O5 是否正在生效；未检测到侧栏时 paneOpen=null。
@@ -5699,8 +5811,7 @@
         settings: cfg, fix: fixSnapshot(),
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
         pane: null, refocus: null, laf: null, pace: null,
-        page: null,
-        timer: null,
+        timer: null, switch: null,
         paneOpen: null, panelQuiet: 0, ver: VERSION,
         updateCheck: askUpdate,
         updateAuto: askAuto,
@@ -5743,7 +5854,7 @@
       loadOlderDetail: loadOlderDetail.length, loadOlderEpoch: loadOlderEpoch,
       lafEpoch: lafEpoch,
       pace: paceSnapshot(),
-      page: pageSnapshot(),
+      switchDiag: { on: settings.switchDiagOn, records: switchRing.length },
       // 只读摘要：不消费 timerSnapshot 的明细版本，避免把待发明细提前吞掉。
       timer: {
         supported: timerProbeLive(timerProbe) ? 1 : 0,
@@ -5779,6 +5890,18 @@
   // 真的会改变角标颜色（终审 P1-1）。不影响运行时行为。
   window.__lagfixTest = {
     verdict: verdictOf,
+    // v0.4.3 冒烟专用：把切换记录整体前移，验证 30 秒冻结路径而不真等 30 秒。
+    // 只动观测内存里的时间戳，不触发任何宿主行为。
+    ageSwitchRecords: function (ms) {
+      var d = Number(ms) || 0;
+      if (!(d > 0)) return 0;
+      for (var i = 0; i < switchRing.length; i++) {
+        switchRing[i].t -= d;
+        switchRing[i].at -= d;
+      }
+      switchVersion++;
+      return switchRing.length;
+    },
     setThresholds: function (warnMs, badMs) {
       // 与面板/加载路径保持同一组不变量：1~5000、2~10000、bad > warn。
       var w = Math.min(5000, Math.max(1, Number(warnMs) || DEFAULTS.warnMs));
