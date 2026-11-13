@@ -254,6 +254,15 @@ v0.4.2 已拍板范围（观测口径与包装器生命周期加固，不新增�
 - 明确不做：不新增设置项、不改默认值、不把实验项转默认；不做插件自身开销微优化与安装器/日志清理改动（v0.4.3 或独立 chore）；不折叠/隐藏内容，不改消息、会话、工具结果，不读 `db.sqlite`，不开 CDP，不联网上报。
 - 行为规格见 `docs/specs/v0.4.2-observability-accuracy.md`；拍板页见 `docs/decisions/v0.4.2-observability-accuracy.html`；发布说明见 `docs/releases/v0.4.2.md`。
 
+v0.4.3 已拍板范围（会话切换归因 + 修复失灵的翻页降频 + O8b 退役）：
+
+- P0 切换归因（`switchDiagOn`，默认开，只读）：复用 `attach()`/MO 的 sid 变化信号，150ms 去重；双窗口 = 切换后 2s 帧切片（`afterMax2s/afterP95`，live 累加、冻结时算 P95）+ 30s 长帧/强制布局与成功补页累计（`lafN2s/styleMs2s/lafN30s/styleMs30s/loadOlderN30s/loadOlderMs30s`）；`domBefore/After`、`turnsBefore/After` 取缓存值，切换瞬间不做 O(DOM) 扫描；`blockedLoadAll` 为冻结时增量；环 10 条，`from/to` 只留 sid 前 8 字符，被淘汰的会话桶不影响记录；未变化样本发 `[]`，关闭/暂停/dead 为 `null`。
+- O3 触发口径修复：删除 `paceInScrollDispatch` 同步门控，改为与 `classifyLoadOlderTrigger` 一致的时间窗（`performance.now() - lastScrollAt <= 2000ms`）；首调（`callsInWrap===0`）或挂载 5s 内一律放行，保护 SessionPane 冷快照修复补拉；所有非跳过调用计入 `allowed`；`lastScrollAt` 在滚动诊断或降频任一开启时刷新，两者同关/自禁用才清。
+- O3 计数双口径：`paceStats`（当前 store 生命周期）与 `paceTotal`（全天累计，只在自禁用/`__lagfixOff()` 清零）；样本 `pace` 增 `totalAllowed/totalSkipped`，报告并列显示、旧样本标「无累计口径」。
+- O8b 退役：移除 `loadOlderPageLimitOn` 的行为、常量、面板行与 `page` 样本字段；旧设置键读取时忽略；包装安装条件 = `scrollDiagOn || loadOlderPaceOn`；报告对旧日志保留 `page` 计数并统一标注「已退役」。
+- 明确不做：切换期保护实验（P1 推迟到 v0.4.4，等本版数据）；插件自身开销微优化；T1 异步口径；O6/O7 隐藏 pane 策略；不折叠/隐藏内容，不改消息、会话、工具结果，不读 `db.sqlite`，不开 CDP，不联网上报。
+- 行为规格见 `docs/specs/v0.4.3-session-switch-and-pace.md`；拍板页见 `docs/decisions/v0.4.3-session-switch.html`；发布说明见 `docs/releases/v0.4.3.md`。
+
 ## 7. 版本与发布
 
 每次版本变更必须同步以下位置，缺一不可：
