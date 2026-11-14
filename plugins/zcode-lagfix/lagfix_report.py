@@ -936,9 +936,11 @@ def print_switch_diag(rows: list[dict]) -> None:
         seg2 = f"长帧 {laf2} 次" + (f"/强制布局 {style2}ms" if style2 else "") if laf2 else "长帧 0 次"
         lo_n = _int0(d.get("loadOlderN30s"))
         lo_ms = _int0(d.get("loadOlderMs30s"))
+        lo_rows = d.get("loadOlderRows30s")
+        rows_txt = str(_int0(lo_rows)) if num(lo_rows) else "-"
         laf30 = _int0(d.get("lafN30s"))
         style30 = _int0(d.get("styleMs30s"))
-        seg3 = f"补页 {lo_n} 次" + (f"/{lo_ms}ms" if lo_ms else "")
+        seg3 = f"补页 {lo_n} 次 / {rows_txt} 行" + (f" / {lo_ms}ms" if lo_ms else "")
         if laf30:
             seg3 += f"，长帧 {laf30} 次" + (f"/强制布局 {style30}ms" if style30 else "")
         blocked = d.get("blockedLoadAll")
@@ -966,6 +968,52 @@ def print_switch_diag(rows: list[dict]) -> None:
     else:
         print(f"    {INFO} 所有记录的 2 秒帧切片都为空（切换后 2 秒内没有采到帧，"
               f"可能窗口在后台）")
+
+
+def print_switch_page(rows: list[dict]) -> None:
+    """v0.4.4：切换回填大页实验的健康计数（A/B 权威口径仍是切换记录）。
+
+    switchPage 是包装器生命周期内的累计值，每个样本都会重发；只看最新样本，
+    不向前回退——关闭/换 store 会清零，回退旧数据会给出错误印象。
+    """
+    newest = rows[-1] if rows else {}
+    s = _settings_of(newest)
+    if "switchBackfillPageOn" not in s:
+        print(f"  {INFO} 本版本未记录切换回填页（v0.4.4 前的旧样本）")
+        return
+    # 自禁用样本的 settings 已被 observer 在内存里置 false；必须先看 dead，
+    # 否则会把“观测器崩了”误报成“实验从未开启”。
+    if newest.get("dead"):
+        print(f"  {INFO} 观测器已自禁用；切换回填页计数不可用"
+              f"（若自禁用前开启，已随之停止）")
+        return
+    if s.get("switchBackfillPageOn") is not True:
+        print(f"  {INFO} 切换回填页（实验）已关闭（默认关闭）")
+        return
+    if s.get("observe") is False or newest.get("paused"):
+        print(f"  {INFO} 切换回填页计数已暂停上报（恢复观测后继续）")
+        return
+    page = newest.get("switchPage")
+    if not isinstance(page, dict):
+        print(f"  {INFO} 切换回填页（实验）：本样本没有计数"
+              f"（包装可能尚未装上，或采集异常）")
+        return
+    limit = _int0(page.get("limit")) or 120
+    applied = _int0(page.get("applied"))
+    passthrough = _int0(page.get("passthrough"))
+    if page.get("installed") is False:
+        print(f"  {INFO} 切换回填页（实验）：每页 {limit} 行；"
+              f"包装未装上，计数不可用")
+        return
+    win = newest.get("win")
+    win_txt = f"，窗口 {win}" if win is not None else ""
+    line = (f"  切换回填页（实验{win_txt}）：每页 {limit} 行；"
+            f"按 120 请求 {applied} 次 / 按原样 {passthrough} 次")
+    if applied == 0:
+        line += (f"\n    {INFO} 当前包装周期内还没有按 120 的请求"
+                 f"（换 store 或关→开会清零）；确认切换前后都是真实会话、"
+                 f"已载行数 ≤3000，且 30 秒内发生过无参补页")
+    print(line)
 
 
 def main() -> int:
@@ -1088,6 +1136,8 @@ def main() -> int:
     print_session_diag(rows)
     # v0.4.3 P0：切换归因独立于 active 判断（纯切换不产生投影提交）。
     print_switch_diag(rows)
+    # v0.4.4：切换回填大页实验的健康计数（默认关闭）。
+    print_switch_page(rows)
     # v0.3.3：侧栏开合与回前台同样独立，面板常开但 0 提交的样本也要纳入。
     print_pane_diag(rows)
     # v0.3.4：卡顿来源定位与翻页降频计数同样独立于 active 判断。
@@ -1175,7 +1225,7 @@ def main() -> int:
     print("  · 真实帧间隔 P95 > 50ms 或 单帧最长 > 200ms  → 用户能感知到卡")
     print("  · 长任务次数 > 0 → 主线程被单次阻塞，与卡顿直接相关")
     print("  · 投影提交率高但帧间隔正常 → 宿主在勤快重渲染，暂未卡死")
-    print("[lagfix] v0.4.3：新增「切换会话归因」（只读、默认开）——每次切换记一条：切换后 2 秒的帧切片、30 秒内的长帧与补页次数，以及切换前后的 DOM/回合对比，用来回答「切换后卡了多久、之后补了多少历史」；不改切换行为。修复「大会话翻页降频」在 ZCode 3.18.2 上永不生效的触发判定（改为距最近一次时间线滚动 2 秒内才计时，首调与挂载 5 秒内一律放行以保护宿主的冷快照补拉），并增加全天累计计数；补页批量（O8b）退役，旧日志里的历史计数仍显示并标注已退役。默认开关与 v0.4.2 一致，仅新增只读的 switchDiagOn。v0.4.2：修正观测口径与包装器生命周期——帧统计按最近 30 秒窗口计算并区分「窗口最长 / 历史最长」；宿主运行期替换订阅或全量补拉实现时不再误覆盖，定时器归因失配时如实标记「计数不可用」；报告对关闭态、明细代际和异常时间戳做了一致性处理。没有新增缓解项，默认开关与 v0.4.1 一致。v0.4.1：角标「有新版本」红点移到设置齿轮右上角，像未读提醒一样贴在按钮角上，不占文字空间、不挡点击；显示条件与检查逻辑不变。v0.4.0：新增「第三方定时器归因 · 实验」（默认关闭）——只记录单次运行超过 50ms 的定时任务：耗时、原定间隔、回调名和调用点（只留文件名与行号），用来判断卡顿是否来自外部插件的定时刷新；不改定时器时机，不读任务参数或对话内容。补页批量改为自适应（v0.4.3 已退役）：已显示超过 3000 行时每页最多 120 行，连续快速上翻（间隔不到 600ms）自动回到 60 行，不跳过、不删除、不改消息顺序。v0.3.10：修复更新红点实际不可见。v0.3.9：设置面板保持滚动位置、打开时接管键盘焦点并在关闭后归还；修复宿主替换 subscribe 时被误覆盖的风险。v0.3.8：日志清理加固——只删白名单内的旧日志，校验真实日期、目录类型、普通文件非链接与 10 分钟最小年龄；宁可超预算也不误删。v0.3.7 起支持小红点与可选自动检查更新（默认关闭、24 小时内最多一次，只请求公开 GitHub Releases）。仍不读消息正文、不写 store；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
+    print("[lagfix] v0.4.4：新增「切换后大页补页 · 实验」（默认关闭）——真实会话切换后的 30 秒内，每次自动补历史从 60 行提到 120 行，减少来回次数；超过 3000 行或 30 秒后自动回到 60 行，不跳过、不合并、不改会话数据。切换记录新增实际补页行数，用于按每 1000 行归一化对比；报告新增该实验的生效/原样计数。v0.4.3：新增「切换会话归因」（只读、默认开）——每次切换记一条：切换后 2 秒的帧切片、30 秒内的长帧与补页次数，以及切换前后的 DOM/回合对比，用来回答「切换后卡了多久、之后补了多少历史」；不改切换行为。修复「大会话翻页降频」在 ZCode 3.18.2 上永不生效的触发判定（改为距最近一次时间线滚动 2 秒内才计时，首调与挂载 5 秒内一律放行以保护宿主的冷快照补拉），并增加全天累计计数；补页批量（O8b）退役，旧日志里的历史计数仍显示并标注已退役。默认开关与 v0.4.2 一致，仅新增只读的 switchDiagOn。v0.4.2：修正观测口径与包装器生命周期——帧统计按最近 30 秒窗口计算并区分「窗口最长 / 历史最长」；宿主运行期替换订阅或全量补拉实现时不再误覆盖，定时器归因失配时如实标记「计数不可用」；报告对关闭态、明细代际和异常时间戳做了一致性处理。没有新增缓解项，默认开关与 v0.4.1 一致。v0.4.1：角标「有新版本」红点移到设置齿轮右上角，像未读提醒一样贴在按钮角上，不占文字空间、不挡点击；显示条件与检查逻辑不变。v0.4.0：新增「第三方定时器归因 · 实验」（默认关闭）——只记录单次运行超过 50ms 的定时任务：耗时、原定间隔、回调名和调用点（只留文件名与行号），用来判断卡顿是否来自外部插件的定时刷新；不改定时器时机，不读任务参数或对话内容。补页批量改为自适应（v0.4.3 已退役）：已显示超过 3000 行时每页最多 120 行，连续快速上翻（间隔不到 600ms）自动回到 60 行，不跳过、不删除、不改消息顺序。v0.3.10：修复更新红点实际不可见。v0.3.9：设置面板保持滚动位置、打开时接管键盘焦点并在关闭后归还；修复宿主替换 subscribe 时被误覆盖的风险。v0.3.8：日志清理加固——只删白名单内的旧日志，校验真实日期、目录类型、普通文件非链接与 10 分钟最小年龄；宁可超预算也不误删。v0.3.7 起支持小红点与可选自动检查更新（默认关闭、24 小时内最多一次，只请求公开 GitHub Releases）。仍不读消息正文、不写 store；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
     print()
     print_logs()
     return 0

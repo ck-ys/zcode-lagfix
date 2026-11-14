@@ -930,6 +930,222 @@ check("残留旧键不改变页大小语义",
 winRows.length = 1;
 writeSettings({ loadOlderPageLimitOn: false });   // 写回 false 不报错（清理残留键）
 
+console.log("-- v0.4.4：切换回填大页实验 --");
+// 与切换归因段共用真实 sid 信号：这里只切 7 次，避免把首挂载记录挤出 10 条环。
+const pageOf = () => collect().switchPage;
+const switchToPage = (sid) => {
+  anchor.setAttribute("data-session-id", sid);
+  fireMutation(anchor, "data-session-id");
+};
+check("默认 switchBackfillPageOn=false", initialSettings.switchBackfillPageOn === false,
+  `snapshot=${initialSettings.switchBackfillPageOn}`);
+check("默认样本 switchPage 为 null", pageOf() === null, JSON.stringify(pageOf()));
+await store.loadOlder();
+check("默认无参调用不传页大小", JSON.stringify(store.loadOlderArgs) === "[]",
+  JSON.stringify(store.loadOlderArgs));
+
+writeSettings({ switchBackfillPageOn: true });
+const pageOn = pageOf();
+check("只开实验即装上包装并上报计数",
+  !!pageOn && pageOn.installed === true && pageOn.limit === 120
+    && pageOn.applied === 0 && pageOn.passthrough === 0,
+  JSON.stringify(pageOn));
+
+await wait(160);
+switchToPage("spage01");
+store.loadOlderGrow = 120;         // 模拟宿主按 120 行补一页
+const pageRet = store.loadOlder();
+check("真实切换后无参补页改为 120 行",
+  JSON.stringify(store.loadOlderArgs) === "[120]", JSON.stringify(store.loadOlderArgs));
+check("包装返回原 Promise 引用", pageRet === store.lastLoadOlderPromise);
+await pageRet;
+const pageSnap = collect();
+const pageAfter = pageSnap.switchPage;
+check("生效计数 +1、原样计数不变",
+  pageAfter.applied === 1 && pageAfter.passthrough === 0, JSON.stringify(pageAfter));
+const pageRec = pageSnap.switch.items[pageSnap.switch.items.length - 1];
+check("切换记录累加实际补页行数（loadOlderRows30s）",
+  pageRec && pageRec.loadOlderRows30s === 120 && pageRec.loadOlderN30s === 1,
+  JSON.stringify(pageRec));
+winRows.length = 1;
+
+// 失败页不增加行数；N 也不增加（accumSwitchLoadOlder 只在成功时累计）。
+// 页计数仍是“用 120 调用了原方法”的次数，所以 applied 会 +1，即使 Promise 失败。
+store.loadOlderFail = true;
+store.loadOlderGrow = 60;   // 失败也改变行数：只有 ok 守卫生效时行数才不会累加
+const failRet = store.loadOlder();
+check("窗口内失败调用仍按 120 发出（applied 计尝试）",
+  JSON.stringify(store.loadOlderArgs) === "[120]", JSON.stringify(store.loadOlderArgs));
+await failRet.catch(() => {});
+store.loadOlderFail = false;
+// 失败不改变切换记录的累计值，也不会让样本重发；前移 1ms 只为强制取一份新快照。
+window.__lagfixTest.ageSwitchRecords(1);
+const failSnap = collect();
+const failRec = failSnap.switch.items[failSnap.switch.items.length - 1];
+check("失败补页不累加行数、不增加补页次数",
+  failRec && failRec.loadOlderRows30s === 120 && failRec.loadOlderN30s === 1,
+  JSON.stringify(failRec));
+
+await store.loadOlder(60);
+check("显式 60 行原样直通", JSON.stringify(store.loadOlderArgs) === "[60]",
+  JSON.stringify(store.loadOlderArgs));
+await store.loadOlder(200);
+check("显式 200 行原样直通", JSON.stringify(store.loadOlderArgs) === "[200]",
+  JSON.stringify(store.loadOlderArgs));
+const undefRet = store.loadOlder(undefined);
+check("显式 undefined 原样直通（不吞参数）",
+  store.loadOlderArgs.length === 1 && store.loadOlderArgs[0] === undefined,
+  JSON.stringify(store.loadOlderArgs));
+await undefRet;
+check("显式参数不计 applied/passthrough",
+  pageOf().applied === 2 && pageOf().passthrough === 0, JSON.stringify(pageOf()));
+
+check("测试钩子能前移回填窗口", window.__lagfixTest.ageSwitchBackfill(31000) === 1);
+await store.loadOlder();
+const pageExpired = pageOf();
+check("30 秒窗口过期后回到宿主默认",
+  JSON.stringify(store.loadOlderArgs) === "[]" && pageExpired.passthrough === 1,
+  `${JSON.stringify(store.loadOlderArgs)} ${JSON.stringify(pageExpired)}`);
+
+await wait(160);
+switchToPage("spage02");
+winRows.length = 3001;
+await store.loadOlder();
+check("已载行数 >3000 时直通，不猜页大小",
+  JSON.stringify(store.loadOlderArgs) === "[]" && pageOf().passthrough === 2,
+  `${JSON.stringify(store.loadOlderArgs)} ${JSON.stringify(pageOf())}`);
+const rowsBackup = store.state.snapshot.rows;
+store.state.snapshot.rows = null;
+await store.loadOlder();
+check("行数不可读时直通",
+  JSON.stringify(store.loadOlderArgs) === "[]" && pageOf().passthrough === 3,
+  `${JSON.stringify(store.loadOlderArgs)} ${JSON.stringify(pageOf())}`);
+store.state.snapshot.rows = rowsBackup;
+winRows.length = 1;
+
+await wait(160);
+switchToPage("draft");
+await store.loadOlder();
+check("切到 draft 不生效（旧窗口已清）",
+  JSON.stringify(store.loadOlderArgs) === "[]" && pageOf().passthrough === 4,
+  `${JSON.stringify(store.loadOlderArgs)} ${JSON.stringify(pageOf())}`);
+await wait(160);
+switchToPage("spage03");
+await store.loadOlder();
+check("从 draft 进入真实会话不新开窗口",
+  JSON.stringify(store.loadOlderArgs) === "[]" && pageOf().passthrough === 5,
+  `${JSON.stringify(store.loadOlderArgs)} ${JSON.stringify(pageOf())}`);
+
+await wait(160);
+switchToPage("spage04");
+writeSettings({ scrollDiagOn: false });
+check("只开本项、关滚动诊断时包装仍装上",
+  !!store.__lagfixLoadOlder && collect().scroll === null
+    && pageOf().installed === true,
+  JSON.stringify(pageOf()));
+await store.loadOlder();
+check("关滚动诊断不影响 120 行生效",
+  JSON.stringify(store.loadOlderArgs) === "[120]" && pageOf().applied === 3,
+  `${JSON.stringify(store.loadOlderArgs)} ${JSON.stringify(pageOf())}`);
+writeSettings({ scrollDiagOn: true });
+
+console.log("-- v0.4.4：与 O3 组合 --");
+// 上次 sid 变化会刷新 attachedPerfAt；等过 5 秒首调/挂载豁免，O3 才会真正降频。
+await wait(5200);
+writeSettings({ loadOlderPaceOn: true });
+winRows.length = 1000;
+dispatchScroll(timelineEl);
+const comboHits = store.loadOlderHits || 0;
+await store.loadOlder();
+check("O3 放行时仍用 120 行（小窗口不触发降频）",
+  JSON.stringify(store.loadOlderArgs) === "[120]"
+    && (store.loadOlderHits || 0) === comboHits + 1,
+  `${JSON.stringify(store.loadOlderArgs)} hits=${store.loadOlderHits}`);
+await wait(620);
+winRows.length = 3001;
+dispatchScroll(timelineEl);
+const skipHits = store.loadOlderHits || 0;
+const skipPage = pageOf();
+await store.loadOlder();           // 放行：页大小因 >3000 直通
+const afterAllowPage = pageOf();
+await store.loadOlder();           // 600ms 内：O3 跳过
+check("O3 跳过时不调用原方法、不计 switchPage",
+  (store.loadOlderHits || 0) === skipHits + 1
+    && afterAllowPage.passthrough === skipPage.passthrough + 1
+    && pageOf().passthrough === afterAllowPage.passthrough,
+  `hits=${store.loadOlderHits} ${JSON.stringify(pageOf())}`);
+writeSettings({ loadOlderPaceOn: false });
+winRows.length = 1;
+
+console.log("-- v0.4.4：暂停、面板与清理 --");
+await wait(160);
+switchToPage("spage05");
+writeSettings({ observe: false });
+check("暂停时样本暂停上报 switchPage", pageOf() === null,
+  JSON.stringify(pageOf()));
+const pausePageBefore = window.__lagfixDiag().switchPage;
+await store.loadOlder();
+const pausePageAfter = window.__lagfixDiag().switchPage;
+check("暂停时已开窗口仍生效并继续计数",
+  JSON.stringify(store.loadOlderArgs) === "[120]"
+    && pausePageAfter.applied === pausePageBefore.applied + 1,
+  `${JSON.stringify(store.loadOlderArgs)} ${JSON.stringify(pausePageAfter)}`);
+writeSettings({ observe: true });
+await store.loadOlder();
+check("恢复观测后窗口仍按 120 生效",
+  JSON.stringify(store.loadOlderArgs) === "[120]", JSON.stringify(store.loadOlderArgs));
+
+window.__lagfixSettings();
+const panelPage = documentStub.getElementById("lagfix-settings-panel");
+const pageCb = findRowCheckbox(panelPage, "切换后大页补页 · 实验");
+check("面板里有「切换后大页补页 · 实验」且为开", !!pageCb && pageCb.checked === true);
+pageCb.checked = false;
+(pageCb._listeners.change || [])[0]();
+check("面板关闭后样本 switchPage 为 null、窗口清零",
+  collect().settings.switchBackfillPageOn === false
+    && collect().switchPage === null, JSON.stringify(collect().switchPage));
+await store.loadOlder();
+check("面板关闭后立即回到宿主默认",
+  JSON.stringify(store.loadOlderArgs) === "[]", JSON.stringify(store.loadOlderArgs));
+const pageCbBack = findRowCheckbox(
+  documentStub.getElementById("lagfix-settings-panel"), "切换后大页补页 · 实验");
+pageCbBack.checked = true;
+(pageCbBack._listeners.change || [])[0]();
+check("面板开启已持久化到 localStorage",
+  JSON.parse(localStorage.getItem(SETTINGS_KEY)).switchBackfillPageOn === true,
+  localStorage.getItem(SETTINGS_KEY));
+const pageRe = pageOf();
+check("面板重开后计数从 0 起算",
+  pageRe && pageRe.installed === true && pageRe.applied === 0
+    && pageRe.passthrough === 0, JSON.stringify(pageRe));
+// 关闭时窗口已清；重开不能把旧 30 秒窗口带回来。
+await store.loadOlder();
+check("面板重开后旧回填窗口已清，回到宿主默认",
+  JSON.stringify(store.loadOlderArgs) === "[]"
+    && pageOf().applied === 0 && pageOf().passthrough === 1,
+  `${JSON.stringify(store.loadOlderArgs)} ${JSON.stringify(pageOf())}`);
+(documentStub._listeners.keydown || []).forEach((fn) => fn({
+  key: "Escape", target: documentStub.getElementById("lagfix-settings-panel"),
+  stopPropagation() {},
+}));
+writeSettings({ switchBackfillPageOn: false });
+await wait(160);
+switchToPage("sess_test_123");     // 还原锚点 sid，后面的切换归因段按它建桶
+check("关闭后包装仍随滚动诊断保留", !!store.__lagfixLoadOlder);
+await store.loadOlder();
+check("关闭后无参调用回宿主默认", JSON.stringify(store.loadOlderArgs) === "[]",
+  JSON.stringify(store.loadOlderArgs));
+// 安装条件：三项全关必须卸载；只开本项（诊断/降频都关）也必须重新装上。
+writeSettings({ scrollDiagOn: false, loadOlderPaceOn: false, switchBackfillPageOn: false });
+check("诊断/降频/回填三项全关后包装卸载", !store.__lagfixLoadOlder);
+writeSettings({ switchBackfillPageOn: true });
+check("三项全关后只开本项也能重新装上包装",
+  !!store.__lagfixLoadOlder && pageOf().installed === true,
+  JSON.stringify(pageOf()));
+writeSettings({ switchBackfillPageOn: false });
+writeSettings({ scrollDiagOn: true });
+await wait(200);   // 越过 150ms 切换去重，后面的归因段才能从 sess_test_123 起算
+
 console.log("-- v0.4.3 P0：会话切换归因（只读） --");
 // 这一段必须在多会话用例之前：后面会把 paneB 挂进 DOM 并断言 A 桶 sid 仍是
 // sess_test_123，所以结尾必须把锚点 sid 还原。
@@ -1816,7 +2032,7 @@ check("A8：面板不再提供「显示角标」开关", !panelText.includes("�
 check("性能页含「侧栏与回前台」四项",
   ["侧栏与回前台统计", "侧栏开合保护", "面板常开保护", "回前台保护"]
     .every((t) => panelText.includes(t)));
-check("面板版本行是 v0.4.3", panelText.includes("v0.4.3"));
+check("面板版本行是 v0.4.4", panelText.includes("v0.4.4"));
 check("面板不再出现版本号式标题", !panelText.includes("v0.3 性能增强"));
 check("维护页写明日志路径与上限",
   panelText.includes("日志存储路径") && panelText.includes("日志上限"));
@@ -1882,7 +2098,7 @@ check("自动检查把 checkedAt 写入独立 key",
   JSON.stringify(autoKey));
 
 // 模拟主进程注入结果：写入缓存、跨窗口可读，并画出红点。
-window.__lagfixUpdate = { status: "ok", current: "0.4.3", latest: "9.9.9", newer: true,
+window.__lagfixUpdate = { status: "ok", current: "0.4.4", latest: "9.9.9", newer: true,
   url: "https://example.invalid/releases", at: Date.now() };
 window.__lagfixSettings();   // 重建面板 → renderPanelStatus 同步缓存
 panel = documentStub.getElementById("lagfix-settings-panel");
@@ -1898,19 +2114,19 @@ check("维护页显示发现新版本", allText(panel).includes("发现新版本
 check("更新缓存写入独立 key 且含 latest/newer",
   (() => {
     const st = JSON.parse(localStorage.getItem(UPDATE_KEY) || "{}");
-    return st.current === "0.4.3" && st.latest === "9.9.9" && st.newer === true
+    return st.current === "0.4.4" && st.latest === "9.9.9" && st.newer === true
       && typeof st.resultAt === "number";
   })(), localStorage.getItem(UPDATE_KEY));
 
 // 另一个窗口写入缓存：storage 事件应即时更新红点，不需要重建面板。
 const onUpdateStorage = (window._listeners.storage || [])[0];
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.4.3", latest: "10.0.0", newer: true, resultAt: Date.now(),
+  current: "0.4.4", latest: "10.0.0", newer: true, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("跨窗口缓存显示红点", badgeDot.style.display === "inline-block" && panelDot.style.display === "inline-block");
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.4.3", latest: "10.0.0", newer: false, resultAt: Date.now(),
+  current: "0.4.4", latest: "10.0.0", newer: false, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("明确无新版本时红点隐藏", badgeDot.style.display === "none" && panelDot.style.display === "none");
@@ -1919,8 +2135,8 @@ check("无新版本时齿轮提示恢复为打开设置", badgeGear.title === "�
 // 版本不匹配 / 同版本 / newer=false 三种脏数据都不能亮红点。
 const dotCases = [
   ["缓存版本与当前版本不一致", { current: "0.3.6", latest: "9.9.9", newer: true }],
-  ["latest 与当前版本相同", { current: "0.4.3", latest: "0.4.3", newer: true }],
-  ["newer 为 false", { current: "0.4.3", latest: "9.9.9", newer: false }],
+  ["latest 与当前版本相同", { current: "0.4.4", latest: "0.4.4", newer: true }],
+  ["newer 为 false", { current: "0.4.4", latest: "9.9.9", newer: false }],
 ];
 for (const [name, st] of dotCases) {
   localStorage.setItem(UPDATE_KEY, JSON.stringify({ ...st, resultAt: Date.now() }));
@@ -1941,7 +2157,7 @@ localStorage.setItem(UPDATE_KEY, JSON.stringify(manualOnlyKey));
 check("关闭自动检查后不再自动请求", collect().updateCheck === 0);
 // 留一份“有新版本”的缓存给 __lagfixOff 清理用例。
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.4.3", latest: "9.9.9", newer: true, resultAt: Date.now(),
+  current: "0.4.4", latest: "9.9.9", newer: true, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("恢复新版本缓存后红点重新显示",
@@ -2070,7 +2286,7 @@ if (upBtn) {
 }
 
 console.log("-- v0.3.9 更新状态：当前版本高于最新发布 --");
-window.__lagfixUpdate = { status: "ok", current: "0.4.3", latest: "0.3.4", newer: false,
+window.__lagfixUpdate = { status: "ok", current: "0.4.4", latest: "0.3.4", newer: false,
   url: "https://example.invalid/releases", at: Date.now() + 5 };
 window.__lagfixSettings();
 panel = documentStub.getElementById("lagfix-settings-panel");
@@ -2151,6 +2367,13 @@ check("旧 store 实例的 loadOlder 观测已还原",
 check("换 store 后旧会话补页明细不混入新会话",
   window.__lagfixDiag().loadOlderDetail === 0,
   `n=${window.__lagfixDiag().loadOlderDetail}`);
+writeSettings({ switchBackfillPageOn: true });
+const pageNewStore = collect().switchPage;
+check("换 store 后页计数绑定新包装并从 0 起算",
+  pageNewStore && pageNewStore.installed === true
+    && pageNewStore.applied === 0 && pageNewStore.passthrough === 0,
+  JSON.stringify(pageNewStore));
+writeSettings({ switchBackfillPageOn: false });
 
 console.log("-- v0.3.9 restoreTarget 只还原自己装的那一层 --");
 const s3Rec = s3.proto.__lagfixThrottle;
@@ -3124,6 +3347,8 @@ check("一键还原同时关掉 v0.3.5 两项",
   `ctx=${saved.lafCtxOn} quiet=${saved.panelQuietOn}`);
 check("一键还原同时关掉会话切换归因（v0.4.3 P0）",
   saved.switchDiagOn === false, `switchDiagOn=${saved.switchDiagOn}`);
+check("一键还原同时关掉切换回填大页（v0.4.4）",
+  saved.switchBackfillPageOn === false, `page=${saved.switchBackfillPageOn}`);
 check("一键还原不再写已退役的补页批量键",
   saved.loadOlderPageLimitOn === undefined,
   `pageLimit=${saved.loadOlderPageLimitOn}`);
@@ -3144,7 +3369,7 @@ check("__lagfixOff 后齿轮提示不再提有新版本",
   documentStub.getElementById("lagfix-gear").title === "打开设置",
   documentStub.getElementById("lagfix-gear").title);
 // 还原前已发出的检查可能在还原后才回来：没有新的用户动作，不得写回缓存/红点/状态文案。
-window.__lagfixUpdate = { status: "ok", current: "0.4.3", latest: "9.9.9", newer: true,
+window.__lagfixUpdate = { status: "ok", current: "0.4.4", latest: "9.9.9", newer: true,
   url: "https://example.invalid/releases", at: Date.now() + 1 };
 window.__lagfixSettings();
 check("__lagfixOff 后到达的在途结果不写缓存/红点",
@@ -3159,6 +3384,9 @@ check("__lagfixOff 后 switch 为 null、page 字段已不存在",
   collect().switch === null && collect().page === undefined
     && window.__lagfixDiag().page === undefined,
   `switch=${JSON.stringify(collect().switch)} page=${JSON.stringify(collect().page)}`);
+check("__lagfixOff 后 switchPage 为 null、计数已清",
+  collect().switchPage === null && window.__lagfixDiag().switchPage === null,
+  `switchPage=${JSON.stringify(collect().switchPage)}`);
 check("__lagfixOff 后 paneOpen=null、panelQuiet=0",
   collect().paneOpen === null && collect().panelQuiet === 0,
   `paneOpen=${collect().paneOpen} panelQuiet=${collect().panelQuiet}`);
@@ -3293,6 +3521,9 @@ console.log("-- v0.3.4 面板与暂停路径 --");
 const panelRootV34 = documentStub.getElementById("lagfix-settings-panel");
 check("面板有「卡顿来源定位」行", !!findRow(panelRootV34, "卡顿来源定位"));
 check("面板有「大会话翻页降频 · 实验」行", !!findRow(panelRootV34, "大会话翻页降频 · 实验"));
+check("面板有「切换后大页补页 · 实验」行", !!findRow(panelRootV34, "切换后大页补页 · 实验"));
+check("切换后大页补页默认不勾选",
+  findRowCheckbox(panelRootV34, "切换后大页补页 · 实验").checked === false);
 check("v0.4.3 面板已无「补页批量 · 实验」行（退役）",
   !findRow(panelRootV34, "补页批量 · 实验"));
 check("面板有「切换会话归因」行", !!findRow(panelRootV34, "切换会话归因"));
@@ -3411,6 +3642,41 @@ check("v0.4.2 关闭后只还原自己那层，subscribe 宿主实现保留",
 check("v0.4.2 关闭后只还原自己那层，loadAllOlder 宿主实现保留",
   v42Target.loadAllOlder === v42HostLoad && !v42Target.__lagfixLoadAll,
   `same=${v42Target.loadAllOlder === v42HostLoad} marker=${!!v42Target.__lagfixLoadAll}`);
+
+console.log("-- v0.4.4：自禁用清理 --");
+// 恢复观测并打开本项，制造一个真实切换窗口和至少一次 120 请求。
+writeSettings({ observe: true, scrollDiagOn: true, loadOlderPaceOn: false,
+  switchBackfillPageOn: true });
+await wait(160);
+switchToPage("spage_dead_a");
+await wait(160);
+switchToPage("spage_dead_b");
+await s3.store.loadOlder();
+check("自禁用前置：窗口内无参补页用 120",
+  JSON.stringify(s3.store.loadOlderArgs) === "[120]",
+  JSON.stringify(s3.store.loadOlderArgs));
+check("自禁用前置：页计数已绑定",
+  pageOf() && pageOf().installed === true && pageOf().applied >= 1,
+  JSON.stringify(pageOf()));
+const savedPageBeforeDisable =
+  JSON.parse(localStorage.getItem(SETTINGS_KEY)).switchBackfillPageOn;
+window.__lagfixTest.disable("smoke-self-disable");
+check("自禁用后内存开关关闭、窗口与计数清空",
+  collect().settings.switchBackfillPageOn === false
+    && window.__lagfixDiag().switchPage === null
+    && collect().switchPage === null && collect().dead === true,
+  JSON.stringify(collect().switchPage));
+check("自禁用不把开关写回 localStorage（重启仍按用户选择）",
+  JSON.parse(localStorage.getItem(SETTINGS_KEY)).switchBackfillPageOn
+    === savedPageBeforeDisable,
+  localStorage.getItem(SETTINGS_KEY));
+check("自禁用还原 loadOlder 包装",
+  s3.store.loadOlder === s3OrigLoadOlder && !s3.store.__lagfixLoadOlder,
+  `same=${s3.store.loadOlder === s3OrigLoadOlder} marker=${!!s3.store.__lagfixLoadOlder}`);
+await s3.store.loadOlder();
+check("自禁用后无参补页回宿主默认",
+  JSON.stringify(s3.store.loadOlderArgs) === "[]",
+  JSON.stringify(s3.store.loadOlderArgs));
 
 console.log("== 结果：", failures === 0 ? "PASS" : `FAIL(${failures})`, "==");
 process.exit(failures === 0 ? 0 : 1);
