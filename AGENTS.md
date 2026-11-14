@@ -263,6 +263,18 @@ v0.4.3 已拍板范围（会话切换归因 + 修复失灵的翻页降频 + O8b 
 - 明确不做：切换期保护实验（P1 推迟到 v0.4.4，等本版数据）；插件自身开销微优化；T1 异步口径；O6/O7 隐藏 pane 策略；不折叠/隐藏内容，不改消息、会话、工具结果，不读 `db.sqlite`，不开 CDP，不联网上报。
 - 行为规格见 `docs/specs/v0.4.3-session-switch-and-pace.md`；拍板页见 `docs/decisions/v0.4.3-session-switch.html`；发布说明见 `docs/releases/v0.4.3.md`。
 
+v0.4.4 已拍板范围（推荐 B：切换回填大页实验 + 只读行数归因）：
+
+- O9 切换后大页补页（`switchBackfillPageOn`，默认关，实验）：真实会话切换后的 30 秒内，无参 `loadOlder` 的页大小从宿主默认 60 提到 120（协议上限 200）；已载行数 >3000、窗口过期、行数不可读、占位 sid（`""`/`"draft"`）或调用方显式传参时原样直通。不跳过、不合并、不缓存、不预取、不删除、不改顺序；保留 `this` / Promise 引用 / 同步异常 / `loadingOlder` / `canLoadOlder` / 返回内容。只包当前主 store 实例，不碰共享原型。
+- 窗口在 `recordSwitch(fromSid,toSid)` 入口、`switchWatchActive()` 门控之前写入（`performance.now()` 域）；只认真实 sid 之间的切换，首次挂载、同 sid 重挂、draft/空 sid 不新开窗口；从真实会话切到占位会话时清掉旧窗口。切换识别依赖 `observe=true`，但不依赖 `switchDiagOn` / `scrollDiagOn`；暂停观测不新开窗口，已开窗口继续走表且计数继续累加，样本暂停上报。
+- 包装安装条件扩展为 `scrollDiagOn || loadOlderPaceOn || switchBackfillPageOn`；sid 变化后的立即安装与 5s 看门狗条件同步加入本项。只开本项、关滚动诊断与降频时也必须装上并生效。
+- S3 补页行数归因（只读）：切换记录新增 `loadOlderRows30s`，只累加成功补页的 `max(0, rowsAfter-rowsBefore)`；非数字按 0，不猜。样本新增 `switchPage={limit:120,applied,passthrough,installed}`，仅开关开时上报，关闭为 `null`；计数随包装器生命周期，关→开、换 store、自禁用、`__lagfixOff()` 清零；暂停观测不清零。`installed=false` 表示包装未装上，不伪装成 0/0。
+- 报告新增「切换回填页（实验）」段（开+已装/未装、`applied=0` 提示、关闭、旧样本）；切换段每条 30 秒补页显示 `N 次 / R 行 / Xms`，旧样本无 R 显示 `-`，不回退成次数或 0。
+- 三键（`scrollDiagOn`/`loadOlderPaceOn`/`switchBackfillPageOn`）同关才释放 `loadOlder` 包装；关闭本项立即停止 120 行并清窗口/计数；`__lagfixOff()`、自禁用清 `switchBackfillAt` 与计数，面板复选框取消勾选。
+- A/B：同一会话、同一段历史、同一滚动路径；`observe/switchDiagOn/scrollDiagOn` 全开、`loadOlderPaceOn=false`、`turnContentVisOn` 固定；只切 `switchBackfillPageOn`，关→开→关至少 3 轮，不暂停观测。按每 1000 行归一化 `loadOlderN30s/loadOlderRows30s*1000` 下降 ≥30%，`loadOlderMs30s/loadOlderRows30s*1000` 下降 ≥20%（或滚动 P95/长任务下降 ≥10%）；2 秒切换帧不退化 >10%、顶部空白 ≤300ms、锚点漂移 ≤48px、DOM 峰值增加 ≤20%。每轮必须 `switchPage.installed=true` 且 `applied>0`，否则无效重做。未过线保持默认关闭并如实标注；归一化调用次数无明显下降则退役。
+- 明确不做：切换瞬间微批（留给 v0.4.5）；不改 O3 默认值/门槛/跳过行为；不处理 1 秒切换帧本身、不声称切换变快；不升级/禁用 zusage；不折叠/隐藏内容，不改消息、会话、工具结果，不读 `db.sqlite`，不开 CDP，不联网上报。
+- 行为规格见 `docs/specs/v0.4.4-switch-backfill.md`；拍板页见 `docs/decisions/v0.4.4-switch-backfill.html`；发布说明见 `docs/releases/v0.4.4.md`。
+
 ## 7. 版本与发布
 
 每次版本变更必须同步以下位置，缺一不可：
