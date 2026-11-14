@@ -261,6 +261,12 @@ def main() -> int:
             lr.print_switch_diag(rows2)
         return buf.getvalue()
 
+    def run_switch_page(rows2):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            lr.print_switch_page(rows2)
+        return buf.getvalue()
+
     laf_entry = {
         "t": 1730000099000, "ms": 812, "styleMs": 143,
         "scripts": [
@@ -377,7 +383,8 @@ def main() -> int:
         "t": 1730000100000, "from": "sess_tes", "to": "sess_d7d",
         "afterMax2s": 530, "afterP95": 320, "lafN2s": 2, "styleMs2s": 156,
         "lafN30s": 5, "styleMs30s": 300, "loadOlderN30s": 10,
-        "loadOlderMs30s": 1500, "domBefore": 5000, "domAfter": 6000,
+        "loadOlderMs30s": 1500, "loadOlderRows30s": 600,
+        "domBefore": 5000, "domAfter": 6000,
         "turnsBefore": 40, "turnsAfter": 45, "blockedLoadAll": 1, "settled": 1,
     }
     sw_on = {"settings": {"switchDiagOn": True},
@@ -385,8 +392,15 @@ def main() -> int:
     out = run_switch([sw_on])
     check("switch 正常形状打印双窗口与最重一次",
           "切换会话归因：最近 1 次切换" in out and "2s 最重 530ms" in out
-          and "补页 10 次" in out and "sess_tes" in out and "sess_d7d" in out
+          and "补页 10 次 / 600 行" in out and "sess_tes" in out and "sess_d7d" in out
           and "最重一次" in out, out)
+    # v0.4.4：旧样本没有行数口径时显示 -，不能拿补页次数或 0 冒充。
+    sw_no_rows = dict(sw_item)
+    sw_no_rows.pop("loadOlderRows30s")
+    out = run_switch([{"settings": {"switchDiagOn": True},
+                    "switch": {"on": 1, "items": [sw_no_rows]}}])
+    check("旧样本没有 loadOlderRows30s 时显示 - 行",
+          "补页 10 次 / - 行" in out, out)
     # v0.4.3：滚动诊断关闭时，补页与 DOM/回合都取自它的采集缓存，必须一起标未测量。
     out = run_switch([{"settings": {"switchDiagOn": True, "scrollDiagOn": False,
                                  "lafDiagOn": True},
@@ -457,6 +471,55 @@ def main() -> int:
                            "switch": None}])
     check("自禁用时提示观测器已自禁用并保留历史记录",
           "观测器已自禁用" in out and "sess_d7d" in out, out)
+
+    print("-- v0.4.4 切换回填大页实验 --")
+    page_on = {
+        "settings": {"switchBackfillPageOn": True, "observe": True},
+        "switchPage": {"limit": 120, "applied": 3, "passthrough": 2, "installed": True},
+    }
+    out = run_switch_page([page_on])
+    check("实验开启时打印页大小与两类计数",
+          "每页 120 行" in out and "按 120 请求 3 次 / 按原样 2 次" in out
+          and "Traceback" not in out, out)
+    out = run_switch_page([{
+        "settings": {"switchBackfillPageOn": True},
+        "switchPage": {"limit": 120, "applied": 0, "passthrough": 0, "installed": True},
+    }])
+    check("applied=0 时提示检查真实会话、行数与 30 秒窗口",
+          "还没有按 120 的请求" in out and "真实会话" in out
+          and "≤3000" in out and "30 秒内发生过无参补页" in out, out)
+    out = run_switch_page([{
+        "settings": {"switchBackfillPageOn": True},
+        "switchPage": {"limit": 120, "applied": None, "passthrough": None,
+                       "installed": False},
+    }])
+    check("包装未装上时如实标注计数不可用",
+          "包装未装上" in out and "计数不可用" in out, out)
+    out = run_switch_page([{"settings": {"switchBackfillPageOn": False}, "switchPage": None}])
+    check("关闭时提示已关闭", "已关闭" in out, out)
+    out = run_switch_page([{"settings": {}, "ver": "0.4.3"}])
+    check("旧样本没有该键时提示本版本未记录",
+          "本版本未记录切换回填页" in out and "Traceback" not in out, out)
+    out = run_switch_page([{
+        "settings": {"switchBackfillPageOn": True, "observe": False},
+        "paused": True, "switchPage": None,
+    }])
+    check("暂停时提示计数暂停上报", "暂停上报" in out, out)
+    # 真实自禁用样本：disable() 已把内存开关置 false，dead 必须先判，
+    # 否则报告会把“观测器崩了”误读成“实验从未开启”。
+    out = run_switch_page([page_on, {
+        "settings": {"switchBackfillPageOn": False}, "dead": True, "switchPage": None,
+    }])
+    check("自禁用时提示计数停止（即使设置快照已是 false）",
+          "已自禁用" in out and "计数不可用" in out
+          and "已关闭（默认关闭）" not in out, out)
+    out = run_switch_page([{
+        "settings": {"switchBackfillPageOn": True},
+        "switchPage": {"limit": "bad", "applied": "x", "passthrough": float("nan"),
+                        "installed": True},
+    }])
+    check("计数坏形状按 0 处理且不炸",
+          "Traceback" not in out and "按 120 请求 0 次" in out, out)
 
     print("-- v0.3.4 终审：状态判定看最新样本 / 坏形状不炸 --")
     # P1-3：先关闭过、后来重开但暂停 —— 不能被判成「已关闭」
@@ -830,6 +893,8 @@ def main() -> int:
         out = buf.getvalue()
         check("旧样本帧汇总标注历史值",
               "单帧最长（旧样本为历史值）：640ms" in out, out)
+        check("报告版本摘要更新为 v0.4.4",
+              "[lagfix] v0.4.4" in out and "切换后大页补页" in out, out)
 
     print("== report_session_diag 结果：", "PASS" if ok else "FAIL", "==")
     return 0 if ok else 1
