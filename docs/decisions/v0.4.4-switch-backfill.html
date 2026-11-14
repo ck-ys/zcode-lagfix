@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>v0.4.4 拍板页 · 切换回填大页实验（B）</title>
+<style>
+  :root{color-scheme:dark}
+  *{box-sizing:border-box}
+  body{margin:0;background:#0d1117;color:#c9d1d9;font:14px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  .wrap{max-width:980px;margin:0 auto;padding:32px 20px 80px}
+  h1{font-size:24px;margin:0 0 4px;color:#f0f6fc}
+  h2{font-size:17px;margin:40px 0 12px;color:#f0f6fc;border-left:3px solid #388bfd;padding-left:10px}
+  h3{font-size:15px;margin:20px 0 8px;color:#e6edf3}
+  .sub{color:#8b949e;font-size:13px}
+  .chips{margin:10px 0 0}
+  .chip{display:inline-block;background:#161b22;border:1px solid #30363d;border-radius:999px;padding:2px 12px;font-size:12px;margin:0 6px 6px 0;color:#8b949e}
+  .chip b{color:#58a6ff}
+  .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 18px;margin:12px 0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}
+  .stat{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px 14px}
+  .stat .v{font-size:22px;color:#58a6ff;font-weight:600}
+  .stat .v.red{color:#f85149}
+  .stat .v.green{color:#3fb950}
+  .stat .k{font-size:12px;color:#8b949e}
+  table{border-collapse:collapse;width:100%;font-size:13px;margin:10px 0}
+  th,td{border:1px solid #30363d;padding:6px 10px;text-align:left;vertical-align:top}
+  th{background:#161b22;color:#e6edf3;white-space:nowrap}
+  td.ms{font-variant-numeric:tabular-nums;white-space:nowrap}
+  .bad{color:#f85149}.good{color:#3fb950}.dim{color:#8b949e}.warn{color:#d29922}
+  code{background:#1f2937;border-radius:4px;padding:1px 5px;font-size:12px;color:#79c0ff}
+  pre{background:#0b1220;border:1px solid #30363d;border-radius:8px;padding:12px 14px;overflow:auto;font-size:12px;line-height:1.6;color:#c9d1d9}
+  .rec{border-color:#238636;background:linear-gradient(180deg,rgba(35,134,54,.15),rgba(35,134,54,.05))}
+  .rec .tag{color:#3fb950;font-weight:600}
+  .drop{opacity:.75}
+  ul{margin:8px 0;padding-left:22px}
+  li{margin:4px 0}
+  .q{background:#161b22;border:1px solid #d29922;border-radius:8px;padding:12px 16px;margin:10px 0}
+  .q b{color:#d29922}
+  .gate{background:rgba(56,139,253,.10);border:1px solid #388bfd;border-radius:8px;padding:10px 14px;margin:14px 0;font-size:13px}
+  footer{margin-top:48px;color:#484f58;font-size:12px;border-top:1px solid #21262d;padding-top:16px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>v0.4.4 拍板页 · 切换回填大页实验（B）</h1>
+<div class="sub">2026-11-14 · 基于 2026-11-13 22:00–22:20 的 v0.4.3 实机日志 · 先拍板，后写规格与代码</div>
+<div class="chips">
+  <span class="chip">当前版本 <b>v0.4.3</b></span>
+  <span class="chip">数据源 <b>observe-20261113.jsonl</b></span>
+  <span class="chip">宿主 <b>ZCode 3.18.2</b></span>
+  <span class="chip">状态 <b>已拍板（B）</b></span>
+  <span class="chip">默认值 <b>关闭</b></span>
+  <span class="chip">拍板日 <b>2026-11-14</b></span>
+</div>
+
+<h2>00 · 一句话</h2>
+<div class="card">
+最疼的一段不是 3000 行以上的滚动，而是<b>切回长会话后从 120 行回填到 3000 行的补页潮</b>：26 秒内 44 次 <code>loadOlder</code>、累计 4903ms，单次最高 575ms，期间还叠了一个 968ms 的 <code>flush</code> 长帧。v0.4.4 只做一件事：<b>在切换后的 30 秒窗口内，把无参补页的每页 60 行提到 120 行</b>，减少调用次数和中间提交次数；<b>不跳过、不合并、不删数据、不隐藏内容</b>，默认关闭，A/B 过线才考虑转默认。
+</div>
+
+<h2>01 · 证据（为什么是 B）</h2>
+
+<div class="grid">
+  <div class="stat"><div class="v red">44 次 / 4903ms</div><div class="k">22:18:19–45 切换后补页潮</div></div>
+  <div class="stat"><div class="v red">575ms</div><div class="k">单次补页最长（同段）</div></div>
+  <div class="stat"><div class="v red">968ms</div><div class="k">同期 flush 长帧</div></div>
+  <div class="stat"><div class="v">120 → 3003</div><div class="k">26 秒内加载行数</div></div>
+  <div class="stat"><div class="v">5 / 0</div><div class="k">O3 本轮 allowed / skipped</div></div>
+  <div class="stat"><div class="v">1012 / 976 / 1042ms</div><div class="k">三次切换后 2s 最重帧</div></div>
+</div>
+
+<h3>1.1 补页潮：真正的累计成本</h3>
+<table>
+<tr><th>时间窗</th><th>调用</th><th>累计耗时</th><th>行数</th><th>单次最长</th></tr>
+<tr><td class="ms">22:18:19–45</td><td class="ms">44 次</td><td class="ms bad">4903ms</td><td class="ms">120 → 3003</td><td class="ms">575ms</td></tr>
+<tr><td class="ms">22:19:24–29</td><td class="ms">16 次</td><td class="ms">1389ms</td><td class="ms">300 → 1261</td><td class="ms">612ms</td></tr>
+<tr><td class="ms">22:20:14–21</td><td class="ms">24 次</td><td class="ms">1058ms</td><td class="ms">900 → 2400</td><td class="ms">127ms</td></tr>
+<tr><td class="ms">22:20:26</td><td class="ms">1 次</td><td class="ms bad">651ms</td><td class="ms">840 → 900</td><td class="ms">651ms</td></tr>
+</table>
+<p class="sub">22:18:36 的 968ms 长帧来源是 <code>flush</code>（<code>sinceNotify=0 / sinceFlush=0</code>），同一秒还有 254ms 的 scroll 长帧；1.5 秒内 4 页连续提交。补页与通知合并叠在一起，单页 60 行、页面越多，提交次数越多。</p>
+
+<h3>1.2 切换帧是另一件事，本版不碰</h3>
+<table>
+<tr><th>时间</th><th>切换</th><th>切换后 2s 最重帧</th><th>30s 内补页</th><th>结论</th></tr>
+<tr><td class="ms">22:08:03</td><td>871 → 19e</td><td class="ms bad">1042ms</td><td class="ms">0 次</td><td>不是补页</td></tr>
+<tr><td class="ms">22:16:56</td><td>19e → 871</td><td class="ms bad">1012ms</td><td class="ms">0 次</td><td>不是补页；2s 内 9 个 ≥100ms 长帧</td></tr>
+<tr><td class="ms">22:18:35</td><td>19e → 871</td><td class="ms bad">976ms</td><td class="ms">0 次</td><td>不是补页</td></tr>
+</table>
+<p class="sub">这类 0.5–1.0 秒整段帧更像宿主卸载/挂载/水合；v0.4.3 的 <code>switchGuardOn</code> 当时是开的，实际通知窗口已到 300ms，仍然发生。说明「继续加大节流」不是已验证的杠杆。v0.4.4 不拿它做实验，留给 v0.4.5 的独立拆批实验（A）。</p>
+
+<h3>1.3 为什么不是 O3 下探门槛</h3>
+<div class="card">
+<p>O3 当前门槛是「窗口 &gt;3000 行 + 距滚动 ≤2s + 600ms 间隔」。22:18 的补页潮到 <b>3003 行才刚过线</b>，本轮 <code>allowed=5 / skipped=0</code>；22:20:26 的 651ms 发生在 <b>840→900 行</b>，远低于门槛。全天 1294 次放行 / 18 次跳过，说明大部分调用根本没进入降频区间。</p>
+<p>把门槛直接下探到 1000 行会改变所有会话的普通上翻行为，而且 O3 的跳过是「不发这次请求」，用户在上翻停下时可能留下未加载缺口。它不该作为第一枪。</p>
+</div>
+
+<h2>02 · 路线对比</h2>
+<table>
+<tr><th>路线</th><th>做法</th><th>预期</th><th>风险</th><th>结论</th></tr>
+<tr class="rec"><td><span class="tag">B（推荐，本版）</span><br>切换后回填大页</td><td>切换后 30s 内，无参补页 60 → 120 行；只限当前主 store、只限未超过 3000 行；默认关</td><td>44 次 → 约 22 次；累计 4.9s → 约 2.5s；不丢内容</td><td>单页更大、锚点漂移、首屏白屏；需 A/B</td><td class="good">选它：直接砍调用次数，不跳过内容，宿主协议支持</td></tr>
+<tr class="drop"><td>A<br>切换瞬间拆批</td><td>切换后 2s 把通知窗口降到 ~50ms 或旁路，跳角标/mask</td><td>可能拆小 1s flush</td><td>水合期渲染更多；与既有 250ms 守卫冲突；收益未证</td><td class="dim">推迟到 v0.4.5，B 之后单独实验</td></tr>
+<tr class="drop"><td>C<br>O3 门槛下探</td><td>把 3000 行降到 1000–1500 行</td><td>减少调用</td><td>跳过请求，可能留缺口；影响所有会话</td><td class="dim">不做；先不碰 O3 默认与门槛</td></tr>
+<tr class="drop"><td>D<br>插件自身开销微优化</td><td>更新缓存、环形统计、看门狗快速路径</td><td>很小</td><td>动不了 4.9s 补页潮</td><td class="dim">不做</td></tr>
+</table>
+
+<h2>03 · 选定方案：B 的完整行为</h2>
+
+<h3>3.1 设置与默认值</h3>
+<ul>
+<li>新增设置键 <code>switchBackfillPageOn</code>，<b>默认 false</b>，面板放在「性能 → 实验」。</li>
+<li>用户语言：「切换后大页补页 · 实验」——切换会话后的 30 秒内，每次多取一点历史（60 → 120 行），减少来回次数。30 秒后自动恢复。</li>
+<li>关闭时行为与 v0.4.3 完全一致；不改变任何默认路径。</li>
+</ul>
+
+<h3>3.2 触发条件（全部满足才走 120）</h3>
+<ol>
+<li><code>settings.switchBackfillPageOn === true</code>，且 <code>!state.dead</code>；</li>
+<li>调用方<b>没有传参数</b>（<code>arguments.length === 0</code>）；显式参数一律原样直通；</li>
+<li>距离最近一次<b>真实会话切换</b> ≤ <code>SWITCH_BACKFILL_WINDOW_MS = 30000</code>；首次打开/首次挂载不算；</li>
+<li>切换前后的 sid <b>都是真实会话</b>：非空、非 <code>draft</code> 占位。新建会话、草稿态、空白首屏不触发；</li>
+<li><code>readLoadedRows(this)</code> 返回数字，且 <code>≤ 3000</code>；行数不可读或已超过 3000 时直通，不猜；</li>
+<li>当前调用的是当前主 store 实例的 <code>loadOlder</code>，不是共享原型，不是隐藏会话。</li>
+</ol>
+<p class="sub">切换识别复用现有 attach / MutationObserver 的 sid 变化信号；因此需要观测处于开启状态（<code>observe=true</code>）才能发现新切换。它<b>不依赖</b> <code>switchDiagOn</code> 或 <code>scrollDiagOn</code>：只要 observer 活着，时间戳就会写。暂停观测时不新开窗口（MO 已断开），已开的窗口继续走表并可自然过期，计数继续累加，样本暂停上报；恢复后按新的 attach 重新识别。</p>
+
+<h3>3.3 调用规则</h3>
+<pre>// callOrig 内部，伪代码
+if (!settings.switchBackfillPageOn || state.dead) return orig.apply(self, args);
+if (args.length !== 0) return orig.apply(self, args);
+if (!switchBackfillAt || performance.now() - switchBackfillAt &gt; 30000) {
+  countPassthrough(); return orig.apply(self, args);
+}
+var rows = readLoadedRows(self);
+if (rows === null || rows &gt; 3000) {
+  countPassthrough(); return orig.apply(self, args);
+}
+countApplied();
+return orig.call(self, 120);   // 宿主协议上限 200，默认 60</pre>
+<ul>
+<li><b>不跳过</b>任何一页：只是把这一页从 60 行变成 120 行；内容不会丢。</li>
+<li><b>不合并、不缓存、不删除、不改序</b>；不写 store；不碰 <code>loadingOlder/canLoadOlder</code>。</li>
+<li>保留 <code>this</code>、返回的 Promise 引用、同步异常、显式参数；与未包装时的语义一致。</li>
+<li>与 O3 同时开时：<b>O3 的跳过优先生效</b>；被 O3 跳过时不调用原方法、不计 page 生效；放行的调用再走 120。</li>
+<li>暂停观测（<code>observe=false</code>）时，<b>已开的窗口</b>仍生效并继续计数（与 O3 的缓解语义一致），只是不写明细/不上报样本；暂停期间不新开窗口，恢复后继续。</li>
+<li><code>scrollDiagOn=false</code> 时仍生效：包装安装条件加 <code>switchBackfillPageOn</code>，不依赖观测。</li>
+</ul>
+
+<h3>3.4 切换窗口的记时</h3>
+<ul>
+<li>在 <code>recordSwitch()</code> 入口、<code>switchWatchActive()</code> 门控之前写 <code>switchBackfillAt = performance.now()</code>；只写时间戳，不做 DOM 扫描。</li>
+<li>只有<b>前后都是真实 sid</b>（非空、非 <code>draft</code>）才写；首次挂载（from 为空）不写，避免把启动首屏算成切换；新建会话/草稿态也不写。</li>
+<li>同一会话重新挂载（sid 未变）不重置窗口。</li>
+<li>150ms 内 A→B→A 快速往返：窗口会按最后一次 sid 变化重置；不产生伪切换记录，但大页窗口按用户实际切回处理。</li>
+<li>暂停观测时 MO 已断开，不新开窗口；已开的 30s 窗口继续走表，过期后自然失效。恢复观测时若 sid 已变，按新的 attach 开新窗口。</li>
+<li>切换瞬间若新 store 还没找到：沿现有 sid 变化路径立即尝试 <code>applyThrottle()</code>（条件加入 <code>switchBackfillPageOn</code>），失败则由 5s 看门狗重试；窗口仍从切换时刻起算，不因晚安装而重新计时。</li>
+</ul>
+
+<h3>3.5 计数与样本</h3>
+<ul>
+<li>新样本字段 <code>switchPage</code>，只在开关开时上报，关闭为 <code>null</code>：</li>
+</ul>
+<table>
+<tr><th>字段</th><th>含义</th></tr>
+<tr><td><code>limit</code></td><td>固定 120</td></tr>
+<tr><td><code>applied</code></td><td>真正用 120 调用原方法的次数</td></tr>
+<tr><td><code>passthrough</code></td><td>开关开、无参，但窗口过期/行数 &gt;3000/行数不可读，按原样调用的次数</td></tr>
+<tr><td><code>installed</code></td><td>包装是否装上；false 时 applied/passthrough 不可用，不伪装成 0</td></tr>
+</table>
+<ul>
+<li><code>switchPage</code> 是<b>健康检查/诊断</b>，不是 A/B 的唯一口径；A/B 用切换记录的窗口指标（见 05）。</li>
+<li>切换记录新增 <code>loadOlderRows30s</code>：切换后 30s 内成功补页实际增加的行数合计。它和 <code>loadOlderN30s</code> / <code>loadOlderMs30s</code> 一起，支持「每 1000 行调用次数/耗时」的归一化比较，避免每次切换起始行数不同（120/300/840/900）污染 A/B。</li>
+<li>计数随包装器生命周期：关→开、换 store、自禁用、<code>__lagfixOff()</code> 清零；暂停观测不清零，计数继续累加，只是样本暂不上报。</li>
+<li>显式参数的调用不计入 applied/passthrough，避免污染 A/B。</li>
+<li>报告新增「切换回填页（实验）」段：显示 120 行、生效/放行次数、包装是否装上；关闭、旧样本、未装上分别明示，不回退旧计数。切换段同时打印 30s 内补页次数 / 行数 / 耗时。</li>
+</ul>
+
+<h2>04 · 安全边界与回滚</h2>
+<div class="grid">
+  <div class="stat"><div class="v green">默认关</div><div class="k">关闭时与 v0.4.3 逐字节同路径</div></div>
+  <div class="stat"><div class="v green">不跳过</div><div class="k">只改每页行数，不丢内容</div></div>
+  <div class="stat"><div class="v green">不改数据</div><div class="k">不写 store、不读会话正文</div></div>
+  <div class="stat"><div class="v green">可还原</div><div class="k">关开关 / 自禁用 / __lagfixOff 恢复原方法</div></div>
+</div>
+<ul>
+<li><b>硬红线：</b>不读写 <code>~/.zcode/cli/db.sqlite</code>，不读会话内容，不打开 CDP，不联网上报；不折叠/隐藏任何内容；不 force push、不打 tag、不发 Release（除非用户明确要求）。</li>
+<li><b>宿主契约：</b><code>loadOlder(limit = 60)</code>，协议上限 200；v3.17.1 / v3.17.2 / v3.18.1 / v3.18.2 已核对。120 在协议内；如果宿主未来改了参数含义或上限，本实验必须停用并在报告提示，不猜。</li>
+<li><b>包装安全：</b>只包当前主 store 实例；marker 记录 <code>{orig, wrapped}</code> 与代际；宿主运行期替换实现时只还原本插件那一层；旧 wrapper 代际不一致时原样直通。</li>
+<li><b>异常：</b>同步异常原样抛给调用方；Promise 失败不吞、不改写；不改变 <code>loadingOlder</code>/<code>canLoadOlder</code>。</li>
+<li><b>清理：</b><code>__lagfixOff()</code>、开关关闭、observer 自禁用三条路径都要清 <code>switchBackfillAt</code>、计数、面板状态与包装；暂停观测只停观测，不重置计数。</li>
+</ul>
+
+<h2>05 · A/B 验收（过线才可能转默认）</h2>
+<div class="gate">
+<b>控制变量：</b>同一会话、同一段历史、同一滚动路径；<code>observe=true</code>、<code>switchDiagOn=true</code>、<code>scrollDiagOn=true</code>（切换记录的 30s 补页指标依赖它们）；<code>loadOlderPaceOn=false</code>（隔离 O3）；<code>turnContentVisOn</code> 保持固定；只切 <code>switchBackfillPageOn</code>。关 → 开 → 关至少 3 轮；A/B 期间不暂停观测。
+</div>
+<table>
+<tr><th>指标</th><th>门槛</th></tr>
+<tr><td>30s 内每 1000 行补页次数<br><span class="dim">（<code>loadOlderN30s / loadOlderRows30s × 1000</code>）</span></td><td class="good">下降 ≥30%（目标约 -50%，44 → 22）</td></tr>
+<tr><td>30s 内每 1000 行补页耗时<br><span class="dim">（<code>loadOlderMs30s / loadOlderRows30s × 1000</code>）</span></td><td class="good">下降 ≥20%，或滚动 P95 / 长任务下降 ≥10%</td></tr>
+<tr><td>切换后 2s 最重帧 / P95</td><td>不退化 &gt;10%</td></tr>
+<tr><td>帧 P95 / ≥50ms 长任务</td><td>不退化 &gt;10%</td></tr>
+<tr><td>顶部空白时间</td><td>≤300ms</td></tr>
+<tr><td>锚点漂移</td><td>≤48px（沿用现有 E2E 门槛）</td></tr>
+<tr><td>DOM 峰值</td><td>增加 ≤20%</td></tr>
+<tr><td>异常</td><td>loadOlder 失败数 0；observer errs 不增加</td></tr>
+</table>
+<p class="sub">用「每 1000 行」归一化，起始行数是 120 还是 900 都不影响比较；但仍要求同一会话、同一段历史、同一滚动路径。每条 A/B 记录必须 <code>switchPage.installed=true</code> 且 <code>applied&gt;0</code>；否则该轮无效，重做而不是记 0。任一门禁未过：默认保持关闭，发布说明如实写「未达门槛」；如果归一化调用次数没有明显下降，直接退役本实验，不靠调参续命。</p>
+
+<h2>06 · 实现与交付清单</h2>
+<table>
+<tr><th>层</th><th>改动</th></tr>
+<tr><td><code>lagfix-observe.js</code></td><td>设置默认/解析、<code>switchBackfillAt</code>、<code>SWITCH_BACKFILL_WINDOW_MS=30000</code>、<code>SWITCH_BACKFILL_PAGE_LIMIT=120</code>、<code>callOrig</code> 分支、包装安装条件、sid 变化时立即安装条件、面板行与文案、<code>reloadSettings</code>/<code>applyScrollSettings</code>、<code>__lagfixOff</code> 清理、样本 <code>switchPage</code>、切换记录 <code>loadOlderRows30s</code></td></tr>
+<tr><td><code>lagfix_report.py</code></td><td>「切换回填页（实验）」段；切换段补页次数/行数/耗时；关闭/旧样本/未装上文案；版本摘要更新</td></tr>
+<tr><td><code>tests/observe_smoke.mjs</code></td><td>默认关、120 生效、显式参数直通、30s 过期、&gt;3000 行直通、行数不可读直通、首次挂载不生效、草稿/占位 sid 不生效、仅开本项时包装仍安装、sid 变化立即安装、暂停/自禁用/__lagfixOff 清理、与 O3 组合、<code>loadOlderRows30s</code> 累加、面板入口与计数清零（含变异验证）</td></tr>
+<tr><td><code>tests/report_session_diag.py</code></td><td>正常/关闭/旧样本/未装上/坏形状；30s 行数与每千行口径；版本摘要</td></tr>
+<tr><td>文档</td><td><code>docs/specs/v0.4.4-switch-backfill.md</code>、<code>docs/releases/v0.4.4.md</code>、<code>AGENTS.md</code> 范围、README 版本与路线图</td></tr>
+<tr><td>版本八处</td><td>plugin.json / marketplace.json / install.py / hooks.json / README / observer 面板底部 / release / spec</td></tr>
+</table>
+
+<h2>07 · 明确不做</h2>
+<ul>
+<li>不做切换瞬间拆批（A）：留给 v0.4.5，等 B 的数据。</li>
+<li>不改 O3 门槛/默认值；不改通知节流、mask、角标定位；不改面板开合/回前台保护。</li>
+<li>不跳过补页、不合并分页、不缓存、不预取、不改消息/会话/工具结果；不折叠或隐藏内容。</li>
+<li>不处理 1 秒切换帧本身；不声称本版让切换变快。</li>
+<li>不升级/禁用 zusage，不自动改外部插件；只在 A/B 文档里建议临时关统计行复测 <code>bridgeTick</code>。</li>
+<li>不做新网络请求、不读 db.sqlite、不开 CDP、不上报。</li>
+</ul>
+
+<h2>08 · 拍板时的默认取舍（可改）</h2>
+<div class="q">
+<b>① 页大小 120 而不是 200：</b>120 是 O8b 使用过、宿主协议内的参数，单页放大 2 倍；200 虽然能把 44 次压到 13 次，但单次帧和锚点风险更大。先 120，过线再讨论 200。</div>
+<div class="q">
+<b>② 只限 ≤3000 行：</b>超过 3000 行后交给 O3（如果用户开启）；不在本实验里继续放大页。<br>
+<b>③ 首次挂载不算切换：</b>启动首屏保持 60 行原行为；只优化用户主动切会话后的回填。<br>
+<b>④ 暂停观测：</b>已开的 30s 窗口仍生效并继续走表；暂停期间不新开窗口（MO 已断开），恢复后按新的 attach 识别。与 O3 的缓解语义一致；如果希望「暂停=全停」，拍板时改。<br>
+<b>⑤ A/B 时关 O3：</b>否则分不清是 120 行还是跳页带来的下降。</div>
+
+<h2>09 · 构建前已收口（builder check）</h2>
+<div class="card">
+<p>写规格前，把实现者最容易猜错的五个点固定下来；这些是设计决定，不是新需求：</p>
+<ol>
+<li><b>与观测开关的关系：</b>切换识别复用现有 attach/MO，因此需要 <code>observe=true</code> 才能发现新切换；<b>不依赖</b> <code>switchDiagOn</code>/<code>scrollDiagOn</code>。暂停观测不新开窗口，已开窗口继续走表并过期，计数继续累加，样本暂停；恢复后按新的 attach 识别。不新增暂停期 sid 监听器。</li>
+<li><b>A/B 主口径：</b>用切换记录的 <code>loadOlderN30s</code>、<code>loadOlderMs30s</code>，并新增 <code>loadOlderRows30s</code> 做「每 1000 行」归一化；<code>switchPage.applied</code> 只做健康检查。A/B 固定 <code>observe/switchDiagOn/scrollDiagOn</code> 全开，不暂停。</li>
+<li><b>占位 sid：</b>只有前后都是真实 sid（非空、非 <code>draft</code>）才开窗口；新建会话、草稿态、空白首屏都不触发。</li>
+<li><b>晚安装：</b>sid 变化时立即尝试 <code>applyThrottle()</code>（把 <code>switchBackfillPageOn</code> 加入条件），失败继续走 5s 看门狗；窗口仍从切换时刻起算。A/B 要求 <code>installed=true</code> 且 <code>applied&gt;0</code>，否则该轮无效。</li>
+<li><b>可复现性：</b>不强制重启 ZCode；用每 1000 行归一化抵消起始行数差异，但必须同一会话、同一段历史、同一滚动路径。若宿主未来不再按 60 行分页或 <code>rows.window</code> 形状变化，实验停用并如实报告，不猜。</li>
+</ol>
+</div>
+
+<h2>10 · 拍板结论</h2>
+<div class="card rec">
+<p><span class="tag">已拍板：B（2026-11-14）——进入规格与实现</span></p>
+<ul>
+<li>本版只新增一个默认关闭的实验开关 <code>switchBackfillPageOn</code>；关闭时行为与 v0.4.3 一致。</li>
+<li>先写 <code>docs/specs/v0.4.4-switch-backfill.md</code>，再改 observer；测试、三审、A/B 全过才谈默认值。</li>
+<li>如果 A/B 没过：默认保持关闭，如实记录；不把「少页数」包装成「已解决补页成本」。</li>
+</ul>
+</div>
+
+<footer>
+v0.4.4 拍板页 · 2026-11-14 · 依据 v0.4.3 实机日志与 ZCode 3.17.x/3.18.x 源码契约 · 本页只做决策，不含实现代码
+</footer>
+
+</div>
+</body>
+</html>
