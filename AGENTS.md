@@ -118,6 +118,8 @@ ZCode app.asar 入口尾部
 | 显式开合信号 | panel class 新增 `transition-[flex-grow]`（拖拽改宽不加） |
 | turn 内的行级块（O4 作用对象） | `[data-row-id]`（`ConversationRowView`/`ConversationTurnGroup` 渲染） |
 | 正在生成的回合（O4 排除标记） | `[data-v4-running-live-tail="true"]`（CV 选择器用 `:not()` 排除） |
+| 内置浏览器标签页 | `[data-browser-use-tab-id]`，`aria-hidden="true"` 表示未选中；未选中的 tab 仍 `forceMount` 并保留 guest |
+| 内置浏览器 guest | browser-use 选中 tab：`[data-browser-use-tab-id]:not([aria-hidden="true"]) webview`；人类浏览器选中 tab：`[data-side-pane-content-slot] [data-slot="tabs-content"][data-state="active"] webview[data-testid="browser-webview"]`。裸 `<webview>` 不能证明是浏览器（插件 UI、奖励页、预览也是 webview） |
 
 已知宿主事实（v0.3.1 相关）：
 
@@ -274,6 +276,16 @@ v0.4.4 已拍板范围（推荐 B：切换回填大页实验 + 只读行数归�
 - A/B：同一会话、同一段历史、同一滚动路径；`observe/switchDiagOn/scrollDiagOn` 全开、`loadOlderPaceOn=false`、`turnContentVisOn` 固定；只切 `switchBackfillPageOn`，关→开→关至少 3 轮，不暂停观测。按每 1000 行归一化 `loadOlderN30s/loadOlderRows30s*1000` 下降 ≥30%，`loadOlderMs30s/loadOlderRows30s*1000` 下降 ≥20%（或滚动 P95/长任务下降 ≥10%）；2 秒切换帧不退化 >10%、顶部空白 ≤300ms、锚点漂移 ≤48px、DOM 峰值增加 ≤20%。每轮必须 `switchPage.installed=true` 且 `applied>0`，否则无效重做。未过线保持默认关闭并如实标注；归一化调用次数无明显下降则退役。
 - 明确不做：切换瞬间微批（留给 v0.4.5）；不改 O3 默认值/门槛/跳过行为；不处理 1 秒切换帧本身、不声称切换变快；不升级/禁用 zusage；不折叠/隐藏内容，不改消息、会话、工具结果，不读 `db.sqlite`，不开 CDP，不联网上报。
 - 行为规格见 `docs/specs/v0.4.4-switch-backfill.md`；拍板页见 `docs/decisions/v0.4.4-switch-backfill.html`；发布说明见 `docs/releases/v0.4.4.md`。
+
+v0.4.5 已拍板范围（推荐 A：浏览器面板与回前台归因，只读）：
+
+- R1 焦点/浏览器标记（只读）：正常采集样本新增 `focus`（`document.hasFocus()`，布尔或 `null`）与 `webview`（当前选中的内置浏览器 tab 里是否有 guest：browser-use 选中 tab 查 `[data-browser-use-tab-id]:not([aria-hidden="true"]) webview`；人类浏览器选中 tab 查 `[data-side-pane-content-slot] [data-slot="tabs-content"][data-state="active"] webview[data-testid="browser-webview"]`；有 browser-use tab 标记但未选中返回 0；旧宿主无 tab 标记时只认浏览器专属 `data-testid`/`partition` 且有布局盒的 guest，**不再裸查** `document.querySelector("webview")`，避免插件 UI/奖励页/预览误报。查询异常为 `null`）。每周期只读一次，不缓存、不遍历 DOM、不新增监听器/定时器/开关；不读 guest 的 URL、标题、页面内容或历史。
+- R2 schema 稳定：暂停、自禁用、正常采集 catch 兜底样本带 `focus:null, webview:null`，且暂停/自禁用不读 DOM；旧样本缺字段时消费端按 `undefined` 处理，不补 0。
+- R3 报告新增「浏览器面板归因」段：稳定浏览器 = `webview=1 && paneOpen===true && focus===true && !hidden && !miss`，且 `refocus.sinceVisibleMs` 是数字并 `>3000`，该样本自己的 `paneDiagOn` 不是 `false`；有切换记录时再排除**同窗口**切换后 30 秒内候选（切换时间按 `win` 分桶，A 窗口不误伤 B；全部候选被排除时说明真实原因）。`sinceVisibleMs=null` 表示归因启用时文档隐藏/探针未启用/旧样本，回前台窗口不可判断，不进入稳定组；归因启用且文档可见时以启用时刻为可见起点，不会因从未切出而永久缺样本。`paneDiagOn=false` 按行处理，最新样本关闭不否定历史有效样本。回前台 3 秒组不限浏览器且不输出 LoAF；无焦点组明示不计入浏览器结论，guest 存在但文档无焦点时单独提示；`webview=0 && paneOpen===true` 只中性说明“可见样本中没有选中的浏览器 guest”，不推断宿主结构变化；`paneOpen=null` 单独提示标记不可用；只在 hidden/miss 中检测到 guest 时单独说明；旧样本/全 null 分别提示，不回退成 0。
+- R4 结论句只在稳定浏览器组有数据且同时有宿主 P95 与 LoAF 时打印：P95≤16ms 且 `laf.max≥100ms` → 宿主 UI 帧平滑但宿主主线程仍有 ≥100ms LoAF，来源未分（guest 合成/宿主定时器/样式），不能认定是 guest 页面内部；P95>50ms 且 `laf.max≥100ms` → 宿主也被拖慢，需继续分回前台/切换/浏览器面板。样本少于 3 条标注「结论仅供参考」。稳定组同时明示帧 P95 为 30 秒窗口、LoAF 为本采集周期值、3 秒排除窗口外仍可能含更早尖峰；无切换记录时明示无法排除切换后尖峰。
+- R5 `print_pane_diag` 的 open/closed 分组补 `frameP50` 中位；旧样本没有 `frameP50` 时显示 `-`，P50 只覆盖部分样本时样本数仍按全部有效行计，不改原有 P95/长任务/DOM 文案前缀。
+- 明确不做：不做回前台保护 v2、切换瞬间微批、浏览器打开期更强节流；不改任何缓解项默认值/行为；不进入 `<webview>` guest、不执行 guest JS、不打开 CDP；不读 `db.sqlite`，不读会话正文，不联网上报；不折叠/隐藏内容，不改消息、会话、工具结果。
+- 行为规格见 `docs/specs/v0.4.5-browser-pane-attribution.md`；拍板页见 `docs/decisions/v0.4.5-browser-pane-attribution.html`；发布说明见 `docs/releases/v0.4.5.md`。
 
 ## 7. 版本与发布
 

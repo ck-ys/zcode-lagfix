@@ -133,6 +133,8 @@ const documentStub = {
   documentElement: docEl,
   activeElement: body,
   hidden: false,
+  _hasFocus: true,
+  hasFocus() { return documentStub._hasFocus !== false; },
   getElementById(id) { return nodes.get(id) || null; },
   createElement: makeEl,
   createTextNode(t) { return { textContent: String(t) } },
@@ -2032,7 +2034,7 @@ check("A8：面板不再提供「显示角标」开关", !panelText.includes("�
 check("性能页含「侧栏与回前台」四项",
   ["侧栏与回前台统计", "侧栏开合保护", "面板常开保护", "回前台保护"]
     .every((t) => panelText.includes(t)));
-check("面板版本行是 v0.4.4", panelText.includes("v0.4.4"));
+check("面板版本行是 v0.4.5", panelText.includes("v0.4.5"));
 check("面板不再出现版本号式标题", !panelText.includes("v0.3 性能增强"));
 check("维护页写明日志路径与上限",
   panelText.includes("日志存储路径") && panelText.includes("日志上限"));
@@ -2098,7 +2100,7 @@ check("自动检查把 checkedAt 写入独立 key",
   JSON.stringify(autoKey));
 
 // 模拟主进程注入结果：写入缓存、跨窗口可读，并画出红点。
-window.__lagfixUpdate = { status: "ok", current: "0.4.4", latest: "9.9.9", newer: true,
+window.__lagfixUpdate = { status: "ok", current: "0.4.5", latest: "9.9.9", newer: true,
   url: "https://example.invalid/releases", at: Date.now() };
 window.__lagfixSettings();   // 重建面板 → renderPanelStatus 同步缓存
 panel = documentStub.getElementById("lagfix-settings-panel");
@@ -2114,19 +2116,19 @@ check("维护页显示发现新版本", allText(panel).includes("发现新版本
 check("更新缓存写入独立 key 且含 latest/newer",
   (() => {
     const st = JSON.parse(localStorage.getItem(UPDATE_KEY) || "{}");
-    return st.current === "0.4.4" && st.latest === "9.9.9" && st.newer === true
+    return st.current === "0.4.5" && st.latest === "9.9.9" && st.newer === true
       && typeof st.resultAt === "number";
   })(), localStorage.getItem(UPDATE_KEY));
 
 // 另一个窗口写入缓存：storage 事件应即时更新红点，不需要重建面板。
 const onUpdateStorage = (window._listeners.storage || [])[0];
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.4.4", latest: "10.0.0", newer: true, resultAt: Date.now(),
+  current: "0.4.5", latest: "10.0.0", newer: true, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("跨窗口缓存显示红点", badgeDot.style.display === "inline-block" && panelDot.style.display === "inline-block");
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.4.4", latest: "10.0.0", newer: false, resultAt: Date.now(),
+  current: "0.4.5", latest: "10.0.0", newer: false, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("明确无新版本时红点隐藏", badgeDot.style.display === "none" && panelDot.style.display === "none");
@@ -2135,8 +2137,8 @@ check("无新版本时齿轮提示恢复为打开设置", badgeGear.title === "�
 // 版本不匹配 / 同版本 / newer=false 三种脏数据都不能亮红点。
 const dotCases = [
   ["缓存版本与当前版本不一致", { current: "0.3.6", latest: "9.9.9", newer: true }],
-  ["latest 与当前版本相同", { current: "0.4.4", latest: "0.4.4", newer: true }],
-  ["newer 为 false", { current: "0.4.4", latest: "9.9.9", newer: false }],
+  ["latest 与当前版本相同", { current: "0.4.5", latest: "0.4.5", newer: true }],
+  ["newer 为 false", { current: "0.4.5", latest: "9.9.9", newer: false }],
 ];
 for (const [name, st] of dotCases) {
   localStorage.setItem(UPDATE_KEY, JSON.stringify({ ...st, resultAt: Date.now() }));
@@ -2157,7 +2159,7 @@ localStorage.setItem(UPDATE_KEY, JSON.stringify(manualOnlyKey));
 check("关闭自动检查后不再自动请求", collect().updateCheck === 0);
 // 留一份“有新版本”的缓存给 __lagfixOff 清理用例。
 localStorage.setItem(UPDATE_KEY, JSON.stringify({
-  current: "0.4.4", latest: "9.9.9", newer: true, resultAt: Date.now(),
+  current: "0.4.5", latest: "9.9.9", newer: true, resultAt: Date.now(),
 }));
 if (onUpdateStorage) onUpdateStorage({ key: UPDATE_KEY });
 check("恢复新版本缓存后红点重新显示",
@@ -2286,7 +2288,7 @@ if (upBtn) {
 }
 
 console.log("-- v0.3.9 更新状态：当前版本高于最新发布 --");
-window.__lagfixUpdate = { status: "ok", current: "0.4.4", latest: "0.3.4", newer: false,
+window.__lagfixUpdate = { status: "ok", current: "0.4.5", latest: "0.3.4", newer: false,
   url: "https://example.invalid/releases", at: Date.now() + 5 };
 window.__lagfixSettings();
 panel = documentStub.getElementById("lagfix-settings-panel");
@@ -2462,8 +2464,9 @@ check("检测到侧栏并读到收起状态",
 check("panelPx 取 frame 宽度", paneOf() && paneOf().panelPx === 540, `panelPx=${paneOf() && paneOf().panelPx}`);
 check("未开合时 switchP95/switchMax 为 null",
   paneOf() && paneOf().switchP95 === null && paneOf().switchMax === null);
-check("未回前台时 refocus 为稳定空结构",
-  refocusOf() && refocusOf().hiddenMs === null && refocusOf().sinceVisibleMs === null
+check("未发生回前台时 sinceVisibleMs 以归因启用时刻为起点",
+  refocusOf() && refocusOf().hiddenMs === null
+    && typeof refocusOf().sinceVisibleMs === "number" && refocusOf().sinceVisibleMs >= 0
     && refocusOf().p95 === null && refocusOf().flushes === 0 && refocusOf().guardHits === 0,
   JSON.stringify(refocusOf()));
 
@@ -3369,7 +3372,7 @@ check("__lagfixOff 后齿轮提示不再提有新版本",
   documentStub.getElementById("lagfix-gear").title === "打开设置",
   documentStub.getElementById("lagfix-gear").title);
 // 还原前已发出的检查可能在还原后才回来：没有新的用户动作，不得写回缓存/红点/状态文案。
-window.__lagfixUpdate = { status: "ok", current: "0.4.4", latest: "9.9.9", newer: true,
+window.__lagfixUpdate = { status: "ok", current: "0.4.5", latest: "9.9.9", newer: true,
   url: "https://example.invalid/releases", at: Date.now() + 1 };
 window.__lagfixSettings();
 check("__lagfixOff 后到达的在途结果不写缓存/红点",
@@ -3390,6 +3393,10 @@ check("__lagfixOff 后 switchPage 为 null、计数已清",
 check("__lagfixOff 后 paneOpen=null、panelQuiet=0",
   collect().paneOpen === null && collect().panelQuiet === 0,
   `paneOpen=${collect().paneOpen} panelQuiet=${collect().panelQuiet}`);
+const offSample = collect();
+check("__lagfixOff 后 focus/webview 仍按正常采集（不是暂停/自禁用）",
+  typeof offSample.focus === "boolean" && [0, 1].includes(offSample.webview),
+  `focus=${offSample.focus} webview=${offSample.webview}`);
 check("日志上限默认 50MB 并已持久化", saved.logMaxMB === 50, `logMaxMB=${saved.logMaxMB}`);
 check("没有污染宿主 localStorage 的其它 key",
   Object.keys(localStorage._d).every((k) => k === "lagfix.settings.v1"), Object.keys(localStorage._d).join(","));
@@ -3643,6 +3650,166 @@ check("v0.4.2 关闭后只还原自己那层，loadAllOlder 宿主实现保留",
   v42Target.loadAllOlder === v42HostLoad && !v42Target.__lagfixLoadAll,
   `same=${v42Target.loadAllOlder === v42HostLoad} marker=${!!v42Target.__lagfixLoadAll}`);
 
+console.log("-- v0.4.5：焦点 / 选中的浏览器 guest 只读标记 --");
+writeSettings({ observe: true, paneDiagOn: true });
+await wait(20);
+const v45BaseQS = documentStub.querySelector;
+const v45BaseQSA = documentStub.querySelectorAll;
+const v45Tab = makeEl("div");
+const v45Webview = makeEl("webview");
+const v45OtherWebview = makeEl("webview");
+let v45BUActive = true;
+let v45HasBUTabs = true;
+let v45HumanActive = false;
+let v45Legacy = [v45Webview];
+let v45Visible = true;
+let v45QThrow = false;
+let v45QSAThrow = false;
+let v45BareQueried = false;
+let v45LastLegacySelector = "";
+v45Webview._isBrowserGuest = true;
+v45OtherWebview._isBrowserGuest = false;
+v45Webview.getClientRects = () => (v45Visible ? [{}] : []);
+v45OtherWebview.getClientRects = () => [{}];
+documentStub.querySelector = (sel) => {
+  const s = String(sel);
+  if (s.includes("data-browser-use-tab-id") && s.includes(":not(")) {
+    if (v45QThrow) throw new Error("tab-query-boom");
+    return v45BUActive ? v45Webview : null;
+  }
+  if (s.includes("data-side-pane-content-slot")
+      && s.includes('data-state="active"')
+      && s.includes("browser-webview")) {
+    if (v45QThrow) throw new Error("human-tab-query-boom");
+    return v45HumanActive ? v45Webview : null;
+  }
+  if (s === "webview") {
+    v45BareQueried = true;
+    return v45OtherWebview;
+  }
+  return typeof v45BaseQS === "function" ? v45BaseQS(sel) : null;
+};
+documentStub.querySelectorAll = (sel) => {
+  const s = String(sel);
+  if (s.includes("data-browser-use-tab-id")) {
+    if (v45QSAThrow) throw new Error("tab-list-boom");
+    return v45HasBUTabs ? [v45Tab] : [];
+  }
+  if (s.includes("browser-webview") || s.includes("persist:zcode-embedded-browser")) {
+    if (v45QSAThrow) throw new Error("legacy-list-boom");
+    v45LastLegacySelector = s;
+    return v45Legacy.filter((el) => el._isBrowserGuest !== false);
+  }
+  return typeof v45BaseQSA === "function" ? v45BaseQSA(sel) : [];
+};
+documentStub._hasFocus = true;
+let v45 = collect();
+check("v0.4.5 正常样本 focus=true", v45.focus === true, JSON.stringify(v45.focus));
+check("v0.4.5 选中的 browser-use tab 有 guest 时 webview=1", v45.webview === 1,
+  JSON.stringify(v45.webview));
+documentStub._hasFocus = false;
+v45 = collect();
+check("v0.4.5 窗口无焦点时 focus=false 且 hidden 仍为 false",
+  v45.focus === false && v45.hidden === false,
+  JSON.stringify({ focus: v45.focus, hidden: v45.hidden }));
+documentStub._hasFocus = true;
+
+// browser-use 有 tab 标记但未选中时，即使后台 guest 仍在（截图合成/forceMount）
+// 也不能退回裸 webview 把它算成 1。
+v45BUActive = false;
+v45HasBUTabs = true;
+v45 = collect();
+check("v0.4.5 未选中的 browser-use tab 即使 guest 仍挂载也不计为 webview",
+  v45.webview === 0 && v45BareQueried === false,
+  JSON.stringify({ webview: v45.webview, bare: v45BareQueried }));
+
+// 人类浏览器 tab 是另一条路径：没有 data-browser-use-tab-id，靠通用 TabsContent
+// 的 data-state=active + 浏览器专属 webview 判断。
+v45HumanActive = true;
+v45HasBUTabs = false;
+v45Legacy = [];
+v45 = collect();
+check("v0.4.5 人类浏览器 tab 选中时 webview=1", v45.webview === 1,
+  JSON.stringify(v45.webview));
+v45BUActive = false;
+v45HasBUTabs = true;
+v45HumanActive = true;
+v45 = collect();
+check("v0.4.5 存在未选中的 browser-use tab 时人类浏览器仍能识别",
+  v45.webview === 1, JSON.stringify(v45.webview));
+
+// 旧宿主没有 tab 标记：只认浏览器专属 webview，且要有布局盒。
+v45HumanActive = false;
+v45HasBUTabs = false;
+v45Legacy = [v45Webview, v45OtherWebview];
+v45Visible = true;
+v45 = collect();
+check("v0.4.5 无 tab 标记时浏览器专属 guest 有布局盒为 1",
+  v45.webview === 1, JSON.stringify(v45.webview));
+v45Visible = false;
+v45 = collect();
+check("v0.4.5 无 tab 标记时非浏览器 webview 可见但浏览器 guest 隐藏仍为 0",
+  v45.webview === 0, JSON.stringify(v45.webview));
+
+// 关键回归：裸 <webview> 可能是插件 UI / 预览 / 奖励页，不能算浏览器。
+v45Legacy = [v45OtherWebview];
+v45Visible = true;
+v45BareQueried = false;
+v45LastLegacySelector = "";
+v45 = collect();
+check("v0.4.5 可见的非浏览器 webview 不算浏览器 guest",
+  v45.webview === 0, JSON.stringify(v45.webview));
+check("v0.4.5 旧宿主回退只查浏览器专属 guest",
+  v45LastLegacySelector.includes("browser-webview")
+    && v45LastLegacySelector.includes("persist:zcode-embedded-browser"),
+  v45LastLegacySelector);
+check("v0.4.5 不再裸查 webview，避免误命中其他 guest",
+  v45BareQueried === false, `bare=${v45BareQueried}`);
+
+v45BUActive = false;
+v45HasBUTabs = false;
+v45Legacy = [];
+v45QSAThrow = true;
+v45 = collect();
+check("v0.4.5 浏览器 guest 列表查询异常为 null，不冒泡",
+  v45.webview === null, JSON.stringify(v45.webview));
+v45QSAThrow = false;
+v45QThrow = true;
+v45 = collect();
+check("v0.4.5 webview 查询异常为 null，不冒泡", v45.webview === null,
+  JSON.stringify(v45.webview));
+v45QThrow = false;
+v45BUActive = true;
+v45HasBUTabs = true;
+const v45RealHasFocus = documentStub.hasFocus;
+documentStub.hasFocus = undefined;
+v45 = collect();
+check("v0.4.5 hasFocus 不存在时为 null，不崩", v45.focus === null,
+  JSON.stringify(v45.focus));
+documentStub.hasFocus = () => { throw new Error("focus-boom"); };
+v45 = collect();
+check("v0.4.5 hasFocus 异常为 null，不冒泡", v45.focus === null,
+  JSON.stringify(v45.focus));
+documentStub.hasFocus = v45RealHasFocus;
+writeSettings({ observe: false });
+v45 = collect();
+check("v0.4.5 暂停样本 focus/webview 均为 null",
+  v45.focus === null && v45.webview === null,
+  JSON.stringify({ focus: v45.focus, webview: v45.webview }));
+writeSettings({ observe: true });
+v45 = collect();
+check("v0.4.5 恢复观测后 focus/webview 重新读取",
+  typeof v45.focus === "boolean" && v45.webview === 1,
+  JSON.stringify({ focus: v45.focus, webview: v45.webview }));
+const v45NoNew = { ...v45 };
+delete v45NoNew.focus;
+delete v45NoNew.webview;
+const v45Delta = JSON.stringify(v45).length - JSON.stringify(v45NoNew).length;
+check("v0.4.5 样本体积增量不超过 50 字节", v45Delta <= 50, `delta=${v45Delta}`);
+documentStub.querySelector = v45BaseQS;
+documentStub.querySelectorAll = v45BaseQSA;
+documentStub._hasFocus = true;
+
 console.log("-- v0.4.4：自禁用清理 --");
 // 恢复观测并打开本项，制造一个真实切换窗口和至少一次 120 请求。
 writeSettings({ observe: true, scrollDiagOn: true, loadOlderPaceOn: false,
@@ -3666,6 +3833,9 @@ check("自禁用后内存开关关闭、窗口与计数清空",
     && window.__lagfixDiag().switchPage === null
     && collect().switchPage === null && collect().dead === true,
   JSON.stringify(collect().switchPage));
+check("自禁用样本 focus/webview 均为 null",
+  collect().focus === null && collect().webview === null,
+  JSON.stringify({ focus: collect().focus, webview: collect().webview }));
 check("自禁用不把开关写回 localStorage（重启仍按用户选择）",
   JSON.parse(localStorage.getItem(SETTINGS_KEY)).switchBackfillPageOn
     === savedPageBeforeDisable,
