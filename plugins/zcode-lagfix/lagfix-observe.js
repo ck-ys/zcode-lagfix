@@ -1,5 +1,13 @@
 /**
- * zcode-lagfix renderer 观测脚本 v0.4.4
+ * zcode-lagfix renderer 观测脚本 v0.4.5
+ *
+ * v0.4.5（浏览器面板与回前台归因，只读）：
+ *   - 正常样本新增 focus（document.hasFocus()）与 webview（当前选中的内置浏览器
+ *     tab 里是否有 guest）；暂停/自禁用/异常兜底为 null。不读 URL/标题/页面内容。
+ *   - 报告新增浏览器面板归因：稳定浏览器、回前台 3 秒、无焦点、未检测到选中 guest
+ *     分组；宿主 frameP50/P95 与宿主 LoAF 并列，避免把回前台尖峰误判成浏览器，
+ *     也不把宿主 LoAF 冒充 guest 页面帧。
+ *   - 不新增开关、DOM 属性、监听器或定时器；不改任何缓解项默认值。
  *
  * v0.4.4（切换回填大页实验，默认关）：
  *   - switchBackfillPageOn：真实会话切换后的 30 秒内，无参 loadOlder 的页大小
@@ -218,7 +226,7 @@
   var REFOCUS_WINDOW_MS = 800;     // 回前台帧窗口
   var PANE_SWITCH_DEDUPE_MS = 150; // aria-hidden 与 class 双信号去重
   var REFOCUS_DEDUPE_MS = 500;     // visibilitychange 与 focus 双信号去重
-  var VERSION = "0.4.4";
+  var VERSION = "0.4.5";
   var ERR_LIMIT = 50;
   var OVERLAY_ID = "lagfix-overlay-badge";
   // v0.3.7：更新检查结果的跨窗口缓存 + 自动检查间隔。
@@ -1212,6 +1220,11 @@
     } else if (!settings.paneDiagOn) {
       resetPaneDiagnostics();
       resetRefocusDiagnostics();
+    } else if (!sinceVisibleAt && !document.hidden) {
+      // 归因启用/恢复时文档可见，就把启用时刻当作可见起点。
+      // 否则用户从不切出再切回时 sinceVisibleMs 永远是 null，
+      // 稳定浏览器组永远拿不到样本；启用后前 3 秒仍按回前台窗口排除。
+      sinceVisibleAt = performance.now();
     }
     if (!settings.paneSwitchGuardOn) stopPaneGuard();
     if (!settings.paneHoldOn) applyPaneHoldAttribute();
@@ -5848,6 +5861,62 @@
       && paneDetected && paneOpen);
   }
 
+  // v0.4.5：只读归因，不新增开关/监听器。
+  // focus 表示文档是否有前台焦点，不等于 document.hidden；窗口被别的应用盖住
+  // 或 DevTools 抢焦点时可能为 false。
+  function readDocFocus() {
+    try {
+      if (typeof document.hasFocus === "function") return !!document.hasFocus();
+    } catch (e) {}
+    return null;
+  }
+
+  // webview=1 表示「当前选中的内置浏览器 tab 里有 guest」，不是文档里任意
+  // <webview>。宿主会把未选中的浏览器 tab 与关闭后的 guest 继续挂载
+  // （TabsContent forceMount / 关闭仍保留 Browser Guest），裸 querySelector
+  // 会把预览、插件 UI、奖励页等普通 webview 误算成浏览器。只读 DOM 结构，
+  // 不读 src/标题/内容。
+  //
+  // 宿主有两条浏览器路径，必须都覆盖：
+  // - browser-use tab：BrowserUseSidePaneContent 在 TabsContent 上写
+  //   data-browser-use-tab-id，未选中时 aria-hidden="true"；
+  // - 人类浏览器 tab：AnimatedSidePanePanel 的通用 TabsContent 没有该标记，
+  //   但 HumanBrowserView 最终也走 BrowserViewportSurface，webview 带
+  //   data-testid="browser-webview" 与 persist:zcode-embedded-browser。
+  // 选中的通用 tab 用 Radix 的 data-state="active" 判断；未选中 tab 带
+  // data-[state=inactive]:hidden，不会命中。
+  function readWebviewPresence() {
+    try {
+      if (document.querySelector(
+        '[data-browser-use-tab-id]:not([aria-hidden="true"]) webview')) return 1;
+      if (document.querySelector(
+        '[data-side-pane-content-slot] [data-slot="tabs-content"]'
+        + '[data-state="active"] webview[data-testid="browser-webview"]')) return 1;
+
+      // 有 browser-use tab 标记但都不是选中态时，没选中的 guest 可能仍挂载
+      // 或处于截图合成态；不能再退回裸 webview，否则会把后台 tab 算成 1。
+      var tabs = document.querySelectorAll('[data-browser-use-tab-id]');
+      if (tabs && tabs.length) return 0;
+
+      // 旧宿主/人类 tab 没有 data-browser-use-tab-id：只认浏览器专属 guest，
+      // 并要求有布局盒；奖励页、插件 UI 的 webview 不参与。
+      var legacy = document.querySelectorAll(
+        'webview[data-testid="browser-webview"], '
+        + 'webview[partition="persist:zcode-embedded-browser"]');
+      for (var i = 0; i < legacy.length; i++) {
+        var wv = legacy[i];
+        if (typeof wv.getClientRects === "function") {
+          if (wv.getClientRects().length > 0) return 1;
+        } else {
+          return 1;
+        }
+      }
+      return 0;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function paceSnapshot() {
     if (!settings.loadOlderPaceOn) return null;
     return {
@@ -5896,6 +5965,8 @@
         frameMax: null, frameMaxAll: null, frameMaxWindow: null,
         samples: 0, heapMB: null, dom: null,
         hidden: document.hidden, dead: true,
+        // v0.4.5：归因字段 schema 稳定；自禁用不读 DOM。
+        focus: null, webview: null,
         miss: state.missedReason || true, errs: state.errCount,
         settings: cfg, fix: fixSnapshot(),
         // schema 稳定：dead 样本也带这些字段，消费端不必判 undefined
@@ -5933,6 +6004,8 @@
         frameMax: null, frameMaxAll: null, frameMaxWindow: null,
         samples: 0, heapMB: null, dom: null,
         hidden: document.hidden, dead: false, paused: true,
+        // v0.4.5：暂停期间不读 DOM，字段置 null。
+        focus: null, webview: null,
         miss: false, errs: state.errCount,
         settings: cfg, fix: fixSnapshot(),
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
@@ -6010,6 +6083,8 @@
         samples: cs.n,
         heapMB: heap, dom: domCount,
         hidden: document.hidden,
+        // v0.4.5：焦点/浏览器 guest 只读标记；异常按 null，不猜。
+        focus: readDocFocus(), webview: readWebviewPresence(),
         dead: false,
         miss: state.missed ? (state.missedReason || true) : false,
         errs: state.errCount,
@@ -6042,6 +6117,7 @@
       err();
       return JSON.stringify({ sid: state.sid, frames: 0, dt: 0, dead: false, errs: state.errCount,
         frameMax: null, frameMaxAll: null, frameMaxWindow: null,
+        focus: null, webview: null,
         settings: cfg, fix: fixSnapshot(),
         scroll: null, input: null, sessions: null, loadOlderDetail: null,
         pane: null, refocus: null, laf: null, pace: null,

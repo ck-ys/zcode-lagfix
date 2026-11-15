@@ -32,6 +32,11 @@ WARN = "[!]"
 BAD = "[x]"
 INFO = "[i]"
 
+# v0.4.5：回前台归因的排除窗口。实机 12:16:02 的宿主尖峰出现在回前台后
+# 2375ms，2 秒窗口会把它漏进「稳定浏览器」；默认采集间隔 5 秒，取 3 秒
+# 既能覆盖这条样本，也不会把长时间驻留误算成刚回前台。
+REFOCUS_CLASSIFY_MS = 3000
+
 LOG_KINDS = [
     ("observe-*.jsonl*", "观测样本（每条一个采集周期，间隔可在面板调；.1 为轮转归档）"),
     ("main.log", "主进程加载器（注入、采集泵、自禁用原因）"),
@@ -442,8 +447,8 @@ def print_pane_diag(rows: list[dict]) -> None:
 
         # open/closed 分组的帧 P95、长任务、DOM 中位数。
         # 用所有可见、未丢锚点的样本：面板常开但没提交（frames=0）正是要看的场景。
-        groups = {True: {"frame": [], "lt": [], "dom": []},
-                  False: {"frame": [], "lt": [], "dom": []}}
+        groups = {True: {"p50": [], "frame": [], "lt": [], "dom": []},
+                  False: {"p50": [], "frame": [], "lt": [], "dom": []}}
         for r in rows:
             p = r.get("pane")
             if not isinstance(p, dict) or p.get("detected") is not True:
@@ -451,6 +456,8 @@ def print_pane_diag(rows: list[dict]) -> None:
             if r.get("hidden") or r.get("miss"):
                 continue
             key = bool(p.get("open"))
+            if num(r.get("frameP50")):
+                groups[key]["p50"].append(r["frameP50"])
             if num(r.get("frameP95")):
                 groups[key]["frame"].append(r["frameP95"])
             if num(r.get("longTasks")):
@@ -459,14 +466,16 @@ def print_pane_diag(rows: list[dict]) -> None:
                 groups[key]["dom"].append(r["dom"])
         for key, label in ((True, "open"), (False, "closed")):
             g = groups[key]
-            n = max(len(g["frame"]), len(g["lt"]), len(g["dom"]))
+            n = max(len(g["frame"]), len(g["lt"]), len(g["dom"]), len(g["p50"]))
             if n <= 0:
                 print(f"    {label}：本文件内没有可用样本")
                 continue
+            p50 = round(pct(g["p50"], 0.5), 1) if g["p50"] else None
             print(f"    {label} 样本 {n} 条：帧 P95 中位 "
                   f"{fmt(round(pct(g['frame'], 0.5), 1) if g['frame'] else None, 'ms')}"
                   f" / 长任务中位 {fmt(pct(g['lt'], 0.5))}"
-                  f" / DOM 中位 {fmt(pct(g['dom'], 0.5))}")
+                  f" / DOM 中位 {fmt(pct(g['dom'], 0.5))}"
+                  f"；P50 中位 {fmt(p50, 'ms')}")
     elif p_disabled:
         print(f"  {INFO} 侧栏 + 回前台归因已关闭")
     else:
@@ -532,6 +541,276 @@ def print_pane_diag(rows: list[dict]) -> None:
         print(f"  {INFO} 回前台归因已关闭")
     else:
         print(f"  {INFO} 无回前台数据（旧样本，或开关已关闭）")
+
+
+def print_browser_diag(rows: list[dict]) -> None:
+    """v0.4.5 浏览器面板与回前台归因（只读）。
+
+    focus/webview 是 v0.4.5 新增样本字段：focus=document.hasFocus()，
+    webview=当前选中的内置浏览器 tab 里是否有 <webview> guest。这里只分组统计，
+    不读页面内容，也不把 webview=1 直接说成“浏览器页面卡”。
+
+    注意：LoAF 由宿主 renderer 的 PerformanceObserver 采集，看不到 guest 内部
+    主线程；所以 laf.max 只能说明宿主主线程有长帧，不能证明是 guest 页面内部。
+
+    - 稳定浏览器：webview=1 + paneOpen=true + focus=true，且不在回前台排除窗口；
+      切换后 30 秒内的候选样本也会排除（有切换记录时）。
+    - 回前台窗口：focus=true 且 refocus.sinceVisibleMs 在 0–3000ms，不限浏览器。
+    - 无焦点：focus=false 且可见；不计入浏览器结论。检测到 guest 但文档无焦点
+      的样本单独提示，可能是 guest 抢焦点或窗口失焦。
+    - 旧样本没有 webview 字段时明示，不回退成 0。
+    - paneDiagOn 按每条样本自己的设置判断，最新样本关闭归因不会否定历史有效样本。
+    """
+    if not rows:
+        print(f"  {INFO} 无浏览器面板数据（空日志）")
+        return
+
+    newest = rows[-1]
+    latest = None
+    latest_older = False
+    saw_field = False
+    saw_null = False
+    for idx, r in enumerate(reversed(rows)):
+        if "webview" not in r:
+            continue
+        saw_field = True
+        if r.get("webview") is not None:
+            latest = r
+            latest_older = idx > 0
+            break
+        saw_null = True
+
+    if not saw_field:
+        print(f"  {INFO} 本版本未记录浏览器标记（v0.4.5 前的旧样本）")
+        return
+    if latest is None:
+        # 有字段但全是 null：最近样本暂停/自禁用/查询异常，别拿旧数据冒充当前。
+        print(f"  {INFO} 浏览器标记不可用"
+              + ("（最近样本为暂停/自禁用/查询异常）" if saw_null else ""))
+        return
+
+    def settings_of(r: dict) -> dict:
+        st = r.get("settings")
+        return st if isinstance(st, dict) else {}
+
+    def row_pane_off(r: dict) -> bool:
+        # v0.4.5 终审 P1：paneDiagOn 是逐样本设置。最新样本关闭归因，
+        # 不能否定更早那条样本自己记录的 paneOpen/refocus。
+        return settings_of(r).get("paneDiagOn") is False
+
+    newest_settings = settings_of(newest)
+    pane_diag_on = newest_settings.get("paneDiagOn")
+    if pane_diag_on is None:
+        pane_diag_on = settings_of(latest).get("paneDiagOn")
+
+    scoped = [r for r in rows
+              if "webview" in r and r.get("webview") in (0, 1)
+              and not r.get("hidden") and not r.get("miss")]
+
+    # 切换归因的 t 是 Date.now() 毫秒；样本 t 同域。旧样本/关闭切换归因时
+    # 没有可用切换时间，报告要明说无法排除切换后尖峰，不能默认干净。
+    # 按 win 分桶：多窗口汇总时，win-a 的切换不能把 win-b 的干净样本排除掉。
+    switch_times: dict[object, list[float]] = {}
+    for r in rows:
+        sw = r.get("switch")
+        items = sw.get("items") if isinstance(sw, dict) else None
+        if not isinstance(items, list):
+            continue
+        for it in items:
+            if isinstance(it, dict) and num(it.get("t")):
+                switch_times.setdefault(r.get("win"), []).append(it["t"])
+
+    def near_switch(r: dict, win_ms: int = 30000) -> bool:
+        t = r.get("t")
+        if not num(t):
+            return False
+        return any(0 <= t - st <= win_ms
+                   for st in switch_times.get(r.get("win"), ()))
+
+    def bucket() -> dict:
+        return {"n": 0, "p50": [], "p95": [], "lt": [], "laf": []}
+
+    def add(b: dict, r: dict) -> None:
+        b["n"] += 1
+        if num(r.get("frameP50")):
+            b["p50"].append(r["frameP50"])
+        if num(r.get("frameP95")):
+            b["p95"].append(r["frameP95"])
+        if num(r.get("longTasks")):
+            b["lt"].append(r["longTasks"])
+        laf = r.get("laf")
+        if isinstance(laf, dict) and num(laf.get("max")):
+            b["laf"].append(laf["max"])
+
+    stable = bucket()
+    refocus = bucket()
+    unfocused = bucket()
+    no_guest = 0
+    guest_no_pane = 0
+    pane_unknown = 0
+    focus_unknown = 0
+    browser_unfocused = 0
+    stable_switch_excluded = 0
+    refocus_unknown = 0
+    saw_guest = False
+    saw_guest_any = any(r.get("webview") == 1 for r in rows)
+    for r in scoped:
+        wv = r.get("webview")
+        focus = r.get("focus")
+        pane_open = r.get("paneOpen")
+        rf = r.get("refocus")
+        since = rf.get("sinceVisibleMs") if isinstance(rf, dict) else None
+        in_refocus = isinstance(rf, dict) and num(since) and 0 <= since <= REFOCUS_CLASSIFY_MS
+        pane_off = row_pane_off(r)
+
+        if wv == 1:
+            saw_guest = True
+        # 稳定组必须确认 sinceVisibleMs 是数字且已超过排除窗口；null 表示
+        # 启动/刚开归因/探针漏记，窗口不可判断，不能当成“不在回前台”。
+        if (wv == 1 and pane_open is True and focus is True and not pane_off):
+            if not num(since):
+                refocus_unknown += 1
+            elif since > REFOCUS_CLASSIFY_MS:
+                if near_switch(r):
+                    stable_switch_excluded += 1
+                else:
+                    add(stable, r)
+        if focus is True and in_refocus and not pane_off:
+            add(refocus, r)
+        if focus is False:
+            add(unfocused, r)
+        if wv == 0 and pane_open is True and not pane_off:
+            no_guest += 1
+        if wv == 1 and pane_open is False and not pane_off:
+            guest_no_pane += 1
+        if wv == 1 and pane_open is None and not pane_off:
+            pane_unknown += 1
+        if wv == 1 and focus is None:
+            focus_unknown += 1
+        if wv == 1 and pane_open is True and focus is False and not pane_off:
+            browser_unfocused += 1
+
+    print("  浏览器面板归因（只读）：焦点/选中的浏览器 guest 标记")
+    wins = []
+    for r in scoped:
+        w = r.get("win")
+        if w is not None and w not in wins:
+            wins.append(w)
+    scope_bits = [f"{len(scoped)} 条可见有效样本"]
+    if wins:
+        shown = ", ".join(str(w) for w in wins[:5])
+        more = f" 等 {len(wins)} 个" if len(wins) > 5 else ""
+        scope_bits.append(f"窗口 {shown}{more}")
+    if len(wins) > 1:
+        scope_bits.append("跨窗口汇总，中位数可能混合窗口")
+    print("    统计范围：" + "；".join(scope_bits))
+    if latest_older:
+        print(f"    {INFO} 最新样本为暂停/自禁用/查询异常；以下为历史有效样本汇总，不代表当前瞬间。")
+
+    def host_pair(b: dict) -> str:
+        p50 = round(pct(b["p50"], 0.5), 1) if b["p50"] else None
+        p95 = round(pct(b["p95"], 0.5), 1) if b["p95"] else None
+        return f"宿主帧 P50/P95 中位 {fmt(p50, 'ms')} / {fmt(p95, 'ms')}"
+
+    def frame_line(label: str, b: dict, include_laf: bool = True) -> str:
+        lt_med = pct(b["lt"], 0.5) if b["lt"] else None
+        lt_max = max(b["lt"]) if b["lt"] else None
+        laf_max = max(b["laf"]) if b["laf"] else None
+        parts = [f"{b['n']} 条样本", host_pair(b),
+                 f"长任务中位 {fmt(lt_med)} / 最多 {fmt(lt_max)}"]
+        # 宿主 LoAF 是 renderer 自身的 PerformanceObserver，不能标成 guest 页面帧。
+        if include_laf and laf_max is not None:
+            parts.append(f"宿主 LoAF 最长帧 {fmt(laf_max, 'ms')}")
+        return f"    {label}：" + "；".join(parts)
+
+    if stable["n"]:
+        print(frame_line("稳定浏览器", stable))
+        if pane_diag_on is False:
+            print(f"    {INFO} 最新样本的侧栏/回前台归因已关闭；"
+                  f"以上稳定样本来自更早的有效样本。")
+        if refocus_unknown:
+            print(f"    {INFO} 另有 {refocus_unknown} 条检测到选中的浏览器 guest，"
+                  f"但 refocus.sinceVisibleMs 缺失，回前台窗口不可判断，不进入稳定组。")
+        if switch_times:
+            if stable_switch_excluded:
+                print(f"    {INFO} 已排除同窗口切换后 30 秒内的 "
+                      f"{stable_switch_excluded} 条候选样本。")
+        else:
+            print(f"    {INFO} 未记录到切换时间（切换归因关闭或本文件无切换），"
+                  f"稳定组无法排除切换后尖峰。")
+        print(f"    {INFO} 帧 P50/P95 为最近 30 秒窗口，宿主 LoAF 为本采集周期值；"
+              f"稳定组只按采样时刻排除回前台 "
+              f"{REFOCUS_CLASSIFY_MS // 1000} 秒窗口，"
+              f"窗口内仍可能含更早的回前台/加载尖峰。")
+        p95 = round(pct(stable["p95"], 0.5), 1) if stable["p95"] else None
+        laf_max = max(stable["laf"]) if stable["laf"] else None
+        if num(p95) and num(laf_max):
+            if p95 <= 16 and laf_max >= 100:
+                print(f"    {INFO} 宿主 UI 帧平滑，但宿主主线程仍有 ≥100ms 长帧；"
+                      f"来源未分（guest 合成/宿主定时器/样式），不能据此认定是 guest 页面内部。")
+            elif p95 > 50 and laf_max >= 100:
+                print(f"    {INFO} 宿主也被拖慢，需继续分回前台/切换/浏览器面板；"
+                      f"本段不归因到 guest。")
+        if stable["n"] < 3:
+            print(f"    {INFO} 样本少于 3 条，结论仅供参考。")
+    else:
+        if pane_diag_on is False:
+            print(f"    {INFO} 最新样本的侧栏/回前台归因已关闭；"
+                  f"没有可用的历史稳定浏览器样本。")
+        elif focus_unknown:
+            print(f"    {INFO} 检测到选中的浏览器 guest，但焦点标记不可用："
+                  f"{focus_unknown} 条；不进入稳定浏览器组。")
+            if refocus_unknown:
+                print(f"    {INFO} 另有 {refocus_unknown} 条检测到选中的浏览器 guest，"
+                      f"但 refocus.sinceVisibleMs 缺失，回前台窗口不可判断，"
+                      f"也不进入稳定组。")
+        elif refocus_unknown:
+            print(f"    {INFO} 检测到选中的浏览器 guest，但 refocus.sinceVisibleMs "
+                  f"缺失：{refocus_unknown} 条；回前台窗口不可判断，"
+                  f"不进入稳定浏览器组。")
+        elif stable_switch_excluded:
+            print(f"    {WARN} 稳定浏览器：候选样本都在同窗口切换后 30 秒内，"
+                  f"已排除 {stable_switch_excluded} 条；请等切换后 30 秒再看。")
+        elif saw_guest:
+            print(f"    {WARN} 稳定浏览器：没有可用样本"
+                  f"（需要侧栏打开、有焦点，且不在回前台 "
+                  f"{REFOCUS_CLASSIFY_MS // 1000} 秒窗口）")
+        elif saw_guest_any:
+            print(f"    {INFO} 稳定浏览器：没有可见样本"
+                  f"（只在隐藏/丢锚点样本中检测到选中的浏览器 guest）")
+        else:
+            print(f"    {INFO} 稳定浏览器：没有可用样本"
+                  f"（可见样本中没有检测到选中的浏览器 guest；"
+                  f"预览/终端等普通面板也会如此）")
+
+    if refocus["n"]:
+        print(frame_line(f"回前台 {REFOCUS_CLASSIFY_MS // 1000} 秒（不限浏览器）",
+                         refocus, include_laf=False))
+    elif pane_diag_on is False:
+        print(f"    {INFO} 最新样本的侧栏/回前台归因已关闭，回前台窗口不可判断。")
+    elif refocus_unknown:
+        print(f"    {INFO} 部分样本的 refocus.sinceVisibleMs 缺失，"
+              f"回前台窗口不可判断。")
+    else:
+        print(f"    {INFO} 本文件没有样本落在回前台 "
+              f"{REFOCUS_CLASSIFY_MS // 1000} 秒窗口内。")
+    if unfocused["n"]:
+        print(f"    无焦点：{unfocused['n']} 条样本；{host_pair(unfocused)}；"
+              f"不计入浏览器性能结论")
+    if browser_unfocused:
+        print(f"    {INFO} 其中 {browser_unfocused} 条检测到选中的浏览器 guest "
+              f"但文档无焦点；可能 guest 抢焦点或窗口失焦，不计入稳定组。")
+    if no_guest:
+        if saw_guest_any:
+            print(f"    {INFO} 侧栏打开但没有选中的浏览器 guest：{no_guest} 条样本；"
+                  f"本文件其他样本曾检测到 guest，可能已关闭或切到其他面板。")
+        else:
+            print(f"    {INFO} 侧栏打开但没有选中的浏览器 guest：{no_guest} 条样本；"
+                  f"预览/终端等普通面板也会如此，不能据此说“没有卡顿”。")
+    if guest_no_pane:
+        print(f"    {INFO} 检测到选中的浏览器 guest，但侧栏标记为关闭：{guest_no_pane} 条样本")
+    if pane_unknown:
+        print(f"    {INFO} 检测到选中的浏览器 guest，但侧栏是否打开未知：{pane_unknown} 条样本")
 
 
 def print_laf_diag(rows: list[dict]) -> None:
@@ -1140,6 +1419,8 @@ def main() -> int:
     print_switch_page(rows)
     # v0.3.3：侧栏开合与回前台同样独立，面板常开但 0 提交的样本也要纳入。
     print_pane_diag(rows)
+    # v0.4.5：浏览器面板/焦点归因（只读；与侧栏段分开，避免把回前台当浏览器常开）。
+    print_browser_diag(rows)
     # v0.3.4：卡顿来源定位与翻页降频计数同样独立于 active 判断。
     print_laf_diag(rows)
     # v0.4.0：第三方定时器的长回调归因（默认关闭的实验）。
@@ -1225,7 +1506,7 @@ def main() -> int:
     print("  · 真实帧间隔 P95 > 50ms 或 单帧最长 > 200ms  → 用户能感知到卡")
     print("  · 长任务次数 > 0 → 主线程被单次阻塞，与卡顿直接相关")
     print("  · 投影提交率高但帧间隔正常 → 宿主在勤快重渲染，暂未卡死")
-    print("[lagfix] v0.4.4：新增「切换后大页补页 · 实验」（默认关闭）——真实会话切换后的 30 秒内，每次自动补历史从 60 行提到 120 行，减少来回次数；超过 3000 行或 30 秒后自动回到 60 行，不跳过、不合并、不改会话数据。切换记录新增实际补页行数，用于按每 1000 行归一化对比；报告新增该实验的生效/原样计数。v0.4.3：新增「切换会话归因」（只读、默认开）——每次切换记一条：切换后 2 秒的帧切片、30 秒内的长帧与补页次数，以及切换前后的 DOM/回合对比，用来回答「切换后卡了多久、之后补了多少历史」；不改切换行为。修复「大会话翻页降频」在 ZCode 3.18.2 上永不生效的触发判定（改为距最近一次时间线滚动 2 秒内才计时，首调与挂载 5 秒内一律放行以保护宿主的冷快照补拉），并增加全天累计计数；补页批量（O8b）退役，旧日志里的历史计数仍显示并标注已退役。默认开关与 v0.4.2 一致，仅新增只读的 switchDiagOn。v0.4.2：修正观测口径与包装器生命周期——帧统计按最近 30 秒窗口计算并区分「窗口最长 / 历史最长」；宿主运行期替换订阅或全量补拉实现时不再误覆盖，定时器归因失配时如实标记「计数不可用」；报告对关闭态、明细代际和异常时间戳做了一致性处理。没有新增缓解项，默认开关与 v0.4.1 一致。v0.4.1：角标「有新版本」红点移到设置齿轮右上角，像未读提醒一样贴在按钮角上，不占文字空间、不挡点击；显示条件与检查逻辑不变。v0.4.0：新增「第三方定时器归因 · 实验」（默认关闭）——只记录单次运行超过 50ms 的定时任务：耗时、原定间隔、回调名和调用点（只留文件名与行号），用来判断卡顿是否来自外部插件的定时刷新；不改定时器时机，不读任务参数或对话内容。补页批量改为自适应（v0.4.3 已退役）：已显示超过 3000 行时每页最多 120 行，连续快速上翻（间隔不到 600ms）自动回到 60 行，不跳过、不删除、不改消息顺序。v0.3.10：修复更新红点实际不可见。v0.3.9：设置面板保持滚动位置、打开时接管键盘焦点并在关闭后归还；修复宿主替换 subscribe 时被误覆盖的风险。v0.3.8：日志清理加固——只删白名单内的旧日志，校验真实日期、目录类型、普通文件非链接与 10 分钟最小年龄；宁可超预算也不误删。v0.3.7 起支持小红点与可选自动检查更新（默认关闭、24 小时内最多一次，只请求公开 GitHub Releases）。仍不读消息正文、不写 store；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
+    print("[lagfix] v0.4.5：新增「浏览器面板与回前台归因」（只读）——样本记录窗口是否有前台焦点、当前选中的浏览器标签页里是否有 guest，报告把稳定浏览器、回前台 3 秒、无焦点分开，并并列宿主帧与宿主 LoAF，避免把回前台/加载尖峰误判成浏览器常开，也不把宿主长帧冒充 guest 页面内部；不新增开关、不改任何行为。v0.4.4：新增「切换后大页补页 · 实验」（默认关闭）——真实会话切换后的 30 秒内，每次自动补历史从 60 行提到 120 行，减少来回次数；超过 3000 行或 30 秒后自动回到 60 行，不跳过、不合并、不改会话数据。切换记录新增实际补页行数，用于按每 1000 行归一化对比；报告新增该实验的生效/原样计数。v0.4.3：新增「切换会话归因」（只读、默认开）——每次切换记一条：切换后 2 秒的帧切片、30 秒内的长帧与补页次数，以及切换前后的 DOM/回合对比，用来回答「切换后卡了多久、之后补了多少历史」；不改切换行为。修复「大会话翻页降频」在 ZCode 3.18.2 上永不生效的触发判定（改为距最近一次时间线滚动 2 秒内才计时，首调与挂载 5 秒内一律放行以保护宿主的冷快照补拉），并增加全天累计计数；补页批量（O8b）退役，旧日志里的历史计数仍显示并标注已退役。默认开关与 v0.4.2 一致，仅新增只读的 switchDiagOn。v0.4.2：修正观测口径与包装器生命周期——帧统计按最近 30 秒窗口计算并区分「窗口最长 / 历史最长」；宿主运行期替换订阅或全量补拉实现时不再误覆盖，定时器归因失配时如实标记「计数不可用」；报告对关闭态、明细代际和异常时间戳做了一致性处理。没有新增缓解项，默认开关与 v0.4.1 一致。v0.4.1：角标「有新版本」红点移到设置齿轮右上角，像未读提醒一样贴在按钮角上，不占文字空间、不挡点击；显示条件与检查逻辑不变。v0.4.0：新增「第三方定时器归因 · 实验」（默认关闭）——只记录单次运行超过 50ms 的定时任务：耗时、原定间隔、回调名和调用点（只留文件名与行号），用来判断卡顿是否来自外部插件的定时刷新；不改定时器时机，不读任务参数或对话内容。补页批量改为自适应（v0.4.3 已退役）：已显示超过 3000 行时每页最多 120 行，连续快速上翻（间隔不到 600ms）自动回到 60 行，不跳过、不删除、不改消息顺序。v0.3.10：修复更新红点实际不可见。v0.3.9：设置面板保持滚动位置、打开时接管键盘焦点并在关闭后归还；修复宿主替换 subscribe 时被误覆盖的风险。v0.3.8：日志清理加固——只删白名单内的旧日志，校验真实日期、目录类型、普通文件非链接与 10 分钟最小年龄；宁可超预算也不误删。v0.3.7 起支持小红点与可选自动检查更新（默认关闭、24 小时内最多一次，只请求公开 GitHub Releases）。仍不读消息正文、不写 store；角标常驻，Ctrl+Alt+L 或 __lagfixSettings() 随时打开设置。")
     print()
     print_logs()
     return 0
