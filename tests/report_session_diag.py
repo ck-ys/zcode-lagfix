@@ -48,6 +48,13 @@ def run_pane(rows: list[dict]) -> str:
     return buf.getvalue()
 
 
+def run_browser(rows: list[dict]) -> str:
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        lr.print_browser_diag(rows)
+    return buf.getvalue()
+
+
 def run_scroll(rows: list[dict]) -> str:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -138,7 +145,8 @@ def main() -> int:
     print("-- v0.3.3 侧栏开合 / 回前台 --")
     pane_closed = {
         "settings": {"paneDiagOn": True},
-        "frameP95": 40, "longTasks": 2, "dom": 1000, "hidden": False, "miss": False,
+        "frameP50": 30, "frameP95": 40, "longTasks": 2, "dom": 1000,
+        "hidden": False, "miss": False,
         "pane": {"detected": True, "open": False, "panelPx": 0, "switches": 1,
                  "switchP95": 60, "switchMax": 90, "guardHits": 1},
         "refocus": {"hiddenMs": None, "sinceVisibleMs": None, "p95": None,
@@ -146,7 +154,8 @@ def main() -> int:
     }
     pane_open = {
         "settings": {"paneDiagOn": True},
-        "frameP95": 120, "longTasks": 20, "dom": 5000, "hidden": False, "miss": False,
+        "frameP50": 60, "frameP95": 120, "longTasks": 20, "dom": 5000,
+        "hidden": False, "miss": False,
         "pane": {"detected": True, "open": True, "panelPx": 720, "switches": 3,
                  "switchP95": 84, "switchMax": 190, "guardHits": 3},
         "refocus": {"hiddenMs": 8200, "sinceVisibleMs": 240, "p95": 96,
@@ -161,9 +170,44 @@ def main() -> int:
           and "closed 样本 1 条：帧 P95 中位 40" in out, out)
     check("open/closed 分组长任务与 DOM",
           "长任务中位 20" in out and "DOM 中位 5000" in out)
+    check("open/closed 分组并列 P50 中位",
+          "P50 中位 60ms" in out and "P50 中位 30ms" in out, out)
     check("回前台 hiddenMs/p95/max/flushes",
           "上次后台 8200ms" in out and "帧 P95=96ms" in out
           and "合并补发 2 个" in out, out)
+
+    pane_no_p50 = {
+        "settings": {"paneDiagOn": True},
+        "frameP95": 40, "longTasks": 1, "dom": 100, "hidden": False, "miss": False,
+        "pane": {"detected": True, "open": False, "panelPx": 0, "switches": 1,
+                 "switchP95": 50, "switchMax": 60, "guardHits": 1},
+        "refocus": {"hiddenMs": None, "sinceVisibleMs": None, "p95": None,
+                    "max": None, "flushes": 0, "guardHits": 0},
+    }
+    out = run_pane([pane_no_p50])
+    check("旧样本缺 frameP50 时显示 -", "P50 中位 -" in out, out)
+
+    pane_p50_only = {
+        "settings": {"paneDiagOn": True},
+        "frameP50": 25, "frameP95": 40, "longTasks": 1, "dom": 100,
+        "hidden": False, "miss": False,
+        "pane": {"detected": True, "open": True, "panelPx": 600,
+                 "switches": 1, "switchP95": 50, "switchMax": 60, "guardHits": 1},
+        "refocus": {"hiddenMs": None, "sinceVisibleMs": None, "p95": None,
+                    "max": None, "flushes": 0, "guardHits": 0},
+    }
+    pane_p95_only = {
+        "settings": {"paneDiagOn": True},
+        "frameP95": 60, "longTasks": 2, "dom": 200,
+        "hidden": False, "miss": False,
+        "pane": {"detected": True, "open": True, "panelPx": 600,
+                 "switches": 1, "switchP95": 50, "switchMax": 60, "guardHits": 1},
+        "refocus": {"hiddenMs": None, "sinceVisibleMs": None, "p95": None,
+                    "max": None, "flushes": 0, "guardHits": 0},
+    }
+    out = run_pane([pane_p50_only, pane_p95_only])
+    check("P50 只覆盖部分样本时样本数仍按全部行计",
+          "open 样本 2 条" in out and "P50 中位 25ms" in out, out)
 
     missing = {"settings": {"paneDiagOn": True},
                "pane": {"detected": False, "open": False, "panelPx": None,
@@ -195,6 +239,208 @@ def main() -> int:
           "无侧栏 + 回前台归因数据" in out, out)
     out = run_pane([])
     check("空 rows 不崩", "无侧栏 + 回前台归因数据" in out, out)
+
+    print("-- v0.4.5 浏览器面板与焦点归因 --")
+    def browser_row(p50, p95, lt, laf_max, focus=True, webview=1,
+                    pane_open=True, hidden=False, since=None, t=None,
+                    switch_items=None):
+        row = {
+            "settings": {"paneDiagOn": True},
+            "frameP50": p50, "frameP95": p95, "longTasks": lt,
+            "laf": {"supported": 1, "count": 1, "max": laf_max},
+            "focus": focus, "webview": webview,
+            "paneOpen": pane_open, "hidden": hidden, "miss": False,
+            "refocus": {"hiddenMs": 0, "sinceVisibleMs": since, "p95": None,
+                        "max": None, "flushes": 0, "guardHits": 0},
+        }
+        if t is not None:
+            row["t"] = t
+        if switch_items is not None:
+            row["switch"] = {"on": 1, "items": switch_items}
+        return row
+
+    stable_rows = [
+        browser_row(6, 6, 8, 337, since=5000),
+        browser_row(6, 12, 36, 200, since=5000),
+        browser_row(8, 18, 10, 150, since=5000),
+    ]
+    refocus_row = browser_row(80, 232, 30, 300, since=115)
+    unfocused_row = browser_row(120, 200, 20, 250, focus=False, since=None)
+    no_guest_row = browser_row(40, 60, 5, 120, webview=0, since=5000)
+    guest_closed_row = browser_row(30, 30, 3, 100, pane_open=False, since=5000)
+    out = run_browser(stable_rows + [refocus_row, unfocused_row,
+                                     no_guest_row, guest_closed_row])
+    check("稳定浏览器组要求 webview+paneOpen+focus，排除回前台窗口",
+          "稳定浏览器：3 条样本" in out, out)
+    check("稳定浏览器并列宿主 P50/P95、长任务与宿主 LoAF",
+          "宿主帧 P50/P95 中位 6ms / 12ms" in out
+          and "长任务中位 10 / 最多 36" in out
+          and "宿主 LoAF 最长帧 337ms" in out, out)
+    check("宿主平滑 + LoAF 高时不把长帧归因到 guest 内部",
+          "宿主主线程仍有 ≥100ms 长帧" in out
+          and "不能据此认定是 guest 页面内部" in out, out)
+    check("回前台 3 秒单独分组，不混入稳定浏览器",
+          "回前台 3 秒（不限浏览器）：1 条样本" in out
+          and "232ms" in out, out)
+    check("无焦点样本单独显示且不计入浏览器结论",
+          "无焦点：1 条样本" in out and "不计入浏览器性能结论" in out, out)
+    check("检测到 guest 但文档无焦点时单独说明可能抢焦点",
+          "检测到选中的浏览器 guest 但文档无焦点" in out
+          and "可能 guest 抢焦点或窗口失焦" in out, out)
+    check("侧栏开但没有选中的浏览器 guest 时中性说明",
+          "侧栏打开但没有选中的浏览器 guest：1 条样本" in out
+          and "本文件其他样本曾检测到 guest" in out, out)
+    check("检测到 guest 但侧栏标记关闭时单独提示",
+          "侧栏标记为关闭：1 条样本" in out, out)
+
+    # 拍板页证据里的 12:16:02 尖峰出现在回前台后 2375ms；2 秒窗口会漏掉它。
+    refocus_2375 = browser_row(70, 267, 25, 250, since=2375)
+    out = run_browser([refocus_2375])
+    check("2375ms 的回前台尖峰归入回前台窗口，不污染稳定组",
+          "回前台 3 秒（不限浏览器）：1 条样本" in out
+          and "267ms" in out
+          and "稳定浏览器：1 条样本" not in out, out)
+    stable_3001 = browser_row(6, 6, 2, 120, since=3001)
+    out = run_browser([stable_3001])
+    check("超过 3 秒后恢复正常稳定浏览器分组",
+          "稳定浏览器：1 条样本" in out
+          and "本文件没有样本落在回前台 3 秒窗口内" in out, out)
+
+    # 启动/刚开归因时 sinceVisibleMs=null，回前台窗口不可判断；不能当成
+    # “不在回前台”而塞进稳定组。
+    refocus_unknown_row = browser_row(6, 6, 2, 120, since=None)
+    out = run_browser([refocus_unknown_row])
+    check("sinceVisibleMs=null 时不进入稳定浏览器组",
+          "稳定浏览器：1 条样本" not in out
+          and "refocus.sinceVisibleMs 缺失" in out
+          and "回前台窗口不可判断" in out, out)
+    out = run_browser([stable_3001, refocus_unknown_row])
+    check("稳定组有数据时单独说明多少条因回前台窗口不可判断被排除",
+          "稳定浏览器：1 条样本" in out
+          and "另有 1 条检测到选中的浏览器 guest" in out
+          and "回前台窗口不可判断" in out, out)
+
+    pane_off = browser_row(6, 6, 2, 120, since=None)
+    pane_off["settings"] = {"paneDiagOn": False}
+    pane_off["refocus"] = None
+    pane_off["paneOpen"] = None
+    out = run_browser([pane_off])
+    check("侧栏归因关闭时不把样本算进稳定浏览器，并说明回前台窗口不可判断",
+          "最新样本的侧栏/回前台归因已关闭" in out
+          and "回前台窗口不可判断" in out
+          and "稳定浏览器：1 条样本" not in out, out)
+
+    # v0.4.5 终审 P1：paneDiagOn 是逐样本设置。历史样本有效、最新样本
+    # 因 __lagfixOff/关开关而为 false 时，历史稳定样本必须保留，不能被全局丢弃。
+    pane_latest_off = browser_row(6, 6, 2, 120, since=None)
+    pane_latest_off["settings"] = {"paneDiagOn": False}
+    pane_latest_off["refocus"] = None
+    pane_latest_off["paneOpen"] = None
+    out = run_browser([browser_row(6, 6, 2, 120, since=5000),
+                       pane_latest_off])
+    check("最新样本关闭归因不丢弃更早的稳定浏览器样本",
+          "稳定浏览器：1 条样本" in out
+          and "以上稳定样本来自更早的有效样本" in out, out)
+    check("最新样本关闭归因时不输出矛盾的侧栏计数",
+          "侧栏打开但没有选中的浏览器 guest" not in out
+          and "侧栏是否打开未知" not in out, out)
+
+    pane_unknown = browser_row(6, 6, 2, 120, since=5000)
+    pane_unknown["paneOpen"] = None
+    out = run_browser([pane_unknown])
+    check("侧栏标记不可用时单独提示，不伪装成侧栏关闭",
+          "侧栏是否打开未知：1 条样本" in out
+          and "侧栏标记为关闭" not in out, out)
+
+    slow_stable = [browser_row(120, 180, 30, 300, since=5000) for _ in range(3)]
+    out = run_browser(slow_stable)
+    check("宿主 P95 超 50ms 时给出宿主也被拖慢的结论",
+          "宿主也被拖慢" in out and "本段不归因到 guest" in out, out)
+    out = run_browser([browser_row(6, 6, 2, 120, since=5000)])
+    check("稳定浏览器样本少于 3 条时标注结论仅供参考",
+          "样本少于 3 条，结论仅供参考" in out, out)
+
+    no_laf = browser_row(6, 6, 2, 0, since=5000)
+    no_laf.pop("laf")
+    out = run_browser([no_laf])
+    check("LoAF 缺失时不输出宿主 LoAF 指标",
+          "宿主 LoAF 最长帧" not in out, out)
+
+    only_refocus = browser_row(80, 232, 30, 300, since=115)
+    out = run_browser([only_refocus])
+    check("回前台分组不输出宿主 LoAF（spec 只把 LoAF 归稳定组）",
+          "回前台 3 秒（不限浏览器）：1 条样本" in out
+          and "宿主 LoAF 最长帧" not in out, out)
+
+    win_a = browser_row(6, 6, 2, 120, since=5000)
+    win_b = browser_row(8, 8, 3, 130, since=5000)
+    win_a["win"], win_b["win"] = "win-a", "win-b"
+    out = run_browser([win_a, win_b])
+    check("多窗口样本明确标注跨窗口汇总",
+          "窗口 win-a, win-b" in out and "跨窗口汇总" in out, out)
+
+    out = run_browser([{"frameP95": 30, "longTasks": 0}])
+    check("旧样本无 webview 字段时明确提示",
+          "本版本未记录浏览器标记（v0.4.5 前的旧样本）" in out, out)
+    out = run_browser([{"webview": None, "focus": None}])
+    check("有字段但全为 null 时提示标记不可用",
+          "浏览器标记不可用" in out, out)
+    out = run_browser([no_guest_row])
+    check("没有稳定浏览器样本时说明可见样本里没有选中的 guest",
+          "可见样本中没有检测到选中的浏览器 guest" in out, out)
+    check("从未出现 guest 时按普通面板说明，不吓成宿主结构变化",
+          "预览/终端等普通面板也会如此" in out
+          and "不能据此说“没有卡顿”" in out
+          and "可能已卸载" not in out, out)
+
+    hidden_guest = browser_row(6, 6, 2, 120, hidden=True, since=5000)
+    out = run_browser([hidden_guest])
+    check("只在隐藏样本检测到 guest 时不谎称整个文件没有 guest",
+          "只在隐藏/丢锚点样本中检测到选中的浏览器 guest" in out
+          and "本文件没有检测到" not in out, out)
+
+    # 切换后 30 秒内的候选样本排除；30 秒后仍可进入稳定组。
+    switch_t = 1_760_000_000_000
+    switch_item = {"t": switch_t, "from": "aaa", "to": "bbb"}
+    near = browser_row(6, 6, 2, 120, since=5000, t=switch_t + 5000,
+                       switch_items=[switch_item])
+    far = browser_row(6, 6, 2, 120, since=5000, t=switch_t + 31000,
+                      switch_items=[])
+    out = run_browser([near, far])
+    check("稳定浏览器排除切换后 30 秒内的候选样本",
+          "已排除同窗口切换后 30 秒内的 1 条候选样本" in out
+          and "稳定浏览器：1 条样本" in out, out)
+
+    # v0.4.5 终审 P2：切换时间必须按窗口隔离。win-a 的切换不能把
+    # win-b 同一时刻的干净样本排除掉。
+    win_a_near = browser_row(6, 6, 2, 120, since=5000, t=switch_t + 5000,
+                             switch_items=[switch_item])
+    win_a_near["win"] = "win-a"
+    win_b_clean = browser_row(8, 8, 3, 130, since=5000, t=switch_t + 5000)
+    win_b_clean["win"] = "win-b"
+    out = run_browser([win_a_near, win_b_clean])
+    check("切换排除按窗口隔离，不误伤其他窗口的干净样本",
+          "稳定浏览器：1 条样本" in out
+          and "已排除同窗口切换后 30 秒内的 1 条候选样本" in out, out)
+
+    all_excluded = browser_row(6, 6, 2, 120, since=5000, t=switch_t + 5000,
+                               switch_items=[switch_item])
+    out = run_browser([all_excluded])
+    check("候选全被切换窗口排除时说明真实原因",
+          "候选样本都在同窗口切换后 30 秒内" in out
+          and "请等切换后 30 秒再看" in out
+          and "需要侧栏打开、有焦点" not in out, out)
+
+    out = run_browser([browser_row(6, 6, 2, 120, since=5000)])
+    check("没有切换时间时明说无法排除切换后尖峰",
+          "未记录到切换时间" in out and "无法排除切换后尖峰" in out, out)
+
+    check("稳定浏览器提示帧窗口与回前台窗口不完全重合",
+          "帧 P50/P95 为最近 30 秒窗口" in out
+          and "窗口内仍可能含更早的回前台/加载尖峰" in out, out)
+
+    out = run_browser([])
+    check("空 rows 不崩", "无浏览器面板数据" in out, out)
 
     bucket_rows = []
     for ms in (500, 5000, 30000, 90000):
@@ -893,8 +1139,8 @@ def main() -> int:
         out = buf.getvalue()
         check("旧样本帧汇总标注历史值",
               "单帧最长（旧样本为历史值）：640ms" in out, out)
-        check("报告版本摘要更新为 v0.4.4",
-              "[lagfix] v0.4.4" in out and "切换后大页补页" in out, out)
+        check("报告版本摘要更新为 v0.4.5",
+              "[lagfix] v0.4.5" in out and "浏览器面板与回前台归因" in out, out)
 
     print("== report_session_diag 结果：", "PASS" if ok else "FAIL", "==")
     return 0 if ok else 1
